@@ -21,6 +21,27 @@ export function zcodeMarketplaceRoot(): string { return join(zcodeCliRoot(), 'pl
 export function zcodeResourceRoot(): string { return join(zcodeCliRoot(), 'plgnz-resources'); }
 export function zcodeCliBinary(): string | undefined { return process.env['OPEN_PLUGIN_ZCODE_CLI_BIN']; }
 
+/**
+ * Candidate official CLI executables, most authoritative first. An explicit
+ * `OPEN_PLUGIN_ZCODE_CLI_BIN` override is exclusive — candidates stop at it so
+ * isolated roots and tests never reach a real desktop bundle. Without an
+ * override the desktop app's bundled official CLI is probed: it reports the
+ * same official identity (`doctor --json` → zcode/zcode-cli, bare-semver
+ * `--version`, executable node shebang) and shares the `~/.zcode/cli` store
+ * (evidence 2026-10-07). An isolated `OPEN_PLUGIN_HOME` never falls through to
+ * a system-wide bundle.
+ */
+export function zcodeCliBinaryCandidates(env: Record<string, string | undefined> = process.env): string[] {
+  const override = env['OPEN_PLUGIN_ZCODE_CLI_BIN'];
+  if (override !== undefined && override.length > 0) return [override];
+  const homeBundle = join(homeRoot(), 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
+  const systemBundle = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+  const isolatedHome = process.env['OPEN_PLUGIN_HOME'];
+  if (process.platform !== 'darwin') return [];
+  if (isolatedHome !== undefined && isolatedHome.length > 0) return [homeBundle];
+  return [homeBundle, systemBundle].filter((path, index, all) => all.indexOf(path) === index);
+}
+
 /** Official CLI gets its storage parent through this supported test override. */
 export function zcodeCliEnv(): Record<string, string | undefined> {
   // Never inherit a caller's real HOME/storage into tests or an explicit root.
@@ -66,10 +87,9 @@ export function readZcodeOwnership(root: string): Ownership | null {
   } catch { return null; }
 }
 
-/** Detection requires an explicit terminal CLI binary and official doctor shape. */
-export function isOfficialZcodeCli(): boolean {
-  const binary = zcodeCliBinary();
-  if (binary === undefined || !existsSync(binary)) return false;
+/** Detection requires an official terminal CLI binary and official doctor shape. */
+function isOfficialZcodeCliBinary(binary: string): boolean {
+  if (!existsSync(binary)) return false;
   try {
     const versionResult = Bun.spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
     if (versionResult.exitCode !== 0 || !(versionResult.stdout instanceof Uint8Array)) return false;
@@ -85,9 +105,18 @@ export function isOfficialZcodeCli(): boolean {
   } catch { return false; }
 }
 
+/** The first candidate that exists and passes the official-identity gate. */
+export function resolveOfficialZcodeCli(): string | undefined {
+  return zcodeCliBinaryCandidates().find((binary) => isOfficialZcodeCliBinary(binary));
+}
+
+export function isOfficialZcodeCli(): boolean {
+  return resolveOfficialZcodeCli() !== undefined;
+}
+
 export function runOfficialZcode(args: string[]): string {
-  const binary = zcodeCliBinary();
-  if (binary === undefined || !isOfficialZcodeCli()) throw new Error('Official ZCode CLI required: set OPEN_PLUGIN_ZCODE_CLI_BIN to a binary whose doctor --json reports zcode/zcode-cli');
+  const binary = resolveOfficialZcodeCli();
+  if (binary === undefined) throw new Error('Official ZCode CLI required: set OPEN_PLUGIN_ZCODE_CLI_BIN to a binary whose doctor --json reports zcode/zcode-cli, or install the ZCode desktop app (its bundled CLI is probed automatically on darwin)');
   const result = Bun.spawnSync([binary, ...args], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 30_000 });
   const stdout = result.stdout instanceof Uint8Array ? new TextDecoder().decode(result.stdout) : '';
   const stderr = result.stderr instanceof Uint8Array ? new TextDecoder().decode(result.stderr) : '';

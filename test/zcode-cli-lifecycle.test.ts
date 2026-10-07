@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runDoctor } from '../src/doctor';
-import { zcodeCli } from '../src/hosts/zcode-cli';
+import { resolveOfficialZcodeCli, zcodeCli, zcodeCliBinaryCandidates } from '../src/hosts/zcode-cli';
 
 function withZcode(fn: (home: string, cliRoot: string, binary: string) => void): void {
   const home = mkdtempSync(join(tmpdir(), 'plgnz-zcode-reader-'));
@@ -93,6 +93,33 @@ describe('official ZCode CLI reader lifecycle', () => {
       let failure: Error | undefined;
       try { zcodeCli.listInstalled(); } catch (error) { failure = error as Error; }
       expect(failure?.message).toMatch(/ambiguous/i);
+    });
+  });
+});
+
+describe('official ZCode CLI default detection', () => {
+  test('an explicit OPEN_PLUGIN_ZCODE_CLI_BIN override is exclusive: no fallback candidates', () => {
+    withZcode((_home, _cliRoot, binary) => {
+      fakeBinary(binary, '0.16.9');
+      expect(zcodeCliBinaryCandidates()).toEqual([binary]);
+    });
+  });
+
+  test('without an override, the desktop-bundled CLI under an isolated home is detected', () => {
+    withZcode((home, _cliRoot, _binary) => {
+      delete process.env.OPEN_PLUGIN_ZCODE_CLI_BIN;
+      const bundle = join(home, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
+      mkdirSync(dirname(bundle), { recursive: true });
+      fakeBinary(bundle, '0.16.9');
+      expect(resolveOfficialZcodeCli()).toBe(bundle);
+      expect(zcodeCli.detect()).toBe(true);
+    });
+  });
+
+  test('an isolated home never falls through to the system-wide desktop bundle', () => {
+    withZcode((home, _cliRoot, _binary) => {
+      delete process.env.OPEN_PLUGIN_ZCODE_CLI_BIN;
+      expect(zcodeCliBinaryCandidates()).toEqual([join(home, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs')]);
     });
   });
 });
