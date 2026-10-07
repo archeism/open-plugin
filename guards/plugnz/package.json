@@ -1,0 +1,7 @@
+{
+  "name": "plugnz",
+  "version": "0.0.1",
+  "description": "Name guard for plgnz, the open-source agent-plugin installer and doctor — install plgnz instead.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/archeism/plgnz.git" }
+}

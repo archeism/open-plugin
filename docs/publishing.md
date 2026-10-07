@@ -7,3 +7,14 @@ The workflow uses GitHub's OIDC identity; no npm token or repository secret is n
 For each release, bump `package.json` to the next `0.0.x` patch version, run the local tests and checks, and inspect `npm pack --dry-run --ignore-scripts`. Push the reviewed change to `main`, then manually run **Publish to npm** from GitHub Actions on `main` with that exact version. The workflow checks the version and branch before publishing. Running it is the separate authorization to release; adding this workflow does not publish anything.
 
 The published CLI currently requires Bun on the user's PATH. This workflow packages the existing source and does not build a standalone Node executable.
+
+## Name guards (plugnz, pluginz)
+
+`guards/plugnz` and `guards/pluginz` are placeholder packages that only exist
+to hold the near-miss spellings of `plgnz` on npm; their READMEs redirect to
+the real package. Before the first run of **Publish name guards**
+(`.github/workflows/publish-guards.yml`), add a Trusted Publishing entry on
+npmjs.com for each name — repository owner `archeism`, repository name
+`plgnz`, workflow filename `publish-guards.yml`, no environment. Running the
+workflow is the release authorization, exactly like the main package: it
+publishes both guards from `main` and nothing else.

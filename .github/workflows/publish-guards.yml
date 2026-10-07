@@ -1,0 +1,46 @@
+name: Publish name guards
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Verify guards on main
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          if (process.env.GITHUB_REF !== 'refs/heads/main') {
+            console.error('Guard publishes require main.');
+            process.exit(1);
+          }
+          for (const name of ['plugnz', 'pluginz']) {
+            const pkg = JSON.parse(readFileSync(`guards/${name}/package.json`, 'utf8'));
+            if (pkg.name !== name || pkg.version !== '0.0.1' || !pkg.description.includes('plgnz')) {
+              console.error(`guards/${name} changed shape; update this workflow deliberately.`);
+              process.exit(1);
+            }
+          }
+          NODE
+      - name: Install npm with Trusted Publishing support
+        run: npm install --global npm@11.14.1
+      - name: Publish plugnz guard
+        working-directory: guards/plugnz
+        run: npm publish --access public --ignore-scripts
+      - name: Publish pluginz guard
+        working-directory: guards/pluginz
+        run: npm publish --access public --ignore-scripts
