@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { grok } from '../src/hosts/grok';
@@ -94,14 +94,57 @@ describe('Grok Build native marketplace lifecycle', () => {
       await grokWriter.add(plugin, resolved);
       const active = join(home, '.grok', 'installed-plugins', 'demo-native');
       expect(grok.listInstalled().map(value => value.id)).toEqual(['demo@catalog']);
+      expect(readlinkSync(join(home, '.grok', 'plugins', 'demo'))).toBe(active);
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('one\n');
       expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
       writeFileSync(join(plugin.dir, 'resources/value.txt'), 'two\n'); plugin.contentFingerprint = resolveSource(resolved.sourceUri).plugins[0]!.contentFingerprint;
       await grokWriter.add(plugin, resolved);
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('two\n');
       await grokWriter.remove('demo@catalog');
+      let linkRemains = false;
+      try { lstatSync(join(home, '.grok', 'plugins', 'demo')); linkRemains = true; } catch { /* Missing, including no dangling link. */ }
+      expect(linkRemains).toBe(false);
       expect(grok.listInstalled()).toEqual([]);
       expect(existsSync(join(home, '.grok', 'plgnz-marketplaces'))).toBe(true);
+    });
+  });
+
+  test('refuses foreign activation directories and dangling links without changing them', async () => {
+    await isolated(async ({ home, plugin, resolved }) => {
+      const link = join(home, '.grok', 'plugins', 'demo');
+      writeFiles(link, { 'keep.txt': 'foreign' });
+      expect((await failure(() => grokWriter.add(plugin, resolved))).message).toContain('activation path');
+      expect(readFileSync(join(link, 'keep.txt'), 'utf8')).toBe('foreign');
+      rmSync(link, { recursive: true });
+      symlinkSync('/missing/foreign-plugin', link);
+      expect((await failure(() => grokWriter.add(plugin, resolved))).message).toContain('activation path');
+      expect(readlinkSync(link)).toBe('/missing/foreign-plugin');
+      expect(grok.listInstalled()).toEqual([]);
+    });
+  });
+
+  test('repairs missing native activation on an otherwise unchanged installation', async () => {
+    await isolated(async ({ home, plugin, resolved }) => {
+      await grokWriter.add(plugin, resolved);
+      const link = join(home, '.grok', 'plugins', 'demo');
+      rmSync(link);
+      expect(await grokWriter.add(plugin, resolved, { dryRun: true })).toBeUndefined();
+      expect(existsSync(link)).toBe(false);
+      await grokWriter.add(plugin, resolved);
+      expect(readlinkSync(link)).toBe(join(home, '.grok', 'installed-plugins', 'demo-native'));
+      expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
+    });
+  });
+
+  test('refuses removal when the activation link was replaced by a foreign directory', async () => {
+    await isolated(async ({ home, plugin, resolved }) => {
+      await grokWriter.add(plugin, resolved);
+      const link = join(home, '.grok', 'plugins', 'demo');
+      rmSync(link);
+      writeFiles(link, { 'keep.txt': 'foreign' });
+      expect((await failure(() => grokWriter.remove('demo@catalog'))).message).toContain('activation path');
+      expect(readFileSync(join(link, 'keep.txt'), 'utf8')).toBe('foreign');
+      expect(grok.listInstalled()).toHaveLength(1);
     });
   });
 
