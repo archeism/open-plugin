@@ -65,6 +65,23 @@ async function isolated(run: (value: Fixture) => Promise<void>): Promise<void> {
 async function failure(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected operation to fail'); }
 
 describe('Grok Build native marketplace lifecycle', () => {
+  test('accepts equivalent MCP servers despite schema metadata and key order, but rejects actual conflicts', async () => {
+    await isolated(async ({ plugin, resolved }) => {
+      writeFiles(plugin.dir, {
+        'mcp.json': JSON.stringify({ $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json', mcpServers: { vercel: { type: 'http', url: 'https://mcp.vercel.com' } } }),
+        '.mcp.json': JSON.stringify({ mcpServers: { vercel: { url: 'https://mcp.vercel.com', type: 'http' } } }),
+      });
+      await grokWriter.add(plugin, resolved);
+      expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
+      writeFiles(plugin.dir, { 'mcp.json': JSON.stringify({ mcpServers: { vercel: { type: 'http', url: 'https://different.invalid' } } }) });
+      expect((await failure(() => grokWriter.add(plugin, resolved))).message).toContain('conflicting Grok MCP');
+      writeFiles(plugin.dir, {
+        'mcp.json': JSON.stringify({ mcpServers: { demo: { command: 'test', env: {} } } }),
+        '.mcp.json': JSON.stringify({ mcpServers: { demo: { command: 'test', env: [] } } }),
+      });
+      expect((await failure(() => grokWriter.add(plugin, resolved))).message).toContain('conflicting Grok MCP');
+    });
+  });
   test('prefers root commands over alternate Claude commands without changing source', async () => {
     await isolated(async ({ home, plugin, resolved }) => {
       const claude = '---\ndescription: Claude spec\n---\nClaude-specific body\n';
