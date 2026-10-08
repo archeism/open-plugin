@@ -16,6 +16,11 @@ declare const Bun: { YAML: { parse(input: string): unknown; stringify(value: unk
 type MarketplaceRow = { name?: unknown; kind?: unknown; source?: { path?: unknown } };
 const stableId = (plugin: PluginSource) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`;
 const digest = (value: string) => { const hash = new Bun.CryptoHasher('sha256'); hash.update(value); return hash.digest('hex').slice(0, 16); };
+function canonicalJson(value: unknown): string | undefined {
+  if (Array.isArray(value)) return `array:${JSON.stringify(value.map(item => canonicalJson(item)))}`;
+  if (value !== null && typeof value === 'object') return `object:${JSON.stringify(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonicalJson(item)]))}`;
+  return JSON.stringify(value);
+}
 
 export const grokWriter: HostWriter = {
   ...grok,
@@ -236,7 +241,7 @@ function projectGrokSource(dir: string): void {
     }
   }
   const legacyMcp = join(dir, 'mcp.json'); const nativeMcp = join(dir, '.mcp.json');
-  if (existsSync(legacyMcp) && existsSync(nativeMcp) && readFileSync(legacyMcp, 'utf8') !== readFileSync(nativeMcp, 'utf8')) throw new Error(`conflicting Grok MCP declarations: ${legacyMcp} and ${nativeMcp}`);
+  if (existsSync(legacyMcp) && existsSync(nativeMcp) && canonicalJson(JSON.parse(readFileSync(legacyMcp, 'utf8')).mcpServers) !== canonicalJson(JSON.parse(readFileSync(nativeMcp, 'utf8')).mcpServers)) throw new Error(`conflicting Grok MCP declarations: ${legacyMcp} and ${nativeMcp}`);
   if (existsSync(legacyMcp) && !existsSync(nativeMcp)) cpSync(legacyMcp, nativeMcp);
   if (existsSync(nativeMcp)) { const value = JSON.parse(readFileSync(nativeMcp, 'utf8')) as Record<string, unknown>; const servers = value?.['mcpServers']; if (!value || typeof value !== 'object' || !servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error(`invalid Grok MCP declaration: ${nativeMcp}`); }
 }
