@@ -295,6 +295,8 @@ function discoverCommands(source: string): Command[] {
   return markdown.length > 0 ? markdown : readCommandDirectory(root, 'toml');
 }
 
+export { discoverCommands };
+
 function readPackageName(source: string): string {
   const manifest = readPluginManifest(source);
   if (manifest === undefined) {

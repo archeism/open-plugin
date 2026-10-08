@@ -96,14 +96,34 @@ describe('cursor local-plugin lifecycle', () => {
     });
   });
 
-  test('refuses unverified command conversion before replacing an active owned copy', async () => {
+  test('projects command sources into the skills tree, preserving an active owned copy until success', async () => {
     await isolated(async root => {
       const incoming = fixture();
       await cursorWriter.add(incoming.plugin, incoming.resolved);
-      writeFiles(incoming.plugin.dir, { '.claude/commands/manual.md': '---\ndescription: manual\n---\nbody\n' });
+      writeFiles(incoming.plugin.dir, { '.claude/commands/launch.md': '---\ndescription: launch\n---\nbody\n' });
       incoming.plugin.contentFingerprint = 'commands-present';
-      expect((await failure(() => cursorWriter.add(incoming.plugin, incoming.resolved))).message).toContain('command conversion is unverified');
-      expect(readFileSync(join(root, '.cursor/plugins/local/demo-plugin/resources/value.txt'), 'utf8')).toBe('one\n');
+      await cursorWriter.add(incoming.plugin, incoming.resolved);
+      const target = join(root, '.cursor/plugins/local/demo-plugin');
+      expect(readFileSync(join(target, 'resources/value.txt'), 'utf8')).toBe('one\n');
+      expect(readFileSync(join(target, 'skills/launch/SKILL.md'), 'utf8')).toBe('---\nname: "launch"\ndescription: "launch"\n---\nbody\n');
+      expect(existsSync(join(target, '.claude', 'commands'))).toBe(false);
+    });
+  });
+
+  test('projects TOML prompt commands into skills and refuses unrepresentable policy', async () => {
+    await isolated(async root => {
+      const incoming = fixture();
+      writeFiles(incoming.plugin.dir, { 'commands/ship.toml': 'description = "Launch review"\nprompt = """Fan out."""\n' });
+      incoming.plugin.contentFingerprint = 'toml-command';
+      await cursorWriter.add(incoming.plugin, incoming.resolved);
+      const target = join(root, '.cursor/plugins/local/demo-plugin');
+      expect(readFileSync(join(target, 'skills/ship/SKILL.md'), 'utf8')).toBe('---\nname: "ship"\ndescription: "Launch review"\n---\nFan out.\n');
+      expect(existsSync(join(target, 'commands'))).toBe(false);
+
+      writeFiles(incoming.plugin.dir, { 'commands/locked.toml': 'description = "Locked"\nuser-invocable = false\nprompt = "body"\n' });
+      incoming.plugin.contentFingerprint = 'locked-command';
+      expect((await failure(() => cursorWriter.add(incoming.plugin, incoming.resolved))).message).toContain('user-invocable: false');
+      expect(readFileSync(join(target, 'skills/ship/SKILL.md'), 'utf8')).toContain('Fan out.');
     });
   });
 

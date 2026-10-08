@@ -7,6 +7,7 @@ import { cursorRoot } from '../paths';
 import type { PluginSource, ResolvedSource } from '../source';
 import { cursor, localDir, mcpCandidates } from './cursor';
 import { pinPluginMcpFiles } from '../mcp-write';
+import { discoverCommands } from '../conversion';
 
 const OWNERSHIP = '.plgnz-install.json';
 type Ownership = { source: string; pluginId: string; fingerprint: string };
@@ -73,9 +74,37 @@ export const cursorWriter: HostWriter = {
 function stagePlugin(source: string, stage: string, expectedName: string): void {
   assertNoSymlinks(source);
   cpSync(source, stage, { recursive: true });
-  if (hasCommands(stage)) throw new Error('Cursor command conversion is unverified; refusing to activate a plugin with commands');
+  projectCommandsToSkills(stage);
   ensureCursorManifest(stage, expectedName);
   validateStage(stage, expectedName);
+}
+
+/**
+ * Cursor folded commands into skills: every skill is `/`-invocable and
+ * Cursor 2.4's /migrate-to-skills preserves command invocation behavior
+ * (Cursor docs → Skills). Command sources therefore project into the
+ * plugin's skills tree. A command that is not user-invocable cannot be
+ * represented — every Cursor skill is /-invocable — and is refused rather
+ * than silently weakened.
+ */
+function projectCommandsToSkills(stage: string): void {
+  if (!hasCommands(stage)) return;
+  const commands = discoverCommands(stage);
+  const seen = new Set<string>();
+  for (const command of commands) {
+    if (command.userInvocable === false) throw new Error(`Cursor skill projection cannot represent user-invocable: false: ${command.source}`);
+    if (seen.has(command.name)) throw new Error(`Cursor command projection collision: ${command.name}`);
+    seen.add(command.name);
+    const target = join(stage, 'skills', command.name, 'SKILL.md');
+    if (existsSync(target)) throw new Error(`Cursor command collides with an existing skill: ${command.name}`);
+    mkdirSync(join(stage, 'skills', command.name), { recursive: true });
+    const body = command.body.endsWith('\n') ? command.body : `${command.body}\n`;
+    writeFileSync(target, `---\nname: ${JSON.stringify(command.name)}\ndescription: ${JSON.stringify(command.description)}\n---\n${body}`);
+  }
+  if (commands.length > 0) {
+    rmSync(join(stage, 'commands'), { recursive: true, force: true });
+    rmSync(join(stage, '.claude', 'commands'), { recursive: true, force: true });
+  }
 }
 
 function hasCommands(root: string): boolean {
