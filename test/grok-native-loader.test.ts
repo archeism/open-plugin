@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFiles } from './util';
+import { fingerprintTree } from '../src/fingerprint';
 
 const binary = process.env.OPEN_PLUGIN_GROK_NATIVE_BIN;
 const conditionalTest = test as typeof test & { if(condition: boolean): typeof test };
@@ -32,6 +33,10 @@ conditionalTest.if(binary !== undefined)('real Grok loader reads a local bundle 
   };
   try {
     const cli = join(import.meta.dir, '..', 'bin', 'plgnz.mjs');
+    // Claude's same-name plugin must coexist without shadowing Grok's native copy.
+    writeFiles(join(home, '.claude'), { '.keep': '' });
+    invoke(process.execPath, [cli, 'add', source, '--target', 'claude-code', '--json'], plgnzEnv);
+    const claudeBefore = fingerprintTree(join(home, '.claude'));
     const first = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--json'], plgnzEnv)) as Array<{ status: string; nativeId: string }>;
     expect(first[0]?.status).toBe('installed'); expect(first[0]?.nativeId).toBe('demo@native-proof');
     const second = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--json'], plgnzEnv)) as Array<{ status: string }>;
@@ -47,5 +52,6 @@ conditionalTest.if(binary !== undefined)('real Grok loader reads a local bundle 
     expect(readFileSync(join(installed!.path, 'commands', 'run.md'), 'utf8')).toContain('first=$1 all=$ARGUMENTS');
     const removed = JSON.parse(invoke(process.execPath, [cli, 'remove', 'demo@native-proof', '--target', 'grok', '--json'], plgnzEnv)) as Array<{ action: string }>;
     expect(removed[0]?.action).toBe('remove');
+    expect(fingerprintTree(join(home, '.claude'))).toBe(claudeBefore);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

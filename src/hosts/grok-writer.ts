@@ -29,7 +29,10 @@ export const grokWriter: HostWriter = {
     if (priorMarker !== null && (priorMarker.source !== resolved.sourceUri || priorMarker.pluginId !== id)) throw new Error(`Grok marketplace ${root} belongs to another source; refusing to replace it`);
     const legacy = legacyCandidate(plugin, opts?.adoptExisting === true, prior);
     if (legacy === undefined) assertExistingNativeOwnership(id, plugin.name, root);
-    const unchanged = prior !== undefined && priorMarker?.fingerprint === plugin.contentFingerprint && priorMarker?.nativeFingerprint === nativeFingerprint && existsSync(join(prior, 'plugins', plugin.name)) && fingerprintTree(join(prior, 'plugins', plugin.name)) === nativeFingerprint && current(id, prior, plugin.name, nativeFingerprint);
+    const activation = join(grokRoot(), 'plugins', plugin.name);
+    const existingNative = grok.listInstalled().find(candidate => candidate.name === plugin.name)?.path;
+    assertActivationLink(activation, existingNative);
+    const unchanged = lstatExists(activation) && prior !== undefined && priorMarker?.fingerprint === plugin.contentFingerprint && priorMarker?.nativeFingerprint === nativeFingerprint && existsSync(join(prior, 'plugins', plugin.name)) && fingerprintTree(join(prior, 'plugins', plugin.name)) === nativeFingerprint && current(id, prior, plugin.name, nativeFingerprint);
     if (opts?.dryRun) return unchanged ? 'unchanged' : undefined;
     if (unchanged) return 'unchanged';
     mkdirSync(parent, { recursive: true });
@@ -49,6 +52,7 @@ export const grokWriter: HostWriter = {
       let backedUp = false;
       let legacyRemoved = false;
       let legacyLinkRemoved = false;
+      let activationCreated = false;
       try {
         if (prior !== undefined) { renameSync(prior, backup!); backedUp = true; }
         renameSync(stagedRoot, root);
@@ -63,8 +67,17 @@ export const grokWriter: HostWriter = {
         if (installed === undefined) run(['plugin', 'install', `${plugin.name}@local/${basename(root)}`, '--trust']);
         else run(['plugin', 'update', plugin.name]);
         run(['plugin', 'enable', plugin.name]);
+        const nativePath = grok.listInstalled().find(candidate => candidate.id === id)?.path;
+        if (nativePath === undefined) throw new Error(`Grok ${id}: native install path is missing`);
+        assertActivationLink(activation, nativePath);
+        if (!lstatExists(activation)) {
+          mkdirSync(dirname(activation), { recursive: true });
+          symlinkSync(nativePath, activation);
+          activationCreated = true;
+        }
         if (!current(id, root, plugin.name, nativeFingerprint)) throw new Error(`Grok ${id}: native readback does not match staged content`);
       } catch (error) {
+        if (activationCreated) rmSync(activation);
         if (backedUp && backup !== undefined) {
           rmSync(root, { recursive: true, force: true }); renameSync(backup, root);
           try {
@@ -104,8 +117,12 @@ export const grokWriter: HostWriter = {
     if (shared.length !== 1) throw new Error(`Grok ${id}: marketplace root is shared by another native install; refusing removal`);
     const sources = marketplaceSources().filter(source => typeof source.source?.path === 'string' && canonical(source.source.path) === root);
     if (sources.length !== 1) throw new Error(`Grok ${id}: marketplace source is missing or ambiguous; refusing removal`);
+    const activation = join(grokRoot(), 'plugins', installed[0]!.name);
+    assertActivationLink(activation, installed[0]!.path);
+    const linked = lstatExists(activation);
     run(['plugin', 'marketplace', 'remove', sources[0]!.source!.path as string]);
     if (grok.listInstalled().some(plugin => plugin.id === id)) throw new Error(`Grok ${id}: native removal did not deactivate the plugin`);
+    if (linked) rmSync(activation);
     rmSync(root, { recursive: true, force: true });
   },
   async pin(plugin: InstalledPlugin, opts?: PinOptions): Promise<PinOutcome> {
@@ -117,6 +134,13 @@ export const grokWriter: HostWriter = {
 };
 
 function basename(path: string): string { return path.slice(path.lastIndexOf('/') + 1); }
+/** Native user plugins precede Claude compatibility imports; never replace foreign paths. */
+function assertActivationLink(link: string, nativePath: string | undefined): void {
+  if (!lstatExists(link)) return;
+  if (nativePath === undefined || !lstatSync(link).isSymbolicLink() || canonical(nativePath) === undefined || canonical(link) !== canonical(nativePath)) {
+    throw new Error(`Grok activation path is not the registered native plugin: ${link}`);
+  }
+}
 /** Grok Build resolves its native store from GROK_HOME (xai-dirs/src/lib.rs). */
 function env(): Record<string, string | undefined> { const home = homeRoot(); return { ...process.env, HOME: home, GROK_HOME: grokRoot(), XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_CACHE_HOME: join(home, '.cache'), CLAUDE_CONFIG_DIR: join(home, '.claude') }; }
 function binary(): string { const value = process.env['OPEN_PLUGIN_GROK_BIN'] ?? 'grok'; return value; }
