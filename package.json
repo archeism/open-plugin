@@ -9,8 +9,8 @@
     "url": "git+https://github.com/archeism/plugnz.git"
   },
   "bin": {
-    "plugnz": "./bin/plugnz.mjs",
-    "plgnz": "./bin/plugnz.mjs"
+    "plugnz": "bin/plugnz.mjs",
+    "plgnz": "bin/plugnz.mjs"
   },
   "scripts": {
     "test": "bun test",
