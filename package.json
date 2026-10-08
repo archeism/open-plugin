@@ -1,6 +1,6 @@
 {
   "name": "plgnz",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Install, diagnose and update agent plugins (Agent Plugins spec) and MCP configs across Claude Code, Codex, Cursor, Kimi and more",
   "license": "MIT",
   "type": "module",
