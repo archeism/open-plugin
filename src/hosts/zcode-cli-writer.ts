@@ -160,13 +160,18 @@ function copyResources(source: string, destination: string): void {
 }
 function rewriteLinks(body: string, source: string, resources: string, label: string): string {
   if (/\]\s*\[[^\]]+\]/u.test(body)) throw new Error(`ZCode unsupported reference-style Markdown link: ${label}`);
-  return body.replace(/(!?\[[^\]]*\])\(([^)\s]+)(\s+[^)]*)?\)/gu, (all, text: string, target: string, suffix: string | undefined) => {
+  // Inline code spans are not links; mask them before rewriting so example
+  // syntax like `[title](link)` inside backticks stays literal (CommonMark).
+  const spans: string[] = [];
+  const masked = body.replace(/(`+)([\s\S]*?)\1/gu, (all) => { spans.push(all); return `\u0000${spans.length - 1}\u0000`; });
+  const rewritten = masked.replace(/(!?\[[^\]]*\])\(([^)\s]+)(\s+[^)]*)?\)/gu, (all, text: string, target: string, suffix: string | undefined) => {
     if (/^(?:https?:|mailto:|#)/iu.test(target)) return all;
     if (target.startsWith('/') || target.includes('\\')) throw new Error(`ZCode unsupported absolute resource reference: ${label}`);
     const absolute = resolve(source, target); const rel = relative(source, absolute);
     if (rel === '' || rel.startsWith('..') || !existsSync(absolute) || !statSync(absolute).isFile()) throw new Error(`ZCode resource reference escapes or is missing: ${label} (${target})`);
     return `${text}(${join(resources, rel)}${suffix ?? ''})`;
   });
+  return rewritten.replace(/\u0000(\d+)\u0000/gu, (_, index: string) => spans[Number(index)] ?? '');
 }
 function validateCommand(raw: string, file: string): void {
   const fm = frontmatter(raw, file);

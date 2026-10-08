@@ -82,3 +82,12 @@ describe('Markdown command normalization (spec §2)', () => {
     });
   });
 });
+
+describe('code spans survive command normalization', () => {
+  test('backticked example link syntax stays literal through projection', () => {
+    withStage({ 'commands/example.toml': 'description = "Shows an example"\nprompt = """See `[title](link)` in the docs."""\n' }, (root) => {
+      normalizeCommandSources(root);
+      expect(readFileSync(join(root, 'commands/example.md'), 'utf8')).toContain('`[title](link)`');
+    });
+  });
+});
