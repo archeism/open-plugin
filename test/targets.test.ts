@@ -54,7 +54,7 @@ describe('targets', () => {
   });
 
   test('actual CLI exposes all frozen profiles only when requested', () => {
-    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plgnz.mjs'), 'targets', '--all'], { cwd: repoRoot, encoding: 'utf8' });
+    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plugnz.mjs'), 'targets', '--all'], { cwd: repoRoot, encoding: 'utf8' });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('grokbot');
   });
@@ -80,9 +80,9 @@ describe('targets', () => {
   });
 
   test('actual CLI reports its package version as JSON', () => {
-    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plgnz.mjs'), '--version', '--json'], { cwd: repoRoot, encoding: 'utf8' });
+    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plugnz.mjs'), '--version', '--json'], { cwd: repoRoot, encoding: 'utf8' });
     expect(result.status).toBe(0);
     const { version } = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
-    expect(JSON.parse(result.stdout)).toEqual({ name: 'plgnz', version });
+    expect(JSON.parse(result.stdout)).toEqual({ name: 'plugnz', version });
   });
 });

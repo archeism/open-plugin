@@ -1,7 +1,7 @@
 {
   "name": "pluginz",
   "version": "0.0.1",
-  "description": "Name guard for plgnz, the open-source agent-plugin installer and doctor — install plgnz instead.",
+  "description": "Name guard for plugnz, the open-source agent-plugin installer and doctor — install plugnz instead.",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/archeism/plgnz.git" }
+  "repository": { "type": "git", "url": "git+https://github.com/archeism/plugnz.git" }
 }

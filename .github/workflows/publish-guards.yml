@@ -28,9 +28,9 @@ jobs:
             console.error('Guard publishes require main.');
             process.exit(1);
           }
-          for (const name of ['plugnz', 'pluginz']) {
+          for (const name of ['pluginz']) {
             const pkg = JSON.parse(readFileSync(`guards/${name}/package.json`, 'utf8'));
-            if (pkg.name !== name || pkg.version !== '0.0.1' || !pkg.description.includes('plgnz')) {
+            if (pkg.name !== name || pkg.version !== '0.0.1' || !pkg.description.includes('plugnz')) {
               console.error(`guards/${name} changed shape; update this workflow deliberately.`);
               process.exit(1);
             }
@@ -38,9 +38,6 @@ jobs:
           NODE
       - name: Install npm with Trusted Publishing support
         run: npm install --global npm@11.14.1
-      - name: Publish plugnz guard
-        working-directory: guards/plugnz
-        run: npm publish --access public --ignore-scripts
       - name: Publish pluginz guard
         working-directory: guards/pluginz
         run: npm publish --access public --ignore-scripts

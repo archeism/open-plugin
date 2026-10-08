@@ -1,5 +1,3 @@
 #!/usr/bin/env bun
-// plgnz CLI shim — runs the TypeScript entrypoint directly under Bun.
-import { main } from '../src/cli.ts';
-
-process.exitCode = await main(process.argv.slice(2));
+// Compatibility entrypoint for the previous CLI name.
+import './plugnz.mjs';

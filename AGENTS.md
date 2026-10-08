@@ -1,6 +1,6 @@
-# AGENTS.md · plgnz
+# AGENTS.md · plugnz
 
-`plgnz` installs, diagnoses and updates agent plugins (Agent Plugins / "OpenPlugin" spec 1.0.0) and MCP configs across coding-agent hosts. It is the open-source counterpart of `npx plugins`, plus the verbs that tool lacks: `doctor`, `pin`, `update`.
+`plugnz` installs, diagnoses and updates agent plugins (Agent Plugins / "OpenPlugin" spec 1.0.0) and MCP configs across coding-agent hosts. It is the open-source counterpart of `npx plugins`, plus the verbs that tool lacks: `doctor`, `pin`, `update`.
 
 ## Verbs
 - `add <source> [--target <host>…]` — install a plugin from a marketplace dir or git URL into each host's **native** store.
@@ -10,7 +10,7 @@
 - `list`, `remove`, `targets`.
 
 ## Hosts and approved scope
-The current implemented native adapters are claude-code, codex, kimi, cursor, omp, hermes, grok, dcode, and zcode-cli. The approved migration scope is native plugin-compatible routes documented in `SPEC.md`; each additional route requires its own evidence-backed adapter or visible unsupported/unverified result. Standalone skill/command distribution is excluded: Pi and OpenCode readers/removers remain only for safe cleanup of old plgnz-owned installs, and no standalone route may be added or updated. Gemini CLI's possible native extension surface remains unverified and is not classified as standalone. Bare-MCP configuration remains the separate `add-mcp` API boundary.
+The current implemented native adapters are claude-code, codex, kimi, cursor, omp, hermes, grok, dcode, and zcode-cli. The approved migration scope is native plugin-compatible routes documented in `SPEC.md`; each additional route requires its own evidence-backed adapter or visible unsupported/unverified result. Standalone skill/command distribution is excluded: Pi and OpenCode readers/removers remain only for safe cleanup of old plugnz-owned installs, and no standalone route may be added or updated. Gemini CLI's possible native extension surface remains unverified and is not classified as standalone. Bare-MCP configuration remains the separate `add-mcp` API boundary.
 
 ## Rules
 - Bun + TypeScript. Run the relevant focused check for each increment and save its command/result; run `bun test` and `bun run check` before a direct push to `main`. Direct pushes are the authorized integration path; do not create a PR unless later directed.

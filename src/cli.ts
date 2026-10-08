@@ -17,9 +17,9 @@ import { consumerProfiles, findConsumerProfile, type ConsumerProfile } from './c
 import { CompatibilityError, requireCompatible } from './compatibility';
 import packageJson from '../package.json' with { type: 'json' };
 
-const USAGE = `plgnz — install, diagnose and update agent plugins and MCP configs
+const USAGE = `plugnz — install, diagnose and update agent plugins and MCP configs
 
-usage: plgnz <verb> [options]
+usage: plugnz <verb> [options]
 
 verbs:
   add <source> [--target <host>…] [--adopt-existing] install a plugin into each host's native store
@@ -164,8 +164,8 @@ export async function main(argv: string[]): Promise<number> {
   const verb = args[0];
 
   if (verb === '--version' || verb === '-v' || verb === 'version') {
-    if (args.length > 1) fail('plgnz version: unexpected argument', 2);
-    console.log(json ? JSON.stringify({ name: 'plgnz', version: packageJson.version }) : packageJson.version);
+    if (args.length > 1) fail('plugnz version: unexpected argument', 2);
+    console.log(json ? JSON.stringify({ name: 'plugnz', version: packageJson.version }) : packageJson.version);
     return 0;
   }
 
@@ -175,11 +175,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (verb === 'doctor') {
     const flags = parseFlags(args.slice(1));
-    if (rejectDisallowed(flags, new Set(['target'])) || flags.positionals.length > 0) fail(`plgnz doctor: unexpected argument`, 2);
+    if (rejectDisallowed(flags, new Set(['target'])) || flags.positionals.length > 0) fail(`plugnz doctor: unexpected argument`, 2);
     const selection = select(hosts, flags.targets);
     if (selection.error) {
       if (json) printOutcomes(flags.targets.map((target) => ({ plugin: '*', target, status: 'failed', dryRun: false, diagnostic: selection.error })), true);
-      else console.error(`plgnz doctor: ${selection.error}`);
+      else console.error(`plugnz doctor: ${selection.error}`);
       return 2;
     }
     const { findings, exitCode } = runDoctor(selection.selected);
@@ -191,7 +191,7 @@ export async function main(argv: string[]): Promise<number> {
   if (verb === 'targets') {
     const flags = parseFlags(args.slice(1));
     const disallowed = rejectDisallowed(flags, new Set(['all']));
-    if (disallowed || flags.positionals.length > 0) fail(`plgnz targets: ${disallowed ?? 'unexpected argument'}`, 2);
+    if (disallowed || flags.positionals.length > 0) fail(`plugnz targets: ${disallowed ?? 'unexpected argument'}`, 2);
     const present = hosts.filter(h => h.detect());
     if (json) {
       console.log(JSON.stringify(flags.all ? consumerProfiles : present.map(h => h.id), null, 2));
@@ -202,11 +202,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (verb === 'list') {
     const flags = parseFlags(args.slice(1));
-    if (rejectDisallowed(flags, new Set(['target'])) || flags.positionals.length > 0) fail(`plgnz list: unexpected argument`, 2);
+    if (rejectDisallowed(flags, new Set(['target'])) || flags.positionals.length > 0) fail(`plugnz list: unexpected argument`, 2);
     const selection = select(hosts, flags.targets);
     if (selection.error) {
       if (json) printOutcomes(flags.targets.map((target) => ({ plugin: '*', target, status: 'failed', dryRun: false, diagnostic: selection.error })), true);
-      else console.error(`plgnz list: ${selection.error}`);
+      else console.error(`plugnz list: ${selection.error}`);
       return 2;
     }
     const state = readState();
@@ -230,7 +230,7 @@ export async function main(argv: string[]): Promise<number> {
   if (verb === 'remove') {
     const flags = parseFlags(args.slice(1));
     const target = flags.positionals[0];
-    if (rejectDisallowed(flags, new Set(['target', 'dryRun'])) || !target || flags.positionals.length > 1) fail(`plgnz remove: missing or unexpected plugin id`, 2);
+    if (rejectDisallowed(flags, new Set(['target', 'dryRun'])) || !target || flags.positionals.length > 1) fail(`plugnz remove: missing or unexpected plugin id`, 2);
     const selection = select(cleanupWriters, flags.targets);
     if (selection.error) {
       printOutcomes(flags.targets.map((host) => ({ plugin: target, target: host, status: 'failed', dryRun: flags.dryRun, diagnostic: selection.error })), json);
@@ -284,12 +284,12 @@ export async function main(argv: string[]): Promise<number> {
     const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting']));
     if (disallowed) {
       if (json) printOutcomes([{ plugin: '*', target: '*', status: 'failed', dryRun: flags.dryRun, diagnostic: disallowed }], true);
-      else console.error(`plgnz add: ${disallowed}`);
+      else console.error(`plugnz add: ${disallowed}`);
       return 2;
     }
-    if (flags.positionals.length > 1) fail(`plgnz add: unexpected argument: ${flags.positionals[1]}`, 2);
+    if (flags.positionals.length > 1) fail(`plugnz add: unexpected argument: ${flags.positionals[1]}`, 2);
     const sourceArg = flags.positionals[0];
-    if (sourceArg === undefined) fail(`plgnz add: missing source`, 2);
+    if (sourceArg === undefined) fail(`plugnz add: missing source`, 2);
 
     try {
       const profileSelection = selectProfiles(flags.targets);
@@ -423,11 +423,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (verb === 'pin') {
     const flags = parseFlags(args.slice(1));
-    if (rejectDisallowed(flags, new Set(['target', 'all', 'dryRun'])) || flags.positionals.length > 0) fail(`plgnz pin: unexpected argument: ${flags.positionals[0]}`, 2);
+    if (rejectDisallowed(flags, new Set(['target', 'all', 'dryRun'])) || flags.positionals.length > 0) fail(`plugnz pin: unexpected argument: ${flags.positionals[0]}`, 2);
     const known = new Set(writers.map((w) => w.id));
     for (const target of flags.targets) {
       if (!known.has(target)) {
-        fail(`plgnz pin: unknown target '${target}' (known: ${[...known].join(', ')})`, 2);
+        fail(`plugnz pin: unknown target '${target}' (known: ${[...known].join(', ')})`, 2);
       }
     }
     const candidates = flags.targets.length > 0
@@ -435,7 +435,7 @@ export async function main(argv: string[]): Promise<number> {
       : flags.all ? [...writers] : writers.filter((writer) => writer.gui);
     const detected = candidates.filter((writer) => writer.detect());
     if (detected.length === 0) {
-      console.error('plgnz pin: No detected writer targets');
+      console.error('plugnz pin: No detected writer targets');
       return 1;
     }
     const result = await runPin({ targets: flags.targets, all: flags.all, dryRun: flags.dryRun, writers: detected });
@@ -444,7 +444,7 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (verb === 'update') {
     const flags = parseFlags(args.slice(1));
-    if (rejectDisallowed(flags, new Set(['target', 'dryRun'])) || flags.positionals.length > 1) fail(`plgnz update: unexpected argument: ${flags.positionals[1]}`, 2);
+    if (rejectDisallowed(flags, new Set(['target', 'dryRun'])) || flags.positionals.length > 1) fail(`plugnz update: unexpected argument: ${flags.positionals[1]}`, 2);
     const profileSelection = selectProfiles(flags.targets);
     if (profileSelection.error) {
       printOutcomes(flags.targets.map((target) => ({ plugin: flags.positionals[0] ?? '*', target, status: 'failed', dryRun: flags.dryRun, diagnostic: profileSelection.error })), json);
@@ -479,7 +479,7 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
 
-  fail(`plgnz: unknown verb '${verb}'\n\n${USAGE}`, 2);
+  fail(`plugnz: unknown verb '${verb}'\n\n${USAGE}`, 2);
 }
 
 if (process.argv[1] !== undefined && process.argv[1].endsWith('cli.ts')) {

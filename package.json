@@ -1,21 +1,27 @@
 {
-  "name": "plgnz",
-  "version": "0.0.3",
+  "name": "plugnz",
+  "version": "0.0.4",
   "description": "Install, diagnose and update agent plugins (Agent Plugins spec) and MCP configs across Claude Code, Codex, Cursor, Kimi and more",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/archeism/plgnz.git"
+    "url": "git+https://github.com/archeism/plugnz.git"
   },
   "bin": {
-    "plgnz": "./bin/plgnz.mjs"
+    "plugnz": "./bin/plugnz.mjs",
+    "plgnz": "./bin/plugnz.mjs"
   },
   "scripts": {
     "test": "bun test",
     "check": "tsc --noEmit"
   },
-  "files": ["bin", "src", "README.md", "LICENSE"],
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "smol-toml": "^1.8.0"
   },

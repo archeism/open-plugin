@@ -35,7 +35,7 @@ jobs:
           const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
           const requested = process.env.RELEASE_VERSION;
           if (process.env.GITHUB_REF !== 'refs/heads/main' ||
-              name !== 'plgnz' ||
+              name !== 'plugnz' ||
               !/^0\.0\.[1-9]\d*$/.test(requested) ||
               requested !== version) {
             console.error('Publish requires main and a matching, nonzero 0.0.x package version.');
