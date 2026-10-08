@@ -65,6 +65,30 @@ async function isolated(run: (value: Fixture) => Promise<void>): Promise<void> {
 async function failure(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected operation to fail'); }
 
 describe('Grok Build native marketplace lifecycle', () => {
+  test('prefers root commands over alternate Claude commands without changing source', async () => {
+    await isolated(async ({ home, plugin, resolved }) => {
+      const claude = '---\ndescription: Claude spec\n---\nClaude-specific body\n';
+      writeFiles(plugin.dir, {
+        'commands/spec.toml': 'description = "Spec"\nprompt = "Root spec body"\n',
+        '.claude/commands/spec.md': claude,
+      });
+      await grokWriter.add(plugin, resolved);
+      const active = join(home, '.grok', 'installed-plugins', 'demo-native');
+      expect(readFileSync(join(active, 'commands/spec.md'), 'utf8')).toContain('Root spec body');
+      expect(readFileSync(join(plugin.dir, '.claude/commands/spec.md'), 'utf8')).toBe(claude);
+      expect(existsSync(join(plugin.dir, 'commands/spec.md'))).toBe(false);
+      expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
+    });
+  });
+
+  test('retains Claude command fallback when root commands are absent', async () => {
+    await isolated(async ({ home, plugin, resolved }) => {
+      writeFiles(plugin.dir, { '.claude/commands/spec.md': '---\ndescription: Spec\n---\nFallback body\n' });
+      await grokWriter.add(plugin, resolved);
+      expect(readFileSync(join(home, '.grok', 'installed-plugins', 'demo-native', 'commands/spec.md'), 'utf8')).toContain('Fallback body');
+    });
+  });
+
   test('uses registry provenance to retain source identity, refreshes changed bytes, and removes only its owned marketplace', async () => {
     await isolated(async ({ home, plugin, resolved }) => {
       await grokWriter.add(plugin, resolved);

@@ -173,7 +173,9 @@ function projectGrokSource(dir: string): void {
   }
   const commands = join(dir, 'commands'); const claudeCommands = join(dir, '.claude', 'commands');
   const seen = new Set<string>();
-  for (const source of [commands, claudeCommands]) {
+  // Host-specific command trees are alternatives, not additive namespaces.
+  // Prefer Grok's root commands; retain Claude-only packages as a fallback.
+  for (const source of [existsSync(commands) ? commands : claudeCommands]) {
     if (!existsSync(source)) continue;
     for (const entry of readdirSync(source)) {
       const path = join(source, entry); const stat = lstatSync(path);
