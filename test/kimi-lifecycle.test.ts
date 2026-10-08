@@ -112,11 +112,14 @@ describe('Kimi lifecycle preflight', () => {
     });
   });
 
-  test('refuses a TOML-only command set before activation instead of dropping it', async () => {
+  test('converts a valid TOML command set to Markdown; invalid TOML is refused, not dropped', async () => {
     await withKimi(async ({ home, plugin, resolved }) => {
       writeFiles(plugin.dir, { 'commands/only.toml': 'description = "unsupported"\n' });
       let failure: Error | undefined; try { await kimiWriter.add(plugin, resolved, { dryRun: true }); } catch (error) { failure = error as Error; }
-      expect(failure?.message).toContain('cannot preserve non-Markdown resource');
+      expect(failure?.message).toContain('description and prompt');
+      expect(existsSync(join(home, '.kimi-code', 'plugins', 'managed', 'demo'))).toBe(false);
+      writeFiles(plugin.dir, { 'commands/only.toml': 'description = "Runs the demo"\nprompt = "Run the demo."\n' });
+      expect(await kimiWriter.add(plugin, resolved, { dryRun: true })).toBeUndefined();
       expect(existsSync(join(home, '.kimi-code', 'plugins', 'managed', 'demo'))).toBe(false);
     });
   });

@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
+import { tomlCommandMarkdown } from '../conversion';
 import { claudeCode, mcpCandidates, pluginsDir } from './claude-code';
 import { pinPluginMcpFiles } from '../mcp-write';
 
@@ -183,6 +184,7 @@ function stagePlugin(source: string, stage: string, fallbackName: string, fallba
     mkdirSync(dirname(native), { recursive: true });
     writeFileSync(native, JSON.stringify({ name: canonicalManifest.name, version: canonicalManifest.version ?? fallbackVersion, description: canonicalManifest.description, skills: './skills/' }));
   }
+  projectRootCommandsToNative(stage);
   projectNativeCommands(stage, native);
   const nativeManifest = parseManifest(native, 'Claude Code');
   if (nativeManifest.name !== canonicalManifest.name || (canonicalManifest.version !== undefined && nativeManifest.version !== canonicalManifest.version)) throw new Error('Claude Code native manifest identity does not match the canonical manifest');
@@ -190,6 +192,29 @@ function stagePlugin(source: string, stage: string, fallbackName: string, fallba
     if (existsSync(path) && !statSync(path).isDirectory()) throw new Error(`Claude Code stage native content path is not a directory: ${path}`);
   }
   if (fallbackName.length === 0) throw new Error('Claude Code plugin name is empty');
+}
+
+/** Root command sources map into Claude Code's native discovery path when
+ * the package has no explicit .claude/commands tree (spec §2): Markdown
+ * commands pass through and TOML prompt commands convert there. The
+ * package's own command bytes are never modified — Claude Code installs are
+ * byte-preserving. */
+function projectRootCommandsToNative(stage: string): void {
+  const nativeCommands = join(stage, '.claude', 'commands');
+  if (existsSync(nativeCommands)) return;
+  const rootCommands = join(stage, 'commands');
+  if (!existsSync(rootCommands)) return;
+  const entries = readdirSync(rootCommands).sort();
+  const markdown = entries.filter((file) => file.endsWith('.md'));
+  const toml = entries.filter((file) => file.endsWith('.toml'));
+  if (markdown.length === 0 && toml.length === 0) return;
+  mkdirSync(nativeCommands, { recursive: true });
+  for (const file of markdown) cpSync(join(rootCommands, file), join(nativeCommands, file));
+  if (markdown.length > 0) return;
+  for (const file of toml) {
+    const projected = tomlCommandMarkdown(join(rootCommands, file));
+    writeFileSync(join(nativeCommands, `${projected.name}.md`), projected.text);
+  }
 }
 
 /** Claude Code only discovers plugin commands from an explicit manifest list. */

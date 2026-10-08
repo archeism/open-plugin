@@ -6,6 +6,7 @@ import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } 
 import type { PluginSource, ResolvedSource } from '../source';
 import { fingerprintTree } from '../fingerprint';
 import { assertZcodeNativeRegistryReadable, readZcodeEnabledPluginIds, readZcodeNativeRecords, readZcodeOwnership, runOfficialZcode, zcodeCli, zcodeMarketplaceRoot, zcodeResourceRoot, zcodeSafeInstallRoot } from './zcode-cli';
+import { normalizeCommandTree } from '../conversion';
 import { zcodeCliRoot } from '../paths';
 
 declare const Bun: any;
@@ -107,6 +108,7 @@ function projectCommands(root: string, pluginName: string): void {
   if (!statSync(source).isDirectory()) throw new Error(`ZCode commands path is not a directory: ${source}`);
   const temp = join(root, '.plgnz-zcode-commands'); renameSync(source, temp);
   try {
+    normalizeCommandTree(temp);
     copyCommandTree(temp, join(root, 'commands', pluginName));
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }

@@ -3,7 +3,7 @@
  * commands. This is deliberately a file-to-file transform: lifecycle code can
  * stage its destination before it asks a host writer to activate anything.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parse as parseToml } from 'smol-toml';
@@ -343,14 +343,58 @@ function normalizeMetadata(metadata: Record<string, unknown>, path: string): voi
   }
 }
 
-function commandFrom(path: string, description: string, argumentHint: unknown, userInvocable: unknown, disableModelInvocation: unknown, body: string): Command {
-  const name = basename(path).replace(/\.(md|toml)$/u, '');
+function commandFrom(path: string, description: string, argumentHint: unknown, userInvocable: unknown, disableModelInvocation: unknown, body: string): Command {  const name = basename(path).replace(/\.(md|toml)$/u, '');
   if (!validSegment(name)) throw new Error(`unsafe command name: ${name}`);
   if (argumentHint !== undefined && typeof argumentHint !== 'string') throw new Error(`argument hint must be text: ${path}`);
   if (userInvocable !== undefined && typeof userInvocable !== 'boolean') throw new Error(`user-invocable must be boolean: ${path}`);
   if (disableModelInvocation !== undefined && typeof disableModelInvocation !== 'boolean') throw new Error(`disable-model-invocation must be boolean: ${path}`);
   if (/!`[\s\S]*?`/u.test(body)) throw new Error(`shell preprocessing is unsupported: ${path}`);
   return { name, description, ...(typeof argumentHint === 'string' ? { argumentHint } : {}), ...(typeof userInvocable === 'boolean' ? { userInvocable } : {}), allowImplicit: disableModelInvocation === false, body, source: path };
+}
+
+/**
+ * Normalize a staged plugin's command sources to the Markdown command form
+ * every Markdown-commands host loads (spec §2: TOML prompt commands map into
+ * the native Markdown form when semantics are equivalent). Directory
+ * semantics match discoverCommands: any .md present wins and .toml files in
+ * that directory are shadowed and removed; otherwise each .toml
+ * (description + prompt) becomes <stem>.md. Invocation-policy metadata has
+ * no Markdown equivalent and is refused rather than silently stripped.
+ */
+export function normalizeCommandSources(root: string): void {
+  const dir = join(root, 'commands');
+  if (!existsSync(dir)) return;
+  if (!statSync(dir).isDirectory()) throw new Error(`commands path is not a directory: ${dir}`);
+  normalizeCommandTree(dir);
+}
+
+export function normalizeCommandTree(dir: string): void {
+  const stats = readdirSync(dir).sort().map((name) => {
+    const path = join(dir, name);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) throw new Error(`command source contains symlink: ${path}`);
+    return { name, path, isDirectory: stat.isDirectory(), isFile: stat.isFile() };
+  });
+  for (const entry of stats) if (entry.isDirectory) normalizeCommandTree(entry.path);
+  const hasMarkdown = stats.some((entry) => entry.isFile && entry.name.endsWith('.md'));
+  for (const entry of stats) {
+    if (!entry.isFile || !entry.name.endsWith('.toml')) continue;
+    if (hasMarkdown) { rmSync(entry.path); continue; }
+    const projected = tomlCommandMarkdown(entry.path);
+    writeFileSync(join(dir, `${projected.name}.md`), projected.text);
+    rmSync(entry.path);
+  }
+}
+
+/** The Markdown command text a TOML prompt command maps to (spec §2).
+ * Invocation-policy metadata has no Markdown equivalent and is refused
+ * rather than silently stripped. */
+export function tomlCommandMarkdown(path: string): { name: string; text: string } {
+  const command = parseTomlCommand(path);
+  if (command.userInvocable === false || command.allowImplicit) throw new Error(`command invocation policy is unsupported by Markdown projection: ${path}`);
+  const hint = command.argumentHint === undefined ? '' : `argument-hint: ${yamlString(command.argumentHint)}\n`;
+  const body = command.body.endsWith('\n') ? command.body : `${command.body}\n`;
+  return { name: command.name, text: `---\ndescription: ${yamlString(command.description)}\n${hint}---\n${body}` };
 }
 
 /** Pi projector: reuse the shared command parser, but emit Pi's native skill form. */

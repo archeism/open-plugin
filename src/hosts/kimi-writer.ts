@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
+import { normalizeCommandSources } from '../conversion';
 import { kimi, mcpCandidates, pluginsDir } from './kimi';
 import { pinPluginMcpFiles } from '../mcp-write';
 
@@ -118,6 +119,7 @@ function isObject(value: unknown): value is Record<string, unknown> { return typ
 
 function stagePlugin(source: string, stage: string, expectedName: string): void {
   assertNoSymlinks(source); cpSync(source, stage, { recursive: true });
+  normalizeCommandSources(stage);
   const manifest = readSourceManifest(stage);
   if (manifest.name !== expectedName) throw new Error(`Kimi manifest identity does not match ${expectedName}`);
   for (const key of ['hooks', 'agents', 'agent', 'executables']) if (manifest[key] !== undefined) throw new Error(`Kimi root manifest ${key} is unsupported without an explicit native declaration`);
