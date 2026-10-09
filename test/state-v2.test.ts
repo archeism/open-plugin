@@ -151,6 +151,7 @@ function setPendingTuple(
   const activation = state.activations[0]! as unknown as Record<string, unknown>;
   activation['pending'] = { operation: tuple.operation, phase: tuple.pendingPhase, attemptId: 'attempt-7' };
   const attempt = state.attempts[0]! as unknown as Record<string, unknown>;
+  attempt['command'] = tuple.operation === 'remove' ? 'remove' : 'sync';
   attempt['phase'] = tuple.attemptPhase;
   attempt['mutationStarted'] = tuple.mutationStarted;
   if (tuple.attemptPhase === 'completed') attempt['completedAt'] = now;
@@ -307,8 +308,12 @@ describe('state v2 public reader and writer', () => {
     const tuples = [
       { operation: 'install', pendingPhase: 'accepted', attemptPhase: 'accepted', journalState: 'pending', mutationStarted: false },
       { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
+      { operation: 'disable-nonconforming', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
       { operation: 'retire-orphan', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
       { operation: 'route-migrate', pendingPhase: 'readback', attemptPhase: 'readback', journalState: 'applied', mutationStarted: true },
+      { operation: 'disable-nonconforming', pendingPhase: 'readback', attemptPhase: 'readback', journalState: 'applied', mutationStarted: true },
+      { operation: 'retire-orphan', pendingPhase: 'readback', attemptPhase: 'pruning', journalState: 'applied', mutationStarted: true },
+      { operation: 'remove', pendingPhase: 'readback', attemptPhase: 'pruning', journalState: 'applied', mutationStarted: true },
       { operation: 'remove', pendingPhase: 'cleanup', attemptPhase: 'finalizing', journalState: 'cleanup-pending', mutationStarted: true },
       { operation: 'update', pendingPhase: 'rollback', attemptPhase: 'recovery-required', journalState: 'rollback', mutationStarted: true },
     ];
@@ -318,6 +323,28 @@ describe('state v2 public reader and writer', () => {
       setPendingTuple(value, tuple);
       writeFileSync(file, JSON.stringify(value));
       expect(readLifecycleState(file).state.activations[0]?.pending?.operation).toBe(tuple.operation);
+    }
+  });
+
+  test('rejects all desired-versus-retirement pending phase mismatches', () => {
+    const { file } = tempStateFile();
+    const cases = [
+      { operation: 'install', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
+      { operation: 'update', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
+      { operation: 'route-migrate', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
+      { operation: 'disable-nonconforming', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
+      { operation: 'install', pendingPhase: 'readback', attemptPhase: 'pruning', journalState: 'applied', mutationStarted: true },
+      { operation: 'retire-orphan', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
+      { operation: 'remove', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
+      { operation: 'retire-orphan', pendingPhase: 'readback', attemptPhase: 'readback', journalState: 'applied', mutationStarted: true },
+      { operation: 'remove', pendingPhase: 'readback', attemptPhase: 'readback', journalState: 'applied', mutationStarted: true },
+    ];
+
+    for (const tuple of cases) {
+      const value = stateFixture();
+      setPendingTuple(value, tuple);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), `pending phase ${tuple.pendingPhase} requires attempt`);
     }
   });
 
@@ -342,7 +369,7 @@ describe('state v2 public reader and writer', () => {
       {
         tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'not-attempted', mutationStarted: true },
         mutate: (_value: LifecycleStateV2): void => {},
-        message: 'pending phase applying requires journal applying',
+        message: 'mutationStarted is true but no journal row shows mutation began',
       },
       {
         tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'readback-verified', mutationStarted: true },
@@ -352,7 +379,7 @@ describe('state v2 public reader and writer', () => {
       {
         tuple: { operation: 'update', pendingPhase: 'accepted', attemptPhase: 'accepted', journalState: 'pending', mutationStarted: true },
         mutate: (_value: LifecycleStateV2): void => {},
-        message: 'accepted pending work requires mutationStarted false',
+        message: 'mutationStarted is true but no journal row shows mutation began',
       },
       {
         tuple: { operation: 'update', pendingPhase: 'readback', attemptPhase: 'completed', journalState: 'applied', mutationStarted: true },
@@ -372,7 +399,7 @@ describe('state v2 public reader and writer', () => {
       {
         tuple: { operation: 'remove', pendingPhase: 'cleanup', attemptPhase: 'finalizing', journalState: 'cleanup-pending', mutationStarted: false },
         mutate: (_value: LifecycleStateV2): void => {},
-        message: 'cleanup pending work requires mutationStarted true',
+        message: 'journal shows mutation began but mutationStarted is false',
       },
     ];
 
@@ -397,8 +424,106 @@ describe('state v2 public reader and writer', () => {
         mutationStarted: true,
       });
       writeFileSync(file, JSON.stringify(value));
-      expectThrow(() => readLifecycleState(file), 'pending.operation must be one of: install, update, route-migrate, retire-orphan, remove');
+      expectThrow(() => readLifecycleState(file), 'pending.operation must be one of: install, update, route-migrate, disable-nonconforming, retire-orphan, remove');
     }
+  });
+
+  test('enforces exact command and journal action compatibility', () => {
+    const { file } = tempStateFile();
+    const commands = ['sync', 'retire-source', 'add', 'update', 'remove', 'legacy-recovery'] as const;
+    const lifecycleActions = [
+      'install',
+      'update',
+      'unchanged',
+      'route-migrate',
+      'retain-prior',
+      'disable-nonconforming',
+      'retire-orphan',
+      'remove',
+    ] as const;
+    type Command = typeof commands[number];
+    type Action = typeof lifecycleActions[number];
+    const desiredAndNoOp = lifecycleActions.filter(action => action !== 'retire-orphan' && action !== 'remove');
+    const allowedByCommand: Record<Command, readonly Action[]> = {
+      sync: lifecycleActions.filter(action => action !== 'remove'),
+      'retire-source': ['retire-orphan'],
+      add: desiredAndNoOp,
+      update: desiredAndNoOp,
+      remove: ['remove'],
+      'legacy-recovery': lifecycleActions,
+    };
+    let rejectedCount = 0;
+
+    for (const command of commands) {
+      for (const action of lifecycleActions) {
+        const value = stateFixture();
+        value.attempts[0]!.command = command;
+        value.attempts[0]!.journal[0]!.action = action;
+        if (action === 'unchanged' || action === 'retain-prior') {
+          value.attempts[0]!.journal[0]!.state = 'not-attempted';
+          value.attempts[0]!.mutationStarted = false;
+        }
+        writeFileSync(file, JSON.stringify(value));
+        if (allowedByCommand[command].includes(action)) {
+          expect(readLifecycleState(file).state.attempts[0]?.command).toBe(command);
+        } else {
+          rejectedCount += 1;
+          expectThrow(() => readLifecycleState(file), `command ${command} cannot journal action ${action}`);
+        }
+      }
+    }
+    expect(rejectedCount).toBe(19);
+  });
+
+  test('cross-checks mutationStarted against every journal row', () => {
+    const { file } = tempStateFile();
+    const beganStates = [
+      'applying',
+      'applied',
+      'readback-verified',
+      'rollback',
+      'rolled-back',
+      'cleanup-pending',
+      'completed',
+      'failed',
+    ] as const;
+
+    for (const state of beganStates) {
+      const value = stateFixture();
+      value.attempts[0]!.journal[0]!.state = state;
+      value.attempts[0]!.mutationStarted = false;
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'journal shows mutation began but mutationStarted is false');
+    }
+
+    const unsupportedTrue = stateFixture();
+    unsupportedTrue.attempts[0]!.journal[0]!.state = 'pending';
+    unsupportedTrue.attempts[0]!.mutationStarted = true;
+    writeFileSync(file, JSON.stringify(unsupportedTrue));
+    expectThrow(() => readLifecycleState(file), 'mutationStarted is true but no journal row shows mutation began');
+
+    const noOp = stateFixture();
+    noOp.attempts[0]!.mutationStarted = false;
+    noOp.attempts[0]!.journal = [
+      {
+        operationId: 'operation-unchanged',
+        scopeId: fixtureScopeId,
+        packageId: 'addy@personal',
+        nativeId: 'addy@personal',
+        action: 'unchanged',
+        state: 'not-attempted',
+      },
+      {
+        operationId: 'operation-retain',
+        scopeId: fixtureScopeId,
+        packageId: 'prior@personal',
+        nativeId: 'prior@personal',
+        action: 'retain-prior',
+        state: 'not-attempted',
+      },
+    ];
+    writeFileSync(file, JSON.stringify(noOp));
+    expect(readLifecycleState(file).state.attempts[0]?.mutationStarted).toBe(false);
   });
 
   test('round-trips only content-addressed evidence and proof references', () => {
@@ -559,6 +684,14 @@ describe('state v2 public reader and writer', () => {
         installedFingerprint: 'legacy-installed',
         ownership: 'plgnz',
         pending: 'remove',
+      }, {
+        host: 'dcode',
+        id: 'addy@personal',
+        source: '/srv/personal',
+        sourceSha: 'def456',
+        installedAt: earlier,
+        sourceDir: '/srv/personal/plugins/addy',
+        pending: 'install',
       }],
     }, null, 2);
     writeFileSync(file, original);
@@ -580,12 +713,19 @@ describe('state v2 public reader and writer', () => {
     expect(loaded.state.activations[0]?.pending?.operation).toBe('remove');
     expect(loaded.state.activations[0]?.pending?.phase).toBe('applying');
     expect(loaded.state.attempts[0]?.command).toBe('legacy-recovery');
-    expect(loaded.state.attempts[0]?.phase).toBe('applying');
+    expect(loaded.state.attempts[0]?.phase).toBe('pruning');
     expect(loaded.state.attempts[0]?.mutationStarted).toBe(true);
     expect(loaded.state.attempts[0]?.journal[0]?.action).toBe('remove');
     expect(loaded.state.attempts[0]?.journal[0]?.state).toBe('applying');
     expect(loaded.state.attempts[0]?.startedAt).toBe(earlier);
     expect(hasRetirementAuthority(loaded.state.activations[0]!)).toBe(false);
+    expect(loaded.state.activations[1]?.pending?.operation).toBe('install');
+    expect(loaded.state.activations[1]?.pending?.phase).toBe('applying');
+    expect(loaded.state.attempts[1]?.command).toBe('legacy-recovery');
+    expect(loaded.state.attempts[1]?.phase).toBe('applying');
+    expect(loaded.state.attempts[1]?.mutationStarted).toBe(true);
+    expect(loaded.state.attempts[1]?.journal[0]?.action).toBe('install');
+    expect(loaded.state.attempts[1]?.journal[0]?.state).toBe('applying');
 
     writeLifecycleState({ ...loaded.state, stateGeneration: 1 }, { globalPreflight: 'succeeded' }, file);
     expect(readLifecycleState(file).sourceVersion).toBe(2);

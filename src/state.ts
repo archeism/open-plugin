@@ -85,7 +85,9 @@ export interface FingerprintRecord {
   installed?: string;
 }
 
-export type PendingOperation = 'install' | 'update' | 'route-migrate' | 'retire-orphan' | 'remove';
+const PENDING_OPERATIONS = ['install', 'update', 'route-migrate', 'disable-nonconforming', 'retire-orphan', 'remove'] as const;
+
+export type PendingOperation = typeof PENDING_OPERATIONS[number];
 export type PendingPhase = 'accepted' | 'applying' | 'readback' | 'cleanup' | 'rollback';
 
 export interface PendingOperationRecord {
@@ -115,8 +117,21 @@ export interface ActivationRecord {
   updatedAt?: string;
 }
 
-export type JournalAction = 'install' | 'update' | 'unchanged' | 'route-migrate' | 'retain-prior' | 'retire-orphan' | 'remove';
+const JOURNAL_ACTIONS = [...PENDING_OPERATIONS, 'unchanged', 'retain-prior'] as const;
+
+export type JournalAction = typeof JOURNAL_ACTIONS[number];
 export type JournalState = 'pending' | 'applying' | 'applied' | 'readback-verified' | 'rollback' | 'rolled-back' | 'cleanup-pending' | 'completed' | 'failed' | 'not-attempted';
+
+const MUTATION_STARTED_JOURNAL_STATES = new Set<JournalState>([
+  'applying',
+  'applied',
+  'readback-verified',
+  'rollback',
+  'rolled-back',
+  'cleanup-pending',
+  'completed',
+  'failed',
+]);
 
 export interface JournalEntryRecord {
   operationId: string;
@@ -387,7 +402,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
       state.attempts.push({
         id: attemptId,
         command: 'legacy-recovery',
-        phase: 'applying',
+        phase: record.pending === 'remove' ? 'pruning' : 'applying',
         mutationStarted: true,
         scopeIds: [scopeId],
         journal: [{
@@ -588,7 +603,7 @@ function validateOwnershipProofReference(value: unknown, label: string): Ownersh
 function validatePending(value: unknown, label: string): PendingOperationRecord {
   const rec = asObject(value, label);
   exactFields(rec, ['operation', 'phase', 'attemptId', 'startedAt'], 'pending operation');
-  oneOf(rec['operation'], ['install', 'update', 'route-migrate', 'retire-orphan', 'remove'], `${label}.operation`);
+  oneOf(rec['operation'], PENDING_OPERATIONS, `${label}.operation`);
   oneOf(rec['phase'], ['accepted', 'applying', 'readback', 'cleanup', 'rollback'], `${label}.phase`);
   requiredString(rec['attemptId'], `${label}.attemptId`);
   optionalTimestamp(rec['startedAt'], `${label}.startedAt`);
@@ -603,6 +618,7 @@ function validatePendingSemantics(
   const pending = activation.pending!;
   const identity = `activation '${activationKey(activation)}'`;
   if (pending.operation !== journal.action) invalid(`${identity} pending operation must match journal action`);
+  const isRetirement = pending.operation === 'retire-orphan' || pending.operation === 'remove';
 
   let journalState: JournalState;
   let attemptPhases: Array<LifecycleAttemptRecord['phase']>;
@@ -615,12 +631,12 @@ function validatePendingSemantics(
       break;
     case 'applying':
       journalState = 'applying';
-      attemptPhases = ['applying', 'pruning'];
+      attemptPhases = [isRetirement ? 'pruning' : 'applying'];
       mutationStarted = true;
       break;
     case 'readback':
       journalState = 'applied';
-      attemptPhases = ['readback'];
+      attemptPhases = [isRetirement ? 'pruning' : 'readback'];
       mutationStarted = true;
       break;
     case 'cleanup':
@@ -644,13 +660,20 @@ function validateAttempt(value: unknown, label: string): LifecycleAttemptRecord 
   const rec = asObject(value, label);
   exactFields(rec, ['id', 'command', 'phase', 'mutationStarted', 'scopeIds', 'journal', 'startedAt', 'updatedAt', 'completedAt'], 'lifecycle attempt');
   requiredString(rec['id'], `${label}.id`);
-  oneOf(rec['command'], ['sync', 'retire-source', 'add', 'update', 'remove', 'legacy-recovery'], `${label}.command`);
+  const command = oneOf(rec['command'], ['sync', 'retire-source', 'add', 'update', 'remove', 'legacy-recovery'], `${label}.command`);
   oneOf(rec['phase'], ['accepted', 'applying', 'readback', 'pruning', 'finalizing', 'completed', 'failed', 'recovery-required'], `${label}.phase`);
-  if (typeof rec['mutationStarted'] !== 'boolean') invalid(`${label}.mutationStarted must be a boolean`);
+  const mutationStarted = rec['mutationStarted'];
+  if (typeof mutationStarted !== 'boolean') invalid(`${label}.mutationStarted must be a boolean`);
   const scopeIds = stringArray(rec['scopeIds'], `${label}.scopeIds`);
   if (scopeIds.length === 0) invalid(`${label}.scopeIds must not be empty`);
   unique(scopeIds, `${label}.scopeIds`);
-  array(rec['journal'], `${label}.journal`).forEach((item, index) => validateJournal(item, `${label}.journal[${index}]`));
+  const journal = array(rec['journal'], `${label}.journal`).map((item, index) => validateJournal(item, `${label}.journal[${index}]`));
+  for (const entry of journal) {
+    if (!commandAllowsJournalAction(command, entry.action)) invalid(`${label} command ${command} cannot journal action ${entry.action}`);
+  }
+  const journalShowsMutation = journal.some(entry => MUTATION_STARTED_JOURNAL_STATES.has(entry.state));
+  if (journalShowsMutation && !mutationStarted) invalid(`${label} journal shows mutation began but mutationStarted is false`);
+  if (mutationStarted && !journalShowsMutation) invalid(`${label} mutationStarted is true but no journal row shows mutation began`);
   optionalTimestamp(rec['startedAt'], `${label}.startedAt`);
   optionalTimestamp(rec['updatedAt'], `${label}.updatedAt`);
   optionalTimestamp(rec['completedAt'], `${label}.completedAt`);
@@ -665,12 +688,33 @@ function validateJournal(value: unknown, label: string): JournalEntryRecord {
   requiredString(rec['scopeId'], `${label}.scopeId`);
   optionalString(rec['packageId'], `${label}.packageId`);
   optionalString(rec['nativeId'], `${label}.nativeId`);
-  oneOf(rec['action'], ['install', 'update', 'unchanged', 'route-migrate', 'retain-prior', 'retire-orphan', 'remove'], `${label}.action`);
+  oneOf(rec['action'], JOURNAL_ACTIONS, `${label}.action`);
   oneOf(rec['state'], ['pending', 'applying', 'applied', 'readback-verified', 'rollback', 'rolled-back', 'cleanup-pending', 'completed', 'failed', 'not-attempted'], `${label}.state`);
   if (rec['route'] !== undefined) validateRoute(rec['route'], `${label}.route`);
   optionalTimestamp(rec['startedAt'], `${label}.startedAt`);
   optionalTimestamp(rec['updatedAt'], `${label}.updatedAt`);
   return value as JournalEntryRecord;
+}
+
+function commandAllowsJournalAction(command: LifecycleAttemptRecord['command'], action: JournalAction): boolean {
+  switch (command) {
+    case 'sync':
+      return action !== 'remove';
+    case 'retire-source':
+      return action === 'retire-orphan';
+    case 'add':
+    case 'update':
+      return action === 'install'
+        || action === 'update'
+        || action === 'unchanged'
+        || action === 'route-migrate'
+        || action === 'retain-prior'
+        || action === 'disable-nonconforming';
+    case 'remove':
+      return action === 'remove';
+    case 'legacy-recovery':
+      return true;
+  }
 }
 
 function validateTombstone(value: unknown, label: string): TombstoneRecord {

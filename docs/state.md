@@ -44,7 +44,7 @@ history. Its top level is:
   pending Activation's Attempt must include its scope and exactly one journal
   entry for the same package and native identity. Pending operations use the
   same mutating action vocabulary as the journal: `install`, `update`,
-  `route-migrate`, `retire-orphan`, or `remove`.
+  `route-migrate`, `disable-nonconforming`, `retire-orphan`, or `remove`.
 - A tombstone retains only lifecycle proof and history: identities, route and
   evidence, verified ownership/adoption proof, fingerprints, pins, retention
   state, and timestamps. The schema has no field for credentials,
@@ -84,10 +84,13 @@ Pending recovery is also closed across all three records:
 
 - `accepted` uses journal `pending`, Attempt `accepted`, and
   `mutationStarted: false`;
-- `applying` uses journal `applying`, Attempt `applying` or `pruning`, and
-  `mutationStarted: true`;
-- `readback` uses journal `applied`, Attempt `readback`, and
-  `mutationStarted: true`;
+- `applying` uses journal `applying` and `mutationStarted: true`. Desired
+  mutations (`install`, `update`, `route-migrate`, and
+  `disable-nonconforming`) require Attempt `applying`; retirement mutations
+  (`retire-orphan` and `remove`) require Attempt `pruning`;
+- `readback` uses journal `applied` and `mutationStarted: true`. Desired
+  mutations require Attempt `readback`; retirement mutations remain in
+  Attempt `pruning`;
 - `cleanup` uses journal `cleanup-pending`, Attempt `finalizing`, and
   `mutationStarted: true`;
 - `rollback` uses journal `rollback`, Attempt `recovery-required`, and
@@ -95,8 +98,20 @@ Pending recovery is also closed across all three records:
 
 The pending operation must equal the matching journal action. Terminal and
 non-mutating journal states cannot remain pending. Cleanup is a phase, explicit
-adoption is ownership proof within `route-migrate`, and reversible disablement
-does not create a separate pending action.
+adoption is ownership proof within `route-migrate`, and reversible safety
+containment is the explicit `disable-nonconforming` mutation.
+
+Attempt commands also close the journal vocabulary. `sync` permits every plan
+action except manual `remove`; `retire-source` permits only `retire-orphan`;
+`add` and `update` permit Desired actions plus `unchanged` and `retain-prior`,
+but no retirement or manual removal; `remove` permits only `remove`.
+`legacy-recovery` can represent any imported journal action.
+
+Journal states that prove mutation began (`applying`, `applied`,
+`readback-verified`, `rollback`, `rolled-back`, `cleanup-pending`, `completed`,
+or `failed`) require `mutationStarted: true`, and `true` requires at least one
+such row. A completed no-op Attempt containing only `unchanged`,
+`retain-prior`, or `not-attempted` work can remain false.
 
 Only `created` and `adopted` pass `hasRetirementAuthority()`. The planner must
 also require an authoritative scope and successful Desired convergence before
@@ -134,9 +149,10 @@ without changing the file:
   fingerprints, pins, and known timestamps;
 - legacy `pending: install|remove` becomes an explicit recovery Attempt,
   journal entry, and matching pending Activation operation. The imported tuple
-  is conservatively `applying` with `mutationStarted: true`, because v1 proves
-  intent was persisted before a mutation but cannot prove where interruption
-  occurred.
+  conservatively uses pending/journal `applying` with
+  `mutationStarted: true`; its Attempt is `applying` for install and `pruning`
+  for remove, because v1 proves intent was persisted before a mutation but
+  cannot prove where interruption occurred.
 
 Dry-run and read-only commands never persist that import. After command-global
 preflight succeeds, the caller may advance generation 0 to 1 and atomically
