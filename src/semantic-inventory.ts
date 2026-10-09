@@ -17,6 +17,8 @@ export const PACKAGE_SEMANTICS = [
   'auto-update-control',
   'resources',
   'permissions-preprocessing',
+  'retirement',
+  'retention-safety',
   'readback',
   'rollback',
   'activation-reload',
@@ -39,8 +41,20 @@ export interface PackageComponentInventory {
   permissionsPreprocessing: string[];
 }
 
+export type ComponentKind = 'command' | 'agent';
+export type ComponentRoot = 'commands' | '.claude/commands' | 'agents' | '.claude/agents';
+export type ComponentDialect = 'markdown' | 'toml';
+
+export interface ComponentDefinition {
+  kind: ComponentKind;
+  root: ComponentRoot;
+  dialect: ComponentDialect;
+  identity: string;
+  path: string;
+}
+
 export interface InvocationPolicyDeclaration {
-  dialect: 'claude-frontmatter' | 'codex-sidecar';
+  dialect: 'claude-frontmatter' | 'codex-sidecar' | 'component-frontmatter' | 'component-toml';
   path: string;
   field: string;
   direction: 'model' | 'user';
@@ -49,6 +63,14 @@ export interface InvocationPolicyDeclaration {
 
 export interface SkillInvocationPolicy {
   skill: string;
+  modelInvocable: boolean;
+  userInvocable: boolean;
+  declarations: InvocationPolicyDeclaration[];
+}
+
+export interface ComponentInvocationPolicy {
+  component: ComponentKind;
+  path: string;
   modelInvocable: boolean;
   userInvocable: boolean;
   declarations: InvocationPolicyDeclaration[];
@@ -65,7 +87,9 @@ export interface PackageSemanticInventory {
   schemaVersion: 1;
   package: { name: string; version: string | null; fingerprint: string | null };
   components: PackageComponentInventory;
+  componentDefinitions: ComponentDefinition[];
   invocationPolicies: SkillInvocationPolicy[];
+  componentInvocationPolicies: ComponentInvocationPolicy[];
   autoUpdate: AutoUpdateDeclaration[];
   /** Semantics authored by the package. Lifecycle requirements are added per operation. */
   requiredSemantics: PackageSemantic[];
@@ -86,8 +110,15 @@ export class SemanticInventoryError extends Error {
 export function inventoryPackageSemantics(plugin: PluginSource): PackageSemanticInventory {
   const files = walkFiles(plugin.dir);
   const skills = files.filter((path) => path.startsWith('skills/') && path.endsWith('/SKILL.md'));
-  const commands = selectComponentDefinitions(files, ['commands', '.claude/commands', '.codex/commands'], ['.md', '.toml']);
-  const agents = selectComponentDefinitions(files, ['agents', '.claude/agents', '.codex/agents'], ['.md']);
+  const componentInventory = inventoryComponentRoots(plugin.dir);
+  const commands = componentInventory.definitions
+    .filter(({ kind }) => kind === 'command')
+    .map(({ path }) => path)
+    .sort();
+  const agents = componentInventory.definitions
+    .filter(({ kind }) => kind === 'agent')
+    .map(({ path }) => path)
+    .sort();
   const hooks = files.filter((path) => path.startsWith('hooks/') || path.startsWith('.claude/hooks/'));
   const mcp: string[] = files.filter((path) => path === '.mcp.json' || path === 'mcp.json');
   const sidecars = new Set(skills.map((path) => `${dirname(path)}/agents/openai.yaml`));
@@ -98,19 +129,7 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
 
   for (const path of mcp) parseJsonObject(join(plugin.dir, path), `MCP declaration ${path}`);
 
-  const permissionPaths = new Set<string>();
-  for (const path of [...commands, ...agents]) {
-    const raw = readFileSync(join(plugin.dir, path), 'utf8');
-    if (path.endsWith('.toml')) {
-      const record = parseTomlObject(raw, path);
-      if (hasAny(record, PERMISSION_FIELDS)) permissionPaths.add(path);
-    } else {
-      const frontmatter = openingFrontmatter(raw, path);
-      if ((frontmatter !== undefined && hasAny(frontmatter, PERMISSION_FIELDS)) || /^!`[^\n]+`[ \t]*$/mu.test(raw)) {
-        permissionPaths.add(path);
-      }
-    }
-  }
+  const permissionPaths = new Set(componentInventory.permissionPaths);
 
   const invocationPolicies = skills.map((path) => inventorySkillPolicy(plugin.dir, path));
   const manifest = readSemanticManifest(plugin.dir);
@@ -156,6 +175,8 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
   if (agents.length > 0) required.add('agents');
   if (invocationPolicies.some((policy) => !policy.modelInvocable)) required.add('model-invocation-control');
   if (invocationPolicies.some((policy) => !policy.userInvocable)) required.add('user-invocation-control');
+  if (componentInventory.invocationPolicies.some((policy) => !policy.modelInvocable)) required.add('model-invocation-control');
+  if (componentInventory.invocationPolicies.some((policy) => !policy.userInvocable)) required.add('user-invocation-control');
   if (autoUpdate.length > 0) required.add('auto-update-control');
   if (resources.length > 0) required.add('resources');
   if (permissionPaths.size > 0) required.add('permissions-preprocessing');
@@ -168,7 +189,9 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
       fingerprint: plugin.contentFingerprint ?? null,
     },
     components,
+    componentDefinitions: componentInventory.definitions,
     invocationPolicies,
+    componentInvocationPolicies: componentInventory.invocationPolicies,
     autoUpdate,
     requiredSemantics: ordered(required),
   };
@@ -176,9 +199,19 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
 
 /** Requirements which every operation must prove in addition to Source semantics. */
 export function requiredSemanticsForOperation(
-  inventory: PackageSemanticInventory,
+  inventory: PackageSemanticInventory | undefined,
   operation: CapabilityOperation,
 ): PackageSemantic[] {
+  if (operation === 'retire') {
+    return ordered(new Set<PackageSemantic>([
+      'retirement',
+      'retention-safety',
+      'readback',
+      'rollback',
+      'activation-reload',
+    ]));
+  }
+  if (inventory === undefined) invalid(`${operation} semantic admission requires Source inventory`);
   const required = new Set(inventory.requiredSemantics);
   required.add('readback');
   required.add('rollback');
@@ -240,9 +273,15 @@ function onePolicyValue(declarations: InvocationPolicyDeclaration[], direction: 
 }
 
 function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw);
+  const match = OPENING_FRONTMATTER.exec(raw);
   if (match === null) return undefined;
   return parseYamlObject(match[1] ?? '', `frontmatter ${path}`);
+}
+
+function requiredOpeningFrontmatter(raw: string, path: string): Record<string, unknown> {
+  const frontmatter = openingFrontmatter(raw, path);
+  if (frontmatter === undefined) invalid(`component frontmatter is required: ${path}`);
+  return frontmatter;
 }
 
 function parseYamlObject(raw: string, label: string): Record<string, unknown> {
@@ -306,12 +345,139 @@ function walkFiles(root: string): string[] {
   return files.sort();
 }
 
-function selectComponentDefinitions(files: readonly string[], roots: readonly string[], extensions: readonly string[]): string[] {
-  for (const root of roots) {
-    const selected = files.filter((path) => path.startsWith(`${root}/`) && extensions.some((extension) => path.endsWith(extension)));
-    if (selected.length > 0) return selected;
+type ComponentRootSpec = {
+  kind: ComponentKind;
+  root: ComponentRoot;
+  dialects: Readonly<Record<string, ComponentDialect>>;
+};
+
+const COMPONENT_ROOT_SPECS: readonly ComponentRootSpec[] = [
+  { kind: 'command', root: 'commands', dialects: { '.md': 'markdown', '.toml': 'toml' } },
+  { kind: 'command', root: '.claude/commands', dialects: { '.md': 'markdown' } },
+  { kind: 'agent', root: 'agents', dialects: { '.md': 'markdown' } },
+  { kind: 'agent', root: '.claude/agents', dialects: { '.md': 'markdown' } },
+];
+
+const UNSUPPORTED_COMPONENT_ROOTS = ['.codex/commands', '.codex/agents'] as const;
+
+function inventoryComponentRoots(root: string): {
+  definitions: ComponentDefinition[];
+  invocationPolicies: ComponentInvocationPolicy[];
+  permissionPaths: string[];
+} {
+  for (const unsupported of UNSUPPORTED_COMPONENT_ROOTS) {
+    if (existsSync(join(root, unsupported))) invalid(`unsupported component root: ${unsupported}`);
   }
-  return [];
+
+  const definitions: ComponentDefinition[] = [];
+  const invocationPolicies: ComponentInvocationPolicy[] = [];
+  const permissionPaths = new Set<string>();
+  for (const spec of COMPONENT_ROOT_SPECS) {
+    const directory = join(root, spec.root);
+    if (!existsSync(directory)) continue;
+    const rootStat = lstatSync(directory);
+    if (!rootStat.isDirectory()) invalid(`component root must be a directory: ${spec.root}`);
+    const entries = readdirSync(directory).sort();
+    if (entries.length === 0) invalid(`component root must not be empty: ${spec.root}`);
+
+    const identities = new Set<string>();
+    for (const entry of entries) {
+      const absolute = join(directory, entry);
+      const path = `${spec.root}/${entry}`;
+      const stat = lstatSync(absolute);
+      if (!stat.isFile()) invalid(`component root entries must be regular files: ${path}`);
+      const suffix = Object.keys(spec.dialects).find((candidate) => entry.endsWith(candidate));
+      if (suffix === undefined) invalid(`unsupported ${spec.kind} dialect: ${path}`);
+      const dialect = spec.dialects[suffix];
+      if (dialect === undefined) invalid(`unsupported ${spec.kind} dialect: ${path}`);
+
+      const parsed = parseComponentDefinition(absolute, path, spec.kind, dialect, entry.slice(0, -suffix.length));
+      if (identities.has(parsed.definition.identity)) {
+        invalid(`duplicate ${spec.kind} identity '${parsed.definition.identity}' within ${spec.root}`);
+      }
+      identities.add(parsed.definition.identity);
+      definitions.push({ ...parsed.definition, root: spec.root });
+      if (parsed.policy.declarations.length > 0) invocationPolicies.push(parsed.policy);
+      if (parsed.hasPermissionsPreprocessing) permissionPaths.add(path);
+    }
+  }
+  return {
+    definitions,
+    invocationPolicies,
+    permissionPaths: [...permissionPaths].sort(),
+  };
+}
+
+function parseComponentDefinition(
+  absolute: string,
+  path: string,
+  kind: ComponentKind,
+  dialect: ComponentDialect,
+  filenameIdentity: string,
+): {
+  definition: Omit<ComponentDefinition, 'root'>;
+  policy: ComponentInvocationPolicy;
+  hasPermissionsPreprocessing: boolean;
+} {
+  const raw = readFileSync(absolute, 'utf8');
+  let record: Record<string, unknown>;
+  let body: string;
+  if (dialect === 'toml') {
+    if (kind !== 'command') invalid(`unsupported ${kind} dialect: ${path}`);
+    record = parseTomlObject(raw, path);
+    if (typeof record['description'] !== 'string' || record['description'].trim() === '' || typeof record['prompt'] !== 'string') {
+      invalid(`command TOML needs description and prompt: ${path}`);
+    }
+    body = record['prompt'];
+  } else {
+    const frontmatter = requiredOpeningFrontmatter(raw, path);
+    if (typeof frontmatter['description'] !== 'string' || frontmatter['description'].trim() === '') {
+      invalid(`${kind} description is required: ${path}`);
+    }
+    record = frontmatter;
+    const match = OPENING_FRONTMATTER.exec(raw);
+    body = match?.[2] ?? '';
+  }
+
+  const identity = kind === 'agent' ? record['name'] : filenameIdentity;
+  if (typeof identity !== 'string' || identity.trim() === '') invalid(`${kind} identity is required: ${path}`);
+  const declarations = kind === 'command' ? componentInvocationDeclarations(record, dialect, path) : [];
+  const policy: ComponentInvocationPolicy = {
+    component: kind,
+    path,
+    modelInvocable: onePolicyValue(declarations, 'model', path),
+    userInvocable: onePolicyValue(declarations, 'user', path),
+    declarations,
+  };
+  return {
+    definition: { kind, dialect, identity, path },
+    policy,
+    hasPermissionsPreprocessing: hasAny(record, PERMISSION_FIELDS) || /!`[\s\S]*?`/u.test(body),
+  };
+}
+
+function componentInvocationDeclarations(
+  record: Record<string, unknown>,
+  dialect: ComponentDialect,
+  path: string,
+): InvocationPolicyDeclaration[] {
+  const declarations: InvocationPolicyDeclaration[] = [];
+  const policyDialect = dialect === 'toml' ? 'component-toml' : 'component-frontmatter';
+  for (const field of MODEL_INVOCATION_ALIASES) {
+    if (!Object.hasOwn(record, field)) continue;
+    const value = record[field];
+    if (typeof value !== 'boolean') invalid(`component invocation policy ${field} must be boolean: ${path}`);
+    declarations.push({ dialect: policyDialect, path, field, direction: 'model', allowed: !value });
+  }
+  for (const field of USER_INVOCATION_ALIASES) {
+    if (!Object.hasOwn(record, field)) continue;
+    const value = record[field];
+    if (typeof value !== 'boolean') invalid(`component invocation policy ${field} must be boolean: ${path}`);
+    declarations.push({ dialect: policyDialect, path, field, direction: 'user', allowed: value });
+  }
+  onePolicyValue(declarations, 'model', path);
+  onePolicyValue(declarations, 'user', path);
+  return declarations;
 }
 
 function ordered(values: ReadonlySet<PackageSemantic>): PackageSemantic[] {
@@ -342,6 +508,7 @@ function errorDiagnostic(error: unknown): string {
   return error instanceof Error && error.message.trim() !== '' ? error.message : String(error);
 }
 
+const OPENING_FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/u;
 const MODEL_INVOCATION_ALIASES = ['disable-model-invocation', 'disable_model_invocation'] as const;
 const USER_INVOCATION_ALIASES = ['user-invocable', 'user_invocable'] as const;
 const PERMISSION_FIELDS = [

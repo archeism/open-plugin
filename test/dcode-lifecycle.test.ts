@@ -24,6 +24,7 @@ async function isolated(fn: (root: string) => Promise<void>): Promise<void> {
 }
 async function failed(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected failure'); }
 const registry = (root: string) => join(root, '.state', 'installed_plugins.json');
+const enablement = (root: string) => join(root, '.state', 'plugin_state.json');
 const copy = (root: string) => join(root, 'plugins/cache/personal/addy/0.1.0');
 
 describe('dcode lifecycle', () => {
@@ -108,7 +109,7 @@ describe('dcode lifecycle', () => {
   test('unsupported commands, agents, and model-invocation controls are typed before activation', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': 'nope\n', 'agents/x.md': '---\nname: x\ndescription: x\n---\nbody\n' });
+      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': '---\ndescription: x\n---\nbody\n', 'agents/x.md': '---\nname: x\ndescription: x\n---\nbody\n' });
       const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved));
       expect(commandFailure instanceof PackageCapabilityError).toBe(true);
       expect((commandFailure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual(['commands', 'agents']);
@@ -116,6 +117,72 @@ describe('dcode lifecycle', () => {
       expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: true\n---\nbody\n' });
       const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain('unsupported for model-invocation-control'); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+    });
+  });
+  test('rejects unknown, duplicate, and malformed alternate component roots before first activation', async () => {
+    const cases: Array<{ name: string; files: Record<string, string> }> = [
+      { name: 'unknown-command', files: { 'commands/run.txt': 'must not activate\n' } },
+      { name: 'unknown-agent', files: { 'agents/reviewer.txt': 'must not activate\n' } },
+      {
+        name: 'malformed-alternate-command',
+        files: {
+          'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+          '.claude/commands/hidden.txt': 'must not be suppressed\n',
+        },
+      },
+      {
+        name: 'malformed-alternate-agent',
+        files: {
+          'agents/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n',
+          '.claude/agents/hidden.toml': 'must not be suppressed\n',
+        },
+      },
+      {
+        name: 'duplicate-command',
+        files: {
+          'commands/run.md': '---\ndescription: Run\n---\nbody\n',
+          'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+        },
+      },
+    ];
+
+    for (const item of cases) {
+      await isolated(async root => {
+        const candidate = incoming();
+        writeFiles(candidate.plugin.dir, item.files);
+        const failure = await failed(() => dcodeWriter.add(candidate.plugin, candidate.resolved));
+        expect(failure instanceof SemanticInventoryError).toBe(true);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+        expect(existsSync(enablement(root))).toBe(false);
+      });
+    }
+  });
+  test('unions stronger semantics from a valid alternate root before replacing active state', async () => {
+    await isolated(async root => {
+      const first = incoming('first\n');
+      await dcodeWriter.add(first.plugin, first.resolved);
+      const beforeSkill = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const beforeRegistry = readFileSync(registry(root), 'utf8');
+      const beforeEnablement = readFileSync(enablement(root), 'utf8');
+      const changed = incoming('second\n');
+      changed.resolved.sourceUri = first.resolved.sourceUri;
+      writeFiles(changed.plugin.dir, {
+        'commands/run.toml': 'description = "Run"\nprompt = "neutral body"\n',
+        '.claude/commands/run.md': '---\ndescription: Run\nallowed-tools: Bash\ndisable-model-invocation: true\nuser-invocable: false\n---\nprojected body\n',
+      });
+
+      const failure = await failed(() => dcodeWriter.add(changed.plugin, changed.resolved));
+      expect(failure instanceof PackageCapabilityError).toBe(true);
+      expect((failure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual([
+        'commands',
+        'model-invocation-control',
+        'user-invocation-control',
+        'permissions-preprocessing',
+      ]);
+      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(beforeSkill);
+      expect(readFileSync(registry(root), 'utf8')).toBe(beforeRegistry);
+      expect(readFileSync(enablement(root), 'utf8')).toBe(beforeEnablement);
     });
   });
   test('reads model and user invocation aliases independently only from opening YAML frontmatter', async () => {

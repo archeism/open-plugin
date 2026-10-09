@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fingerprintTree } from '../src/fingerprint';
@@ -34,6 +34,16 @@ function source(name: string, files: Record<string, string>, version = '1.0.0'):
   };
 }
 
+function semanticFailure(plugin: PluginSource): SemanticInventoryError {
+  try {
+    inventoryPackageSemantics(plugin);
+  } catch (error) {
+    expect(error instanceof SemanticInventoryError).toBe(true);
+    return error as SemanticInventoryError;
+  }
+  throw new Error(`expected semantic inventory failure for ${plugin.name}`);
+}
+
 const skill = (frontmatter = '') => `---\nname: fixture\ndescription: fixture\n${frontmatter}---\nbody\n`;
 
 describe('source package semantic inventory', () => {
@@ -49,6 +59,8 @@ describe('source package semantic inventory', () => {
       'auto-update-control',
       'resources',
       'permissions-preprocessing',
+      'retirement',
+      'retention-safety',
       'readback',
       'rollback',
       'activation-reload',
@@ -190,16 +202,104 @@ describe('source package semantic inventory', () => {
     ]);
   });
 
-  test('uses the neutral component tree once when a package also carries a host projection', () => {
+  test('inventories every valid authored root and unions stronger alternate-root semantics', () => {
     const inventory = inventoryPackageSemantics(source('projected', {
       'commands/build.toml': 'description = "Build"\nprompt = "canonical"\n',
-      '.claude/commands/build.md': '---\ndescription: Build\n---\nprojected\n',
+      '.claude/commands/build.md': '---\ndescription: Build\ndisable-model-invocation: true\nuser-invocable: false\n---\nprojected inline !`date\necho ok` preprocessing\n',
       'agents/reviewer.md': '---\nname: reviewer\ndescription: Canonical\n---\nreview\n',
-      '.claude/agents/reviewer.md': '---\nname: reviewer\ndescription: Projected\n---\nreview\n',
+      '.claude/agents/reviewer.md': '---\nname: reviewer\ndescription: Projected\ntools: Read\n---\nreview\n',
     }));
 
-    expect(inventory.components.commands).toEqual(['commands/build.toml']);
-    expect(inventory.components.agents).toEqual(['agents/reviewer.md']);
+    expect(inventory.components.commands).toEqual([
+      '.claude/commands/build.md',
+      'commands/build.toml',
+    ]);
+    expect(inventory.components.agents).toEqual([
+      '.claude/agents/reviewer.md',
+      'agents/reviewer.md',
+    ]);
+    expect(inventory.componentDefinitions).toEqual([
+      { kind: 'command', root: 'commands', dialect: 'toml', identity: 'build', path: 'commands/build.toml' },
+      { kind: 'command', root: '.claude/commands', dialect: 'markdown', identity: 'build', path: '.claude/commands/build.md' },
+      { kind: 'agent', root: 'agents', dialect: 'markdown', identity: 'reviewer', path: 'agents/reviewer.md' },
+      { kind: 'agent', root: '.claude/agents', dialect: 'markdown', identity: 'reviewer', path: '.claude/agents/reviewer.md' },
+    ]);
+    expect(inventory.components.permissionsPreprocessing).toEqual([
+      '.claude/agents/reviewer.md',
+      '.claude/commands/build.md',
+    ]);
+    expect(inventory.requiredSemantics).toEqual([
+      'commands',
+      'agents',
+      'model-invocation-control',
+      'user-invocation-control',
+      'permissions-preprocessing',
+    ]);
+  });
+
+  test('rejects every unsupported, empty, nested, or non-directory component-root shape', () => {
+    const unsupported = [
+      source('command-extension', { 'commands/run.txt': 'not a command\n' }),
+      source('claude-command-dialect', { '.claude/commands/run.toml': 'description = "Run"\nprompt = "body"\n' }),
+      source('agent-extension', { 'agents/reviewer.txt': 'not an agent\n' }),
+      source('claude-agent-dialect', { '.claude/agents/reviewer.toml': 'name = "reviewer"\n' }),
+      source('nested-command', { 'commands/nested/run.md': '---\ndescription: Run\n---\nbody\n' }),
+      source('nested-claude-command', { '.claude/commands/nested/run.md': '---\ndescription: Run\n---\nbody\n' }),
+      source('nested-agent', { 'agents/nested/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n' }),
+      source('nested-claude-agent', { '.claude/agents/nested/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n' }),
+      source('command-root-file', { commands: 'not a directory\n' }),
+      source('claude-command-root-file', { '.claude/commands': 'not a directory\n' }),
+      source('agent-root-file', { agents: 'not a directory\n' }),
+      source('claude-agent-root-file', { '.claude/agents': 'not a directory\n' }),
+      source('codex-command-root', { '.codex/commands/run.md': '---\ndescription: Run\n---\nbody\n' }),
+      source('codex-agent-root', { '.codex/agents/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n' }),
+    ];
+    const empty = [
+      source('empty-commands', {}),
+      source('empty-claude-commands', {}),
+      source('empty-agents', {}),
+      source('empty-claude-agents', {}),
+    ];
+    for (const [plugin, root] of empty.map((plugin, index) => [plugin, ['commands', '.claude/commands', 'agents', '.claude/agents'][index]!] as const)) {
+      mkdirSync(join(plugin.dir, root), { recursive: true });
+    }
+
+    for (const plugin of [...unsupported, ...empty]) {
+      semanticFailure(plugin);
+    }
+  });
+
+  test('rejects malformed definitions, duplicates within one root, and malformed alternate roots', () => {
+    const cases = [
+      source('markdown-command-no-frontmatter', { 'commands/run.md': 'body only\n' }),
+      source('markdown-command-invalid-yaml', { 'commands/run.md': '---\ndescription: [unterminated\n---\nbody\n' }),
+      source('claude-command-invalid-yaml', { '.claude/commands/run.md': '---\ndescription: [unterminated\n---\nbody\n' }),
+      source('toml-command-no-prompt', { 'commands/run.toml': 'description = "Run"\n' }),
+      source('toml-command-invalid', { 'commands/run.toml': 'description = [unterminated\n' }),
+      source('agent-no-name', { 'agents/reviewer.md': '---\ndescription: Review\n---\nbody\n' }),
+      source('agent-invalid-yaml', { 'agents/reviewer.md': '---\nname: [unterminated\n---\nbody\n' }),
+      source('claude-agent-invalid-yaml', { '.claude/agents/reviewer.md': '---\nname: [unterminated\n---\nbody\n' }),
+      source('duplicate-command-identity', {
+        'commands/run.md': '---\ndescription: Run\n---\nbody\n',
+        'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+      }),
+      source('duplicate-agent-identity', {
+        'agents/first.md': '---\nname: reviewer\ndescription: First\n---\nbody\n',
+        'agents/second.md': '---\nname: reviewer\ndescription: Second\n---\nbody\n',
+      }),
+      source('malformed-alternate-command', {
+        'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+        '.claude/commands/ignored.txt': 'must not disappear\n',
+      }),
+      source('malformed-alternate-agent', {
+        'agents/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n',
+        '.claude/agents/ignored.toml': 'must not disappear\n',
+      }),
+    ];
+
+    for (const plugin of cases) {
+      semanticFailure(plugin);
+    }
   });
 });
 
@@ -240,6 +340,62 @@ describe('versioned capability evidence', () => {
       { category: 'capability', code: 'capability.unsupported', capabilityId: 'commands', evidenceId: refused.profile?.evidenceId },
       { category: 'capability', code: 'capability.unsupported', capabilityId: 'agents', evidenceId: refused.profile?.evidenceId },
     ]);
+  });
+
+  test('projects retirement from recorded lifecycle semantics only, with or without Source inventory', () => {
+    const unsupportedAtRuntime = inventoryPackageSemantics(source('retirement', {
+      'commands/run.md': '---\ndescription: Run\nallowed-tools: Bash\n---\nbody\n',
+      'agents/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n',
+      'skills/manual/SKILL.md': skill('disable-model-invocation: true\nuser-invocable: false\n'),
+      'mcp.json': '{"mcpServers":{"fixture":{"command":"fixture"}}}\n',
+    }));
+
+    const recorded = admitPackageSemantics({
+      host: 'dcode',
+      detectedVersion: '0.1.83',
+      sourceType: 'git',
+      operation: 'retire',
+      route: 'managed',
+      inventory: unsupportedAtRuntime,
+    });
+    const offline = admitPackageSemantics({
+      host: 'dcode',
+      detectedVersion: '0.1.83',
+      sourceType: 'git',
+      operation: 'retire',
+      route: 'managed',
+    });
+
+    for (const admission of [recorded, offline]) {
+      expect(admission.status).toBe('admitted');
+      expect(admission.gaps).toEqual([]);
+      expect(admission.requirements).toEqual([
+        'retirement',
+        'retention-safety',
+        'readback',
+        'rollback',
+        'activation-reload',
+      ]);
+    }
+  });
+
+  test('still requires Source inventory for install and update at the runtime boundary', () => {
+    for (const operation of ['install', 'update'] as const) {
+      const untyped = {
+        host: 'dcode',
+        detectedVersion: '0.1.83',
+        sourceType: 'local',
+        operation,
+        route: 'managed',
+      } as unknown as Parameters<typeof admitPackageSemantics>[0];
+      let failure: unknown;
+      try {
+        admitPackageSemantics(untyped);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure instanceof SemanticInventoryError).toBe(true);
+    }
   });
 
   test('classifies unknown, unparseable, and unmatched versions as unverified', () => {
@@ -361,7 +517,9 @@ describe('versioned capability evidence', () => {
         name: item.name,
         counts: {
           skills: inventory.components.skills.length,
-          commands: inventory.components.commands.length,
+          commandDefinitions: inventory.components.commands.length,
+          neutralCommands: inventory.componentDefinitions.filter(({ root }) => root === 'commands').length,
+          claudeCommands: inventory.componentDefinitions.filter(({ root }) => root === '.claude/commands').length,
           agents: inventory.components.agents.length,
           modelRestricted: inventory.invocationPolicies.filter(({ modelInvocable }) => !modelInvocable).length,
           sidecars: inventory.invocationPolicies.flatMap(({ declarations }) => declarations).filter(({ dialect }) => dialect === 'codex-sidecar').length,
@@ -373,10 +531,10 @@ describe('versioned capability evidence', () => {
     });
 
     expect(actual).toEqual([
-      { name: 'addy', counts: { skills: 25, commands: 9, agents: 4, modelRestricted: 0, sidecars: 0 }, gaps: ['commands', 'agents'], expectedGaps: ['commands', 'agents'], status: 'refused' },
-      { name: 'vercel', counts: { skills: 7, commands: 3, agents: 0, modelRestricted: 0, sidecars: 0 }, gaps: ['commands'], expectedGaps: ['commands'], status: 'refused' },
-      { name: 'mattpocock', counts: { skills: 37, commands: 0, agents: 0, modelRestricted: 22, sidecars: 22 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
-      { name: 'try-skill', counts: { skills: 3, commands: 0, agents: 0, modelRestricted: 1, sidecars: 0 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
+      { name: 'addy', counts: { skills: 25, commandDefinitions: 18, neutralCommands: 9, claudeCommands: 9, agents: 4, modelRestricted: 0, sidecars: 0 }, gaps: ['commands', 'agents'], expectedGaps: ['commands', 'agents'], status: 'refused' },
+      { name: 'vercel', counts: { skills: 7, commandDefinitions: 3, neutralCommands: 3, claudeCommands: 0, agents: 0, modelRestricted: 0, sidecars: 0 }, gaps: ['commands'], expectedGaps: ['commands'], status: 'refused' },
+      { name: 'mattpocock', counts: { skills: 37, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, modelRestricted: 22, sidecars: 22 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
+      { name: 'try-skill', counts: { skills: 3, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, modelRestricted: 1, sidecars: 0 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
     ]);
   });
 });

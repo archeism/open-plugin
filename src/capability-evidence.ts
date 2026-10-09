@@ -36,14 +36,23 @@ export type PackageAdmission = {
   gaps: Array<Extract<LifecycleReason, { category: 'capability' }>>;
 };
 
-export interface PackageAdmissionRequest {
+interface PackageAdmissionRequestBase {
   host: string;
   detectedVersion?: string;
   sourceType: SourceType;
-  operation: CapabilityOperation;
   route: CapabilityRoute;
-  inventory: PackageSemanticInventory;
 }
+
+export type PackageAdmissionRequest =
+  | (PackageAdmissionRequestBase & {
+      operation: 'install' | 'update';
+      inventory: PackageSemanticInventory;
+    })
+  | (PackageAdmissionRequestBase & {
+      operation: 'retire';
+      /** Retirement is authorized from recorded activation state when Source is unavailable. */
+      inventory?: PackageSemanticInventory;
+    });
 
 /** Legacy writer bridge; planners consume PackageAdmission directly. */
 export class PackageCapabilityError extends CompatibilityError {
@@ -82,6 +91,8 @@ const dcode0183Managed = defineProfile({
     'auto-update-control': 'supported',
     resources: 'supported',
     'permissions-preprocessing': 'unsupported',
+    retirement: 'supported',
+    'retention-safety': 'supported',
     readback: 'supported',
     rollback: 'supported',
     'activation-reload': 'supported',
