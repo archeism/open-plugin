@@ -312,28 +312,40 @@ describe('sync manifest public parser', () => {
   });
 
   test('rejects two instance identities that overlap one adapter-owned physical target', () => {
-    const entry = (source: string, instance: string, root: string) => ({
+    const entry = (source: string, instance: string, root: string, configPath: string) => ({
       operation: 'sync',
       source: { kind: 'local', locator: source },
       target: {
         kind: 'hermes',
         instance,
-        context: { root, configPath: `${root}/config.yaml` },
+        context: { root, configPath },
       },
     });
 
-    expect(validationCode(() => parseSyncManifest({
-      schemaVersion: 1,
-      entries: [
-        entry('/sources/one', 'work', '/profiles/shared/.hermes'),
-        entry('/sources/two', 'personal', '/profiles/shared/.hermes'),
+    const overlappingPairs = [
+      [
+        entry('/sources/one', 'work', '/profiles/shared/.hermes', '/configs/shared.yaml'),
+        entry('/sources/two', 'personal', '/profiles/shared/.hermes', '/configs/shared.yaml'),
       ],
-    }))).toBe('usage.invalid-selection');
+      [
+        entry('/sources/one', 'work', '/profiles/shared/.hermes', '/configs/work.yaml'),
+        entry('/sources/two', 'personal', '/profiles/shared/.hermes', '/configs/personal.yaml'),
+      ],
+      [
+        entry('/sources/one', 'work', '/profiles/work/.hermes', '/configs/shared.yaml'),
+        entry('/sources/two', 'personal', '/profiles/personal/.hermes', '/configs/shared.yaml'),
+      ],
+    ];
+    expect(overlappingPairs.map(entries => validationCode(() => parseSyncManifest({ schemaVersion: 1, entries })))).toEqual([
+      'usage.invalid-selection',
+      'usage.invalid-selection',
+      'usage.invalid-selection',
+    ]);
     expect(parseSyncManifest({
       schemaVersion: 1,
       entries: [
-        entry('/sources/one', 'work', '/profiles/work/.hermes'),
-        entry('/sources/two', 'personal', '/profiles/personal/.hermes'),
+        entry('/sources/one', 'work', '/profiles/work/.hermes', '/configs/work.yaml'),
+        entry('/sources/two', 'personal', '/profiles/personal/.hermes', '/configs/personal.yaml'),
       ],
     }).entries).toHaveLength(2);
   });

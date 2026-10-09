@@ -43,7 +43,9 @@ export const hermesTargetProfile: TargetProfile<'hermes'> = {
     return hermesPhysicalKey(target);
   },
   overlaps(left, right) {
-    return hermesPhysicalKey(left) === hermesPhysicalKey(right);
+    const leftContext = hermesContext(left);
+    const rightContext = hermesContext(right);
+    return leftContext.root === rightContext.root || leftContext.configPath === rightContext.configPath;
   },
 };
 
