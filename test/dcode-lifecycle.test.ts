@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { dcode } from '../src/hosts/dcode';
 import { dcodeWriter } from '../src/hosts/dcode-writer';
 import { CompatibilityError } from '../src/compatibility';
+import { PackageCapabilityError } from '../src/capability-evidence';
+import { SemanticInventoryError } from '../src/semantic-inventory';
 import type { PluginSource, ResolvedSource } from '../src/source';
 import { writeFiles } from './util';
 
@@ -103,21 +105,25 @@ describe('dcode lifecycle', () => {
       expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('no supported plugin manifest'); expect(existsSync(copy(root))).toBe(false);
     });
   });
-  test('unsupported command and user-only semantics preserve the active copy', async () => {
+  test('unsupported commands, agents, and model-invocation controls are typed before activation', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': 'nope\n' });
-      const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved)); expect(commandFailure instanceof CompatibilityError).toBe(true); expect(commandFailure.message).toContain("target 'dcode' is unsupported for commandProjection"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': 'nope\n', 'agents/x.md': '---\nname: x\ndescription: x\n---\nbody\n' });
+      const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved));
+      expect(commandFailure instanceof PackageCapabilityError).toBe(true);
+      expect((commandFailure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual(['commands', 'agents']);
+      expect(commandFailure.message).toContain("target 'dcode' 0.1.83 managed update is unsupported for commands");
+      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: true\n---\nbody\n' });
-      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain("target 'dcode' is unsupported for userOnlySkills"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain('unsupported for model-invocation-control'); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
-  test('reads all user-only aliases only from opening YAML frontmatter', async () => {
+  test('reads model and user invocation aliases independently only from opening YAML frontmatter', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      for (const [key, value] of [['disable-model-invocation', true], ['disable_model_invocation', true], ['user-invocable', false], ['user_invocable', false]] as const) {
+      for (const [key, value, capability] of [['disable-model-invocation', true, 'model-invocation-control'], ['disable_model_invocation', true, 'model-invocation-control'], ['user-invocable', false, 'user-invocation-control'], ['user_invocable', false, 'user-invocation-control']] as const) {
         const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': `---\nname: a\ndescription: fixture\n"${key}": ${value}\n---\nbody\n` });
-        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain("target 'dcode' is unsupported for userOnlySkills"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain(`unsupported for ${capability}`); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       }
       const ordinary = incoming(); ordinary.resolved.sourceUri = first.resolved.sourceUri; writeFiles(ordinary.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: false\nuser-invocable: true\n---\nbody\n', 'skills/a/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: true\n' });
       expect(await dcodeWriter.add(ordinary.plugin, ordinary.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
@@ -132,9 +138,11 @@ describe('dcode lifecycle', () => {
       writeFiles(restricted.plugin.dir, { 'skills/a/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: false\n' });
       const failure = await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved));
       expect(failure instanceof CompatibilityError).toBe(true);
-      expect(failure.message).toContain("target 'dcode' is unsupported for userOnlySkills");
+      expect(failure.message).toContain('unsupported for model-invocation-control');
       writeFiles(restricted.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: false\nuser-invocable: true\n---\nsecond\n' });
-      expect((await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved))).message).toContain("target 'dcode' is unsupported for userOnlySkills");
+      const conflict = await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved));
+      expect(conflict instanceof SemanticInventoryError).toBe(true);
+      expect(conflict.message).toContain('conflicting model-invocation policy declarations');
       expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toContain('first');
     });
   });
