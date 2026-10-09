@@ -527,10 +527,7 @@ export function createLifecycleHostAdapter(definition: LifecycleHostDefinition):
       assertRollbackCoverage(capture.rollbackCoverageOperationIds, request.selection.affectedOperationIds);
       const prior = normalizeReadback(capture.prior);
       assertPriorMatchesActivation(prior, request.activation);
-      if (prior.retention.pluginData.state === 'not-observed'
-        || prior.retention.inactiveMetadata.state === 'not-observed'
-        || prior.retention.pluginData.state === 'missing'
-        || prior.retention.inactiveMetadata.state === 'missing') {
+      if (!hasExactRetentionObservation(prior.retention)) {
         throw phaseError('seal', 'internal.invariant', new Error('retirement requires exact prior plugin-data and inactive-metadata observations'));
       }
       const expected = normalizeReadback({
@@ -1159,16 +1156,27 @@ function assertActionExpectation(
     if (prior.presence !== 'present' || expected.presence !== 'present'
       || expected.enablement !== 'disabled' || expected.activation !== 'inactive'
       || expected.installedFingerprint !== prior.installedFingerprint
-      || canonicalJson(expected.contentRoots) !== canonicalJson(prior.contentRoots)) {
+      || canonicalJson(expected.contentRoots) !== canonicalJson(prior.contentRoots)
+      || canonicalJson(expected.retention) !== canonicalJson(prior.retention)) {
       invariant('disablement expectation must retain exact installed bytes and become disabled/inactive');
     }
     return;
+  }
+  if (!hasExactRetentionObservation(prior.retention)) {
+    invariant('retirement requires exact prior plugin-data and inactive-metadata observations');
   }
   if (expected.presence !== 'absent' || expected.enablement !== 'disabled' || expected.activation !== 'inactive'
     || expected.installedFingerprint !== null || expected.contentRoots.length !== 0
     || canonicalJson(expected.retention) !== canonicalJson(prior.retention)) {
     invariant('retirement expectation must remove activation and preserve exact retained resources');
   }
+}
+
+function hasExactRetentionObservation(retention: LifecycleReadbackData['retention']): boolean {
+  return retention.pluginData.state !== 'missing'
+    && retention.pluginData.state !== 'not-observed'
+    && retention.inactiveMetadata.state !== 'missing'
+    && retention.inactiveMetadata.state !== 'not-observed';
 }
 
 function normalizeReadback(input: LifecycleReadbackData): LifecycleReadbackData {

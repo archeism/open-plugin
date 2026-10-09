@@ -126,6 +126,15 @@ async function failure(run: Promise<unknown>): Promise<unknown> {
   return undefined;
 }
 
+function thrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
 function expectPhaseError(
   error: unknown,
   phase: LifecycleHostPhaseError['phase'],
@@ -452,6 +461,9 @@ describe('lifecycle mutation boundary', () => {
     const preparedDisable = await fake.adapter.prepareDisable({
       operationId: 'op-disable', attemptId: 'attempt-disable', selection: disableSelection, activation,
     });
+    const corruptDisable = JSON.parse(JSON.stringify(preparedDisable.handle)) as Record<string, any>;
+    corruptDisable.expected.retention.pluginData = { state: 'absent', fingerprint: null };
+    expect(thrown(() => hydrateDurableLifecycleOperation(corruptDisable)) instanceof LifecycleHostPhaseError).toBe(true);
     expect(fake.hostMutationState()).toBe(beforeDisable);
     await fake.adapter.disable(preparedDisable);
     fake.transition = { requirement: 'restart', status: 'pending' };
@@ -483,6 +495,10 @@ describe('lifecycle mutation boundary', () => {
       selection: retireSelection,
       activation: retirementActivation,
     });
+    const corruptRetirement = JSON.parse(JSON.stringify(preparedRetirement.handle)) as Record<string, any>;
+    corruptRetirement.prior.retention.pluginData = { state: 'missing', fingerprint: null };
+    corruptRetirement.expected.retention.pluginData = { state: 'missing', fingerprint: null };
+    expect(thrown(() => hydrateDurableLifecycleOperation(corruptRetirement)) instanceof LifecycleHostPhaseError).toBe(true);
     await fake.adapter.retire(preparedRetirement);
     const retired = await fake.adapter.readback(preparedRetirement.handle);
     fake.adapter.verify(preparedRetirement.handle, retired);
