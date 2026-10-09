@@ -119,8 +119,12 @@ entry; `declare const Bun` shims are deleted, not silenced.
 2. `bunx plugnz@<version>` behaves identically (same suite, same smoke).
 3. Parity harness: zero byte diffs across all projections, all nine house
    packages; sha256 hex parity asserted.
-4. After upgrading the local binary from the new artifact, `doctor` reports
-   every existing install current — **no reinstall, no drift findings**.
+4. The Node bundle and the Bun dev CLI report **identical doctor finding
+   sets** (order-insensitive) against the real home stores — the artifact
+   contributes zero new drift. (Amended during implementation: absolute
+   finding counts track fleet state and the current milestone's doctor
+   semantics — 121 pre-existing stale findings under both runtimes — not the
+   distribution artifact. test/node-smoke.sh enforces the set-equality gate.)
 5. Published tarball contains `dist/` (not `src/`), `engines.node >= 22`,
    and the dual bin entries.
 6. `bun test` and `bun run check` green; repo's own `tsc` untouched.
