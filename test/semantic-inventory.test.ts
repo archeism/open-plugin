@@ -559,7 +559,7 @@ describe('versioned capability evidence', () => {
       const result = admission(inventory);
       expect(result.status).toBe('refused');
       expect(result.gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
-        { capabilityId: 'hooks', code: 'capability.unverified' },
+        { capabilityId: 'hooks', code: 'capability.unsupported' },
       ]);
     }
   });

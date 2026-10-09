@@ -231,7 +231,7 @@ export function admitPackageSemanticsFromProfiles(
       ? unsupportedHookDeclaration(request.inventory, profile.hookPolicy)
       : null;
     const status = profile.semantics[semantic] === 'supported' && hookProblem !== null
-      ? 'unverified'
+      ? hookProblem.status
       : profile.semantics[semantic];
     return status === 'supported'
       ? []
@@ -239,7 +239,9 @@ export function admitPackageSemanticsFromProfiles(
           status,
           semantic,
           profile,
-          hookProblem ?? `target '${request.host}' ${profile.detectedVersion} ${profile.route} ${request.operation} is ${status} for ${semantic}`,
+          profile.semantics[semantic] === 'supported' && hookProblem !== null
+            ? hookProblem.diagnostic
+            : `target '${request.host}' ${profile.detectedVersion} ${profile.route} ${request.operation} is ${status} for ${semantic}`,
         )];
   });
   return {
@@ -319,12 +321,17 @@ export function createCapabilityEvidenceProfile(
   });
 }
 
+type HookProblem = {
+  status: Exclude<CapabilityStatus, 'supported'>;
+  diagnostic: string;
+};
+
 function unsupportedHookDeclaration(
   inventory: PackageSemanticInventory,
   policy: HookCapabilityEvidence | null,
-): string | null {
-  if (policy === null) return 'target profile has no evidence for authored hook declaration dialects';
-  if (inventory.hookDeclarations.length === 0) return 'authored hook components have no validated declarations';
+): HookProblem | null {
+  if (policy === null) return unverifiedHookProblem('target profile has no evidence for authored hook declaration dialects');
+  if (inventory.hookDeclarations.length === 0) return unverifiedHookProblem('authored hook components have no validated declarations');
   const selectedManifest = policy.manifestPrecedence.find((path) => inventory.manifestPaths.includes(path));
   const supportedSources = new Set<string>();
   const problems = inventory.hookDeclarations.map((declaration) => {
@@ -336,33 +343,44 @@ function unsupportedHookDeclaration(
     problems[index] !== null && !supportedSources.has(declaration.source));
   if (unsupported === undefined) return null;
   const problem = problems[inventory.hookDeclarations.indexOf(unsupported)];
-  return `target hook profile cannot prove '${unsupported.source}' (${unsupported.form}): ${problem ?? 'unknown incompatibility'}`;
+  return {
+    status: problem?.status ?? 'unverified',
+    diagnostic: `target hook profile cannot prove '${unsupported.source}' (${unsupported.form}): ${problem?.diagnostic ?? 'unknown incompatibility'}`,
+  };
 }
 
 function hookDeclarationProblem(
   declaration: HookDeclaration,
   selectedManifest: string | undefined,
   policy: HookCapabilityEvidence,
-): string | null {
+): HookProblem | null {
   if (declaration.manifestPath !== null && declaration.manifestPath !== selectedManifest) {
-    return `manifest '${declaration.manifestPath}' is masked by selected manifest '${selectedManifest ?? 'none'}'`;
+    return unsupportedHookProblem(`manifest '${declaration.manifestPath}' is masked by selected manifest '${selectedManifest ?? 'none'}'`);
   }
-  if (!policy.supportedForms.includes(declaration.form)) return `declaration form '${declaration.form}' is unsupported`;
+  if (!policy.supportedForms.includes(declaration.form)) return unsupportedHookProblem(`declaration form '${declaration.form}' is unsupported`);
   const unsupportedEvent = declaration.events.find((event) => !policy.supportedEvents.includes(event));
-  if (unsupportedEvent !== undefined) return `event '${unsupportedEvent}' is unsupported`;
+  if (unsupportedEvent !== undefined) return unsupportedHookProblem(`event '${unsupportedEvent}' is unsupported`);
   for (const group of declaration.groups) {
     const unsupportedType = group.handlerTypes.find((type) => !policy.supportedHandlerTypes.includes(type));
-    if (unsupportedType !== undefined) return `handler type '${unsupportedType}' is unsupported for event '${group.event}'`;
+    if (unsupportedType !== undefined) return unsupportedHookProblem(`handler type '${unsupportedType}' is unsupported for event '${group.event}'`);
     if (policy.matcherlessEvents.includes(group.event) && group.matcherKind !== 'all') {
-      return `event '${group.event}' does not support matcher '${group.matcher ?? ''}'`;
+      return unsupportedHookProblem(`event '${group.event}' does not support matcher '${group.matcher ?? ''}'`);
     }
     if (!policy.supportedMatcherKinds.includes(group.matcherKind)) {
-      return `matcher '${group.matcher ?? ''}' for event '${group.event}' uses unverified ${group.matcherKind} syntax`;
+      return unverifiedHookProblem(`matcher '${group.matcher ?? ''}' for event '${group.event}' uses unverified ${group.matcherKind} syntax`);
     }
     const unsupportedFacet = group.handlerFacets.find((facet) => policy.unsupportedHandlerFacets.includes(facet));
-    if (unsupportedFacet !== undefined) return hookHandlerFacetProblem(unsupportedFacet);
+    if (unsupportedFacet !== undefined) return unsupportedHookProblem(hookHandlerFacetProblem(unsupportedFacet));
   }
   return null;
+}
+
+function unsupportedHookProblem(diagnostic: string): HookProblem {
+  return { status: 'unsupported', diagnostic };
+}
+
+function unverifiedHookProblem(diagnostic: string): HookProblem {
+  return { status: 'unverified', diagnostic };
 }
 
 function hookHandlerFacetProblem(facet: HookHandlerFacet): string {

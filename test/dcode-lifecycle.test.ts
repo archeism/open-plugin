@@ -122,7 +122,7 @@ describe('dcode lifecycle', () => {
         const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
         expect(error instanceof PackageCapabilityError).toBe(true);
         expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
-          { capabilityId: 'hooks', code: 'capability.unverified' },
+          { capabilityId: 'hooks', code: 'capability.unsupported' },
         ]);
         expect(existsSync(copy(root))).toBe(false);
         expect(existsSync(registry(root))).toBe(false);
@@ -131,12 +131,12 @@ describe('dcode lifecycle', () => {
   });
   test('refuses hook groups whose dcode handler options or matchers would be dropped before activation', async () => {
     const cases = [
-      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', async: true }] }, diagnostic: "handler option 'async' enables unsupported asynchronous execution" },
-      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', argv: [] }] }, diagnostic: "handler option 'argv' is not a non-empty string array with an executable" },
-      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', timeout: 0 }] }, diagnostic: "handler option 'timeout' is not a positive finite number" },
-      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', statusMessage: 1 }] }, diagnostic: "handler option 'statusMessage' is not a string" },
-      { event: 'Stop', group: { matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }, diagnostic: "event 'Stop' does not support matcher 'Bash'" },
-      { event: 'PreToolUse', group: { matcher: '[', hooks: [{ type: 'command', command: 'true' }] }, diagnostic: "matcher '[' for event 'PreToolUse' uses unverified pattern syntax" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', async: true }] }, code: 'capability.unsupported', diagnostic: "handler option 'async' enables unsupported asynchronous execution" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', argv: [] }] }, code: 'capability.unsupported', diagnostic: "handler option 'argv' is not a non-empty string array with an executable" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', timeout: 0 }] }, code: 'capability.unsupported', diagnostic: "handler option 'timeout' is not a positive finite number" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', statusMessage: 1 }] }, code: 'capability.unsupported', diagnostic: "handler option 'statusMessage' is not a string" },
+      { event: 'Stop', group: { matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unsupported', diagnostic: "event 'Stop' does not support matcher 'Bash'" },
+      { event: 'PreToolUse', group: { matcher: '[', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unverified', diagnostic: "matcher '[' for event 'PreToolUse' uses unverified pattern syntax" },
     ] as const;
 
     for (const fixture of cases) {
@@ -149,7 +149,7 @@ describe('dcode lifecycle', () => {
         const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
         expect(error instanceof PackageCapabilityError).toBe(true);
         expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
-          { capabilityId: 'hooks', code: 'capability.unverified' },
+          { capabilityId: 'hooks', code: fixture.code },
         ]);
         expect(error.message).toContain(fixture.diagnostic);
         expect(existsSync(copy(root))).toBe(false);
