@@ -36,7 +36,7 @@ describe('state ledger failures', () => {
   test('unsupported versions and invalid optional fields are rejected without filtering', () => {
     const root = mkdtempSync(join(tmpdir(), 'plgnz-state-'));
     const file = join(root, 'state.json');
-    writeFileSync(file, JSON.stringify({ version: 2, installs: [] }));
+    writeFileSync(file, JSON.stringify({ version: 3, installs: [] }));
     expectThrow(() => readState(file), 'Unsupported state.json version');
     writeFileSync(file, JSON.stringify({ version: 1, installs: [{ host: 'codex', id: 'x', source: '/x', sourceSha: 's', pins: ['ok', 7] }] }));
     expectThrow(() => readState(file), 'pins must be non-empty strings');
