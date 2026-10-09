@@ -100,6 +100,35 @@ describe('dcode lifecycle', () => {
       expect(readFileSync(join(copy(root), '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"fixture"}}}\n'); expect(readFileSync(join(copy(root), 'hooks/hooks.json'), 'utf8')).toBe('{"hooks":{}}\n');
     });
   });
+  test('refuses hook declarations that dcode would mask or partially ignore before activation', async () => {
+    for (const shape of ['masked-manifest', 'mixed-array'] as const) {
+      await isolated(async root => {
+        const item = incoming();
+        const inline = { PreToolUse: [{ hooks: [{ type: 'command', command: 'true' }] }] };
+        if (shape === 'masked-manifest') {
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({ name: 'addy', version: '0.1.0', hooks: inline })}\n`,
+          });
+        } else {
+          rmSync(join(item.plugin.dir, 'plugin.json'));
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({
+              name: 'addy', version: '0.1.0', hooks: ['./config/hooks.json', inline],
+            })}\n`,
+            'config/hooks.json': `${JSON.stringify({ hooks: inline })}\n`,
+          });
+        }
+
+        const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+        expect(error instanceof PackageCapabilityError).toBe(true);
+        expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+          { capabilityId: 'hooks', code: 'capability.unverified' },
+        ]);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+      });
+    }
+  });
   test('refuses a .plugin-only manifest that the native loader does not read', async () => {
     await isolated(async root => {
       const item = incoming(); rmSync(join(item.plugin.dir, 'plugin.json')); writeFiles(item.plugin.dir, { '.plugin/plugin.json': '{"name":"addy","version":"0.1.0"}\n' });

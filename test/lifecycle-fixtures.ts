@@ -21,6 +21,8 @@ export const emptyInventory: PackageSemanticInventory = {
   invocationPolicies: [],
   componentInvocationPolicies: [],
   autoUpdate: [],
+  manifestPaths: [],
+  hookDeclarations: [],
   requiredSemantics: [],
 };
 

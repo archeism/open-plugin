@@ -84,6 +84,23 @@ export interface AutoUpdateDeclaration {
   enabled: boolean;
 }
 
+export type HookDeclarationForm =
+  | 'default-file'
+  | 'manifest-file'
+  | 'manifest-directory'
+  | 'manifest-inline-event-map'
+  | 'manifest-inline-wrapped'
+  | 'manifest-inline-array';
+
+/** Source-authored hook configuration facts; target support remains profile-backed. */
+export interface HookDeclaration {
+  source: string;
+  manifestPath: string | null;
+  form: HookDeclarationForm;
+  events: string[];
+  handlerTypes: string[];
+}
+
 export interface PackageSemanticInventory {
   schemaVersion: 1;
   package: { name: string; version: string | null; fingerprint: string | null };
@@ -92,6 +109,9 @@ export interface PackageSemanticInventory {
   invocationPolicies: SkillInvocationPolicy[];
   componentInvocationPolicies: ComponentInvocationPolicy[];
   autoUpdate: AutoUpdateDeclaration[];
+  /** Every recognized native manifest present, without assigning host precedence. */
+  manifestPaths: string[];
+  hookDeclarations: HookDeclaration[];
   /** Semantics authored by the package. Lifecycle requirements are added per operation. */
   requiredSemantics: PackageSemantic[];
 }
@@ -120,26 +140,28 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
     .filter(({ kind }) => kind === 'agent')
     .map(({ path }) => path)
     .sort();
-  const hooks = files.filter((path) => path.startsWith('hooks/') || path.startsWith('.claude/hooks/'));
   const mcp: string[] = files.filter((path) => path === '.mcp.json' || path === 'mcp.json');
   const sidecars = new Set(skills.map((path) => `${dirname(path)}/agents/openai.yaml`));
+  const manifests = readSemanticManifests(plugin.dir);
+  const hookInventory = inventoryHooks(plugin.dir, files, manifests);
   const resources = files.filter((path) =>
     (['assets/', 'references/', 'resources/'].some((root) => path.startsWith(root))
-      || (path.startsWith('skills/') && !path.endsWith('/SKILL.md')))
-    && !sidecars.has(path));
+      || (path.startsWith('skills/') && !path.endsWith('/SKILL.md'))
+      || path.startsWith('hooks/')
+      || path.startsWith('.claude/hooks/'))
+    && !sidecars.has(path)
+    && !hookInventory.configPaths.has(path));
 
   for (const path of mcp) parseJsonObject(join(plugin.dir, path), `MCP declaration ${path}`);
 
   const permissionPaths = new Set(componentInventory.permissionPaths);
 
   const invocationPolicies = skills.map((path) => inventorySkillPolicy(plugin.dir, path));
-  const manifest = readSemanticManifest(plugin.dir);
+  const manifest = manifests[0];
   if (manifest?.mcpServers !== undefined) {
     if (!isRecord(manifest.mcpServers)) invalid('plugin manifest mcpServers must be an object');
     mcp.push(`${manifest.path}#mcpServers`);
   }
-  if (manifest?.hooks !== undefined) hooks.push(`${manifest.path}#hooks`);
-
   const autoUpdate: AutoUpdateDeclaration[] = [];
   if (manifest !== undefined && manifest.extensions !== undefined) {
     const extension = manifest.extensions;
@@ -162,7 +184,7 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
   const components: PackageComponentInventory = {
     skills,
     mcp: uniqueSorted(mcp),
-    hooks: uniqueSorted(hooks),
+    hooks: hookInventory.components,
     commands,
     agents,
     resources,
@@ -194,6 +216,8 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
     invocationPolicies,
     componentInvocationPolicies: componentInventory.invocationPolicies,
     autoUpdate,
+    manifestPaths: manifests.map(({ path }) => path),
+    hookDeclarations: hookInventory.declarations,
     requiredSemantics: ordered(required),
   };
 }
@@ -339,15 +363,172 @@ function parseJsonObject(path: string, label: string): Record<string, unknown> {
   return parsed;
 }
 
-function readSemanticManifest(root: string): (Record<string, unknown> & { path: string }) | undefined {
-  const relativePath = [
+type SemanticManifest = Record<string, unknown> & { path: string };
+
+function readSemanticManifests(root: string): SemanticManifest[] {
+  return [
     'plugin.json',
     '.plugin/plugin.json',
     '.claude-plugin/plugin.json',
     '.codex-plugin/plugin.json',
-  ].find((path) => existsSync(join(root, path)));
-  if (relativePath === undefined) return undefined;
-  return { ...parseJsonObject(join(root, relativePath), `plugin manifest ${relativePath}`), path: relativePath };
+  ].filter((path) => existsSync(join(root, path))).map((path) => ({
+    ...parseJsonObject(join(root, path), `plugin manifest ${path}`),
+    path,
+  }));
+}
+
+/**
+ * Hook discovery follows authored configuration, never directory membership.
+ * Agent Plugins 1.0 has no portable hook component (spec §§6.1, 7, 8):
+ * https://agent-plugins.org/specification#7-component-types
+ * These are native Claude/dcode extension surfaces:
+ * https://code.claude.com/docs/en/plugins-reference#hooks
+ * https://github.com/langchain-ai/deepagents/blob/caaa7e7c12d214afa5cf0a1afed8eb6232aa6f7b/libs/code/deepagents_code/plugins/manifest.py
+ */
+function inventoryHooks(
+  root: string,
+  files: readonly string[],
+  manifests: readonly SemanticManifest[],
+): { components: string[]; configPaths: ReadonlySet<string>; declarations: HookDeclaration[] } {
+  const components = new Set<string>();
+  const configPaths = new Set<string>();
+  const declarations: HookDeclaration[] = [];
+  const documents = new Map<string, Pick<HookDeclaration, 'events' | 'handlerTypes'>>();
+
+  const readDocument = (path: string): Pick<HookDeclaration, 'events' | 'handlerTypes'> => {
+    const cached = documents.get(path);
+    if (cached !== undefined) return cached;
+    const value = parseJsonObject(join(root, path), `hook configuration ${path}`);
+    if (Object.keys(value).some((field) => field !== 'hooks') || !isRecord(value['hooks'])) {
+      invalid(`hook configuration ${path} must contain only a top-level hooks object`);
+    }
+    const observation = validateHookEventMap(value['hooks'], `hook configuration ${path}`);
+    documents.set(path, observation);
+    return observation;
+  };
+  const addDocument = (
+    path: string,
+    manifestPath: string | null,
+    form: Extract<HookDeclarationForm, 'default-file' | 'manifest-file' | 'manifest-directory'>,
+  ): void => {
+    const observation = readDocument(path);
+    configPaths.add(path);
+    components.add(path);
+    declarations.push({ source: path, manifestPath, form, ...observation });
+  };
+
+  if (files.includes('hooks/hooks.json')) addDocument('hooks/hooks.json', null, 'default-file');
+
+  for (const manifest of manifests.filter((candidate) => Object.hasOwn(candidate, 'hooks'))) {
+    if (manifest.path === '.plugin/plugin.json') {
+      invalid('hook declarations in .plugin/plugin.json have no source-backed native contract');
+    }
+    const declaration = manifest['hooks'];
+    const addInline = (value: Record<string, unknown>, label: string, arrayItem: boolean): void => {
+      let eventMap = value;
+      let form: HookDeclarationForm = arrayItem ? 'manifest-inline-array' : 'manifest-inline-event-map';
+      if (Object.hasOwn(value, 'hooks')) {
+        if (Object.keys(value).some((field) => field !== 'hooks') || !isRecord(value['hooks'])) {
+          invalid(`inline hook declaration ${label} has an ambiguous hooks wrapper`);
+        }
+        if (arrayItem) invalid(`inline hook declaration ${label} cannot use a file-document wrapper inside an array`);
+        eventMap = value['hooks'];
+        form = 'manifest-inline-wrapped';
+      }
+      const observation = validateHookEventMap(eventMap, `inline hook declaration ${label}`);
+      components.add(label);
+      declarations.push({ source: label, manifestPath: manifest.path, form, ...observation });
+    };
+    const addPath = (value: string): void => {
+      const resolved = declaredHookPath(root, value);
+      addDocument(resolved.path, manifest.path, resolved.directory ? 'manifest-directory' : 'manifest-file');
+    };
+
+    if (typeof declaration === 'string') {
+      addPath(declaration);
+    } else if (isRecord(declaration)) {
+      addInline(declaration, `${manifest.path}#hooks`, false);
+    } else if (Array.isArray(declaration) && declaration.length > 0) {
+      for (const [index, item] of declaration.entries()) {
+        if (typeof item === 'string') addPath(item);
+        else if (manifest.path === '.claude-plugin/plugin.json' && isRecord(item)) {
+          addInline(item, `${manifest.path}#hooks[${index}]`, true);
+        }
+        else invalid(`plugin manifest ${manifest.path} hooks[${index}] has an unsupported shape`);
+      }
+    } else {
+      invalid(`plugin manifest ${manifest.path} hooks must be a path, object, or non-empty supported array`);
+    }
+  }
+
+  return {
+    components: [...components].sort(),
+    configPaths,
+    declarations: declarations.sort((left, right) => left.source.localeCompare(right.source)),
+  };
+}
+
+function declaredHookPath(root: string, declaration: string): { path: string; directory: boolean } {
+  const withoutPrefix = declaration.slice(2);
+  if (!declaration.startsWith('./') || declaration.includes('\\') || /^[a-z]:\//iu.test(withoutPrefix)) {
+    invalid(`declared hook path must start with './' and use portable separators: ${declaration}`);
+  }
+  const path = portable(relative(root, join(root, declaration)));
+  if (path === '' || path === '..' || path.startsWith('../') || declaration !== `./${path}`) {
+    invalid(`declared hook path must be a canonical file inside the plugin root: ${declaration}`);
+  }
+  const absolute = join(root, path);
+  if (!existsSync(absolute)) invalid(`declared hook configuration does not exist: ${declaration}`);
+  const stat = lstatSync(absolute);
+  if (stat.isDirectory()) {
+    const document = `${path}/hooks.json`;
+    const documentPath = join(root, document);
+    if (!existsSync(documentPath) || !lstatSync(documentPath).isFile()) {
+      invalid(`declared hook directory must contain hooks.json: ${declaration}`);
+    }
+    return { path: document, directory: true };
+  }
+  if (!stat.isFile() || !path.endsWith('.json')) {
+    invalid(`declared hook configuration must be a JSON file or native hook directory: ${declaration}`);
+  }
+  return { path, directory: false };
+}
+
+function validateHookEventMap(
+  value: unknown,
+  label: string,
+): Pick<HookDeclaration, 'events' | 'handlerTypes'> {
+  if (!isRecord(value)) invalid(`${label} must be a hook event object`);
+  const events: string[] = [];
+  const handlerTypes = new Set<string>();
+  for (const [event, groups] of Object.entries(value)) {
+    if (event.trim() === '' || !Array.isArray(groups)) invalid(`${label} event '${event}' must be an array`);
+    events.push(event);
+    for (const [groupIndex, group] of groups.entries()) {
+      if (!isRecord(group)) invalid(`${label} event '${event}' group ${groupIndex} must be an object`);
+      if (group['matcher'] !== undefined && typeof group['matcher'] !== 'string') {
+        invalid(`${label} event '${event}' group ${groupIndex} matcher must be a string`);
+      }
+      if (!Array.isArray(group['hooks'])) invalid(`${label} event '${event}' group ${groupIndex} hooks must be an array`);
+      for (const [hookIndex, hook] of group['hooks'].entries()) {
+        if (!isRecord(hook) || typeof hook['type'] !== 'string' || hook['type'].trim() === '') {
+          invalid(`${label} event '${event}' group ${groupIndex} hook ${hookIndex} needs a non-empty type`);
+        }
+        validateHookHandler(hook, `${label} event '${event}' group ${groupIndex} hook ${hookIndex}`);
+        handlerTypes.add(hook['type']);
+      }
+    }
+  }
+  return { events: events.sort(), handlerTypes: [...handlerTypes].sort() };
+}
+
+function validateHookHandler(hook: Record<string, unknown>, label: string): void {
+  const nonemptyString = (field: string): boolean => typeof hook[field] === 'string' && hook[field].trim() !== '';
+  if (hook['type'] === 'command' && nonemptyString('command')) return;
+  if (hook['type'] === 'http' && nonemptyString('url')) return;
+  if (hook['type'] === 'mcp_tool' && nonemptyString('server') && nonemptyString('tool')) return;
+  if ((hook['type'] === 'prompt' || hook['type'] === 'agent') && nonemptyString('prompt')) return;
+  invalid(`${label} has an unknown type or is missing required fields`);
 }
 
 function walkFiles(root: string): string[] {

@@ -16,7 +16,18 @@
       "commandDialect": "toml",
       "claudeCommandProjection": 9,
       "agents": 4,
-      "hooks": true,
+      "hooks": false,
+      "hookResources": [
+        "hooks/SDD-CACHE.md",
+        "hooks/SIMPLIFY-IGNORE.md",
+        "hooks/sdd-cache-post.sh",
+        "hooks/sdd-cache-pre.sh",
+        "hooks/sdd-cache-test.sh",
+        "hooks/session-start-test.sh",
+        "hooks/session-start.sh",
+        "hooks/simplify-ignore-test.sh",
+        "hooks/simplify-ignore.sh"
+      ],
       "mcp": false,
       "resources": true,
       "manualOnly": {
@@ -33,6 +44,7 @@
       "commandDialect": "markdown",
       "agents": 0,
       "hooks": false,
+      "hookResources": [],
       "mcp": true,
       "resources": true,
       "manualOnly": {
@@ -49,6 +61,7 @@
       "commandDialect": "none",
       "agents": 0,
       "hooks": false,
+      "hookResources": [],
       "mcp": false,
       "resources": true,
       "manualOnly": {
@@ -65,6 +78,7 @@
       "commandDialect": "none",
       "agents": 0,
       "hooks": false,
+      "hookResources": [],
       "mcp": false,
       "resources": true,
       "manualOnly": {

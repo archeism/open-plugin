@@ -4,6 +4,7 @@ import {
   PACKAGE_SEMANTICS,
   requiredSemanticsForOperation,
   type CapabilityOperation,
+  type HookDeclarationForm,
   type PackageSemantic,
   type PackageSemanticInventory,
   type SourceType,
@@ -13,6 +14,14 @@ declare const Bun: { CryptoHasher: new (algorithm: string) => { update(value: st
 
 export type CapabilityStatus = 'supported' | 'unsupported' | 'unverified';
 export type CapabilityRoute = 'managed' | 'native';
+
+export interface HookCapabilityEvidence {
+  /** Native manifest selection order; generic inventory does not assign this precedence. */
+  manifestPrecedence: readonly string[];
+  supportedForms: readonly HookDeclarationForm[];
+  supportedEvents: readonly string[];
+  supportedHandlerTypes: readonly string[];
+}
 
 export interface CapabilityEvidenceProfile {
   schemaVersion: 1;
@@ -25,6 +34,7 @@ export interface CapabilityEvidenceProfile {
   route: CapabilityRoute;
   operationStatus: CapabilityStatus;
   semantics: Readonly<Record<PackageSemantic, CapabilityStatus>>;
+  hookPolicy: HookCapabilityEvidence | null;
   /** Repository-relative evidence references only; no locators or credentials. */
   evidence: readonly string[];
 }
@@ -103,6 +113,31 @@ const dcode0183Managed = createCapabilityEvidenceProfile({
     'activation-reload': 'supported',
     'reversible-disable': 'unverified',
   },
+  hookPolicy: {
+    manifestPrecedence: ['plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json'],
+    supportedForms: [
+      'default-file',
+      'manifest-file',
+      'manifest-directory',
+      'manifest-inline-event-map',
+      'manifest-inline-wrapped',
+    ],
+    supportedEvents: [
+      'SessionStart',
+      'UserPromptSubmit',
+      'SessionEnd',
+      'PermissionRequest',
+      'Notification',
+      'PreToolUse',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'PreCompact',
+      'Stop',
+      'SubagentStart',
+      'SubagentStop',
+    ],
+    supportedHandlerTypes: ['command'],
+  },
   evidence: [
     'docs/evidence/dcode-native-update-0.1.83-20261009.json',
     'docs/research/dcode-session-findings-2026-10-09.md',
@@ -174,14 +209,19 @@ export function admitPackageSemanticsFromProfiles(
   }
 
   const gaps = requirements.flatMap((semantic) => {
-    const status = profile.semantics[semantic];
+    const hookProblem = semantic === 'hooks' && (request.operation === 'install' || request.operation === 'update')
+      ? unsupportedHookDeclaration(request.inventory, profile.hookPolicy)
+      : null;
+    const status = profile.semantics[semantic] === 'supported' && hookProblem !== null
+      ? 'unverified'
+      : profile.semantics[semantic];
     return status === 'supported'
       ? []
       : [capabilityReason(
           status,
           semantic,
           profile,
-          `target '${request.host}' ${profile.detectedVersion} ${profile.route} ${request.operation} is ${status} for ${semantic}`,
+          hookProblem ?? `target '${request.host}' ${profile.detectedVersion} ${profile.route} ${request.operation} is ${status} for ${semantic}`,
         )];
   });
   return {
@@ -214,11 +254,14 @@ function capabilityReason(
 }
 
 export function createCapabilityEvidenceProfile(
-  input: Omit<CapabilityEvidenceProfile, 'schemaVersion' | 'evidenceId'>,
+  input: Omit<CapabilityEvidenceProfile, 'schemaVersion' | 'evidenceId' | 'hookPolicy'> & {
+    hookPolicy?: HookCapabilityEvidence | null;
+  },
 ): CapabilityEvidenceProfile {
   const sourceTypes = [...input.sourceTypes].sort();
   const operations = [...input.operations].sort();
   const evidence = [...input.evidence].sort();
+  const hookPolicy = normalizeHookPolicy(input.hookPolicy ?? null);
   if (sourceTypes.length === 0 || operations.length === 0 || evidence.length === 0) throw new Error('capability evidence profile needs source types, operations, and evidence');
   for (const reference of evidence) {
     if (!reference.startsWith('docs/') || reference.includes('@') || /[\u0000-\u001f\u007f-\u009f]/u.test(reference)) {
@@ -237,6 +280,7 @@ export function createCapabilityEvidenceProfile(
     route: input.route,
     operationStatus: input.operationStatus,
     semantics: PACKAGE_SEMANTICS.map((semantic) => [semantic, input.semantics[semantic]]),
+    hookPolicy,
     evidence,
   };
   const hash = new Bun.CryptoHasher('sha256');
@@ -252,8 +296,54 @@ export function createCapabilityEvidenceProfile(
     route: input.route,
     operationStatus: input.operationStatus,
     semantics: Object.freeze({ ...input.semantics }),
+    hookPolicy,
     evidence: Object.freeze(evidence),
   });
+}
+
+function unsupportedHookDeclaration(
+  inventory: PackageSemanticInventory,
+  policy: HookCapabilityEvidence | null,
+): string | null {
+  if (policy === null) return 'target profile has no evidence for authored hook declaration dialects';
+  if (inventory.hookDeclarations.length === 0) return 'authored hook components have no validated declarations';
+  const selectedManifest = policy.manifestPrecedence.find((path) => inventory.manifestPaths.includes(path));
+  const supportedSources = new Set<string>();
+  const supported = inventory.hookDeclarations.map((declaration) => {
+    const effective = declaration.manifestPath === null || declaration.manifestPath === selectedManifest;
+    const compatible = effective
+      && policy.supportedForms.includes(declaration.form)
+      && declaration.events.every((event) => policy.supportedEvents.includes(event))
+      && declaration.handlerTypes.every((type) => policy.supportedHandlerTypes.includes(type));
+    if (compatible) supportedSources.add(declaration.source);
+    return compatible;
+  });
+  const unsupported = inventory.hookDeclarations.find((declaration, index) =>
+    supported[index] !== true && !supportedSources.has(declaration.source));
+  if (unsupported === undefined) return null;
+  return `target hook profile cannot prove '${unsupported.source}' (${unsupported.form}) under selected manifest '${selectedManifest ?? 'none'}'`;
+}
+
+function normalizeHookPolicy(input: HookCapabilityEvidence | null): HookCapabilityEvidence | null {
+  if (input === null) return null;
+  const manifestPrecedence = uniqueStrings(input.manifestPrecedence, 'hook manifest precedence');
+  const supportedForms = uniqueStrings(input.supportedForms, 'hook declaration form').sort() as HookDeclarationForm[];
+  const supportedEvents = uniqueStrings(input.supportedEvents, 'hook event').sort();
+  const supportedHandlerTypes = uniqueStrings(input.supportedHandlerTypes, 'hook handler type').sort();
+  return Object.freeze({
+    manifestPrecedence: Object.freeze(manifestPrecedence),
+    supportedForms: Object.freeze(supportedForms),
+    supportedEvents: Object.freeze(supportedEvents),
+    supportedHandlerTypes: Object.freeze(supportedHandlerTypes),
+  });
+}
+
+function uniqueStrings(input: readonly string[], label: string): string[] {
+  if (input.length === 0 || input.some((value) => value.trim() === '' || value.trim() !== value)) {
+    throw new Error(`${label} evidence must contain non-empty canonical strings`);
+  }
+  if (new Set(input).size !== input.length) throw new Error(`${label} evidence must not contain duplicates`);
+  return [...input];
 }
 
 function normalizedDetectedVersion(value: string | undefined): string | undefined {

@@ -47,6 +47,14 @@ function semanticFailure(plugin: PluginSource): SemanticInventoryError {
 }
 
 const skill = (frontmatter = '') => `---\nname: fixture\ndescription: fixture\n${frontmatter}---\nbody\n`;
+const hookDocument = (event = 'PostToolUse') => `${JSON.stringify({
+  hooks: {
+    [event]: [{ matcher: 'Write', hooks: [{ type: 'command', command: './hooks/run.sh' }] }],
+  },
+})}\n`;
+const inlineHookMap = (event = 'PostToolUse') => ({
+  [event]: [{ matcher: 'Write', hooks: [{ type: 'command', command: './hooks/run.sh' }] }],
+});
 
 describe('source package semantic inventory', () => {
   test('keeps every independently admitted semantic as a stable typed requirement', () => {
@@ -203,6 +211,96 @@ describe('source package semantic inventory', () => {
       'agents/reviewer.md',
       'commands/deploy.md',
     ]);
+  });
+
+  test('keeps an Addy-shaped scripts-and-docs hooks directory inert until a hook config is declared', () => {
+    const inventory = inventoryPackageSemantics(source('latent-hook-resources', {
+      'hooks/SDD-CACHE.md': 'documentation\n',
+      'hooks/sdd-cache-pre.sh': '#!/bin/sh\n',
+      'hooks/sdd-cache-test.sh': '#!/bin/sh\n',
+    }));
+
+    expect(inventory.components.hooks).toEqual([]);
+    expect(inventory.components.resources).toEqual([
+      'hooks/SDD-CACHE.md',
+      'hooks/sdd-cache-pre.sh',
+      'hooks/sdd-cache-test.sh',
+    ]);
+    expect(inventory.requiredSemantics).toEqual(['resources']);
+  });
+
+  test('inventories the default config plus source-backed dcode and Claude manifest declarations', () => {
+    const dcode = inventoryPackageSemantics(source('dcode-hook-declarations', {
+      'plugin.json': `${JSON.stringify({
+        name: 'dcode-hook-declarations',
+        version: '1.0.0',
+        hooks: ['./config/hooks', './hooks/hooks.json'],
+      })}\n`,
+      'config/hooks/hooks.json': hookDocument('PreToolUse'),
+      'hooks/hooks.json': hookDocument('SessionStart'),
+    }));
+    const claude = inventoryPackageSemantics(source('claude-hook-declarations', {
+      'hooks/hooks.json': hookDocument('SessionStart'),
+      'hooks/run.sh': '#!/bin/sh\n',
+      'config/extra-hooks.json': hookDocument('PreToolUse'),
+      '.claude-plugin/plugin.json': `${JSON.stringify({
+        name: 'claude-hook-declarations',
+        version: '1.0.0',
+        hooks: ['./config/extra-hooks.json', inlineHookMap('PostToolUse')],
+      })}\n`,
+    }));
+
+    expect(dcode.components.hooks).toEqual(['config/hooks/hooks.json', 'hooks/hooks.json']);
+    expect(dcode.hookDeclarations.map(({ source, form }) => ({ source, form }))).toEqual([
+      { source: 'config/hooks/hooks.json', form: 'manifest-directory' },
+      { source: 'hooks/hooks.json', form: 'default-file' },
+      { source: 'hooks/hooks.json', form: 'manifest-file' },
+    ]);
+    expect(claude.components.hooks).toEqual([
+      '.claude-plugin/plugin.json#hooks[1]',
+      'config/extra-hooks.json',
+      'hooks/hooks.json',
+    ]);
+    expect(claude.components.resources).toEqual(['hooks/run.sh']);
+    expect(claude.requiredSemantics).toEqual(['hooks', 'resources']);
+  });
+
+  test('rejects malformed, unsafe, missing, ambiguous, or conflicting hook declarations', () => {
+    const cases = [
+      source('malformed-default-hooks-json', { 'hooks/hooks.json': '{broken\n' }),
+      source('unwrapped-default-hooks', { 'hooks/hooks.json': JSON.stringify(inlineHookMap()) }),
+      source('malformed-hook-event-map', { 'hooks/hooks.json': '{"hooks":{"PostToolUse":{}}}\n' }),
+      source('malformed-hook-handler', {
+        'hooks/hooks.json': '{"hooks":{"PostToolUse":[{"hooks":[{"command":"./hooks/run.sh"}]}]}}\n',
+      }),
+      source('missing-declared-hooks', {
+        '.claude-plugin/plugin.json': '{"name":"missing-declared-hooks","hooks":"./config/missing.json"}\n',
+      }),
+      source('unsafe-declared-hooks', {
+        '.claude-plugin/plugin.json': '{"name":"unsafe-declared-hooks","hooks":"./../outside.json"}\n',
+      }),
+      source('unknown-hooks-shape', {
+        '.claude-plugin/plugin.json': '{"name":"unknown-hooks-shape","hooks":42}\n',
+      }),
+      source('windows-absolute-declared-hooks', {
+        '.claude-plugin/plugin.json': '{"name":"windows-absolute-declared-hooks","hooks":"./C:/hooks.json"}\n',
+      }),
+      source('ambiguous-inline-hook-wrapper', {
+        'plugin.json': `${JSON.stringify({
+          name: 'ambiguous-inline-hook-wrapper', version: '1.0.0',
+          hooks: { hooks: inlineHookMap('PreToolUse'), PostToolUse: [] },
+        })}\n`,
+      }),
+      source('unsupported-dcode-mixed-array', {
+        'plugin.json': `${JSON.stringify({
+          name: 'unsupported-dcode-mixed-array', version: '1.0.0',
+          hooks: ['./config/hooks.json', inlineHookMap()],
+        })}\n`,
+        'config/hooks.json': hookDocument(),
+      }),
+    ];
+
+    for (const plugin of cases) semanticFailure(plugin);
   });
 
   test('classifies camel-case command permission mode in Markdown and TOML without overclassifying ordinary arguments or paths', () => {
@@ -414,6 +512,58 @@ describe('versioned capability evidence', () => {
     ]);
   });
 
+  test('admits only hook declarations that dcode 0.1.83 actually selects and loads', () => {
+    const effective = inventoryPackageSemantics(source('effective-dcode-hooks', {
+      'plugin.json': '{"name":"effective-dcode-hooks","version":"1.0.0","hooks":"./config/hooks"}\n',
+      'config/hooks/hooks.json': hookDocument('PreToolUse'),
+    }));
+    const effectiveInline = inventoryPackageSemantics(source('effective-inline-dcode-hooks', {
+      'plugin.json': `${JSON.stringify({
+        name: 'effective-inline-dcode-hooks', version: '1.0.0', hooks: { hooks: inlineHookMap('PreToolUse') },
+      })}\n`,
+    }));
+    const masked = inventoryPackageSemantics(source('masked-claude-hooks', {
+      '.claude-plugin/plugin.json': `${JSON.stringify({
+        name: 'masked-claude-hooks', version: '1.0.0', hooks: inlineHookMap('PreToolUse'),
+      })}\n`,
+    }));
+    const mixedSource = source('mixed-claude-hooks', {
+      '.claude-plugin/plugin.json': `${JSON.stringify({
+        name: 'mixed-claude-hooks', version: '1.0.0',
+        hooks: ['./config/hooks.json', inlineHookMap('PreToolUse')],
+      })}\n`,
+      'config/hooks.json': hookDocument('PreToolUse'),
+    });
+    rmSync(join(mixedSource.dir, 'plugin.json'));
+    const mixed = inventoryPackageSemantics(mixedSource);
+    const unsupportedEventSource = source('unsupported-dcode-hook-event', {
+      '.claude-plugin/plugin.json': `${JSON.stringify({
+        name: 'unsupported-dcode-hook-event', version: '1.0.0', hooks: inlineHookMap('Setup'),
+      })}\n`,
+    });
+    rmSync(join(unsupportedEventSource.dir, 'plugin.json'));
+    const unsupportedEvent = inventoryPackageSemantics(unsupportedEventSource);
+
+    const admission = (inventory: ReturnType<typeof inventoryPackageSemantics>) => admitPackageSemantics({
+      host: 'dcode',
+      detectedVersion: '0.1.83',
+      sourceType: 'git',
+      operation: 'install',
+      route: 'managed',
+      inventory,
+    });
+
+    expect(admission(effective).status).toBe('admitted');
+    expect(admission(effectiveInline).status).toBe('admitted');
+    for (const inventory of [masked, mixed, unsupportedEvent]) {
+      const result = admission(inventory);
+      expect(result.status).toBe('refused');
+      expect(result.gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+        { capabilityId: 'hooks', code: 'capability.unverified' },
+      ]);
+    }
+  });
+
   test('projects retirement from recorded lifecycle semantics only, with or without Source inventory', () => {
     const unsupportedAtRuntime = inventoryPackageSemantics(source('retirement', {
       'commands/run.md': '---\ndescription: Run\nallowed-tools: Bash\n---\nbody\n',
@@ -562,6 +712,7 @@ describe('versioned capability evidence', () => {
         claudeCommandProjection?: number;
         agents: number;
         hooks: boolean;
+        hookResources: string[];
         mcp: boolean;
         resources: boolean;
         manualOnly: { frontmatter: number; codexSidecar: number };
@@ -595,6 +746,7 @@ describe('versioned capability evidence', () => {
         files[`agents/a${id}.md`] = `---\nname: a${id}\ndescription: agent ${id}\n---\nbody\n`;
       }
       if (item.hooks) files['hooks/hooks.json'] = '{"hooks":{}}\n';
+      for (const path of item.hookResources) files[path] = path.endsWith('.md') ? 'hook documentation\n' : '#!/bin/sh\n';
       if (item.mcp) files['mcp.json'] = '{"mcpServers":{"fixture":{"command":"fixture"}}}\n';
       if (item.resources) files['skills/s01/references/evidence.md'] = 'frozen supporting resource\n';
 
@@ -615,6 +767,8 @@ describe('versioned capability evidence', () => {
           neutralCommands: inventory.componentDefinitions.filter(({ root }) => root === 'commands').length,
           claudeCommands: inventory.componentDefinitions.filter(({ root }) => root === '.claude/commands').length,
           agents: inventory.components.agents.length,
+          hookConfigs: inventory.components.hooks.length,
+          hookResources: inventory.components.resources.filter((path) => path.startsWith('hooks/')).length,
           modelRestricted: inventory.invocationPolicies.filter(({ modelInvocable }) => !modelInvocable).length,
           sidecars: inventory.invocationPolicies.flatMap(({ declarations }) => declarations).filter(({ dialect }) => dialect === 'codex-sidecar').length,
         },
@@ -625,10 +779,10 @@ describe('versioned capability evidence', () => {
     });
 
     expect(actual).toEqual([
-      { name: 'addy', counts: { skills: 25, commandDefinitions: 18, neutralCommands: 9, claudeCommands: 9, agents: 4, modelRestricted: 0, sidecars: 0 }, gaps: ['commands', 'agents'], expectedGaps: ['commands', 'agents'], status: 'refused' },
-      { name: 'vercel', counts: { skills: 7, commandDefinitions: 3, neutralCommands: 3, claudeCommands: 0, agents: 0, modelRestricted: 0, sidecars: 0 }, gaps: ['commands'], expectedGaps: ['commands'], status: 'refused' },
-      { name: 'mattpocock', counts: { skills: 37, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, modelRestricted: 22, sidecars: 22 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
-      { name: 'try-skill', counts: { skills: 3, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, modelRestricted: 1, sidecars: 0 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
+      { name: 'addy', counts: { skills: 25, commandDefinitions: 18, neutralCommands: 9, claudeCommands: 9, agents: 4, hookConfigs: 0, hookResources: 9, modelRestricted: 0, sidecars: 0 }, gaps: ['commands', 'agents'], expectedGaps: ['commands', 'agents'], status: 'refused' },
+      { name: 'vercel', counts: { skills: 7, commandDefinitions: 3, neutralCommands: 3, claudeCommands: 0, agents: 0, hookConfigs: 0, hookResources: 0, modelRestricted: 0, sidecars: 0 }, gaps: ['commands'], expectedGaps: ['commands'], status: 'refused' },
+      { name: 'mattpocock', counts: { skills: 37, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, hookConfigs: 0, hookResources: 0, modelRestricted: 22, sidecars: 22 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
+      { name: 'try-skill', counts: { skills: 3, commandDefinitions: 0, neutralCommands: 0, claudeCommands: 0, agents: 0, hookConfigs: 0, hookResources: 0, modelRestricted: 1, sidecars: 0 }, gaps: ['model-invocation-control'], expectedGaps: ['model-invocation-control'], status: 'refused' },
     ]);
   });
 });
