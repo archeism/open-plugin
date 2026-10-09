@@ -4,6 +4,7 @@ import {
   PACKAGE_SEMANTICS,
   requiredSemanticsForOperation,
   type CapabilityOperation,
+  type HookDeclaration,
   type HookDeclarationForm,
   type HookHandlerFacet,
   type HookMatcherKind,
@@ -326,23 +327,52 @@ function unsupportedHookDeclaration(
   if (inventory.hookDeclarations.length === 0) return 'authored hook components have no validated declarations';
   const selectedManifest = policy.manifestPrecedence.find((path) => inventory.manifestPaths.includes(path));
   const supportedSources = new Set<string>();
-  const supported = inventory.hookDeclarations.map((declaration) => {
-    const effective = declaration.manifestPath === null || declaration.manifestPath === selectedManifest;
-    const compatible = effective
-      && policy.supportedForms.includes(declaration.form)
-      && declaration.events.every((event) => policy.supportedEvents.includes(event))
-      && declaration.groups.every((group) =>
-        group.handlerTypes.every((type) => policy.supportedHandlerTypes.includes(type))
-        && policy.supportedMatcherKinds.includes(group.matcherKind)
-        && (!policy.matcherlessEvents.includes(group.event) || group.matcherKind === 'all')
-        && group.handlerFacets.every((facet) => !policy.unsupportedHandlerFacets.includes(facet)));
-    if (compatible) supportedSources.add(declaration.source);
-    return compatible;
+  const problems = inventory.hookDeclarations.map((declaration) => {
+    const problem = hookDeclarationProblem(declaration, selectedManifest, policy);
+    if (problem === null) supportedSources.add(declaration.source);
+    return problem;
   });
   const unsupported = inventory.hookDeclarations.find((declaration, index) =>
-    supported[index] !== true && !supportedSources.has(declaration.source));
+    problems[index] !== null && !supportedSources.has(declaration.source));
   if (unsupported === undefined) return null;
-  return `target hook profile cannot prove '${unsupported.source}' (${unsupported.form}) under selected manifest '${selectedManifest ?? 'none'}'`;
+  const problem = problems[inventory.hookDeclarations.indexOf(unsupported)];
+  return `target hook profile cannot prove '${unsupported.source}' (${unsupported.form}): ${problem ?? 'unknown incompatibility'}`;
+}
+
+function hookDeclarationProblem(
+  declaration: HookDeclaration,
+  selectedManifest: string | undefined,
+  policy: HookCapabilityEvidence,
+): string | null {
+  if (declaration.manifestPath !== null && declaration.manifestPath !== selectedManifest) {
+    return `manifest '${declaration.manifestPath}' is masked by selected manifest '${selectedManifest ?? 'none'}'`;
+  }
+  if (!policy.supportedForms.includes(declaration.form)) return `declaration form '${declaration.form}' is unsupported`;
+  const unsupportedEvent = declaration.events.find((event) => !policy.supportedEvents.includes(event));
+  if (unsupportedEvent !== undefined) return `event '${unsupportedEvent}' is unsupported`;
+  for (const group of declaration.groups) {
+    const unsupportedType = group.handlerTypes.find((type) => !policy.supportedHandlerTypes.includes(type));
+    if (unsupportedType !== undefined) return `handler type '${unsupportedType}' is unsupported for event '${group.event}'`;
+    if (policy.matcherlessEvents.includes(group.event) && group.matcherKind !== 'all') {
+      return `event '${group.event}' does not support matcher '${group.matcher ?? ''}'`;
+    }
+    if (!policy.supportedMatcherKinds.includes(group.matcherKind)) {
+      return `matcher '${group.matcher ?? ''}' for event '${group.event}' uses unverified ${group.matcherKind} syntax`;
+    }
+    const unsupportedFacet = group.handlerFacets.find((facet) => policy.unsupportedHandlerFacets.includes(facet));
+    if (unsupportedFacet !== undefined) return hookHandlerFacetProblem(unsupportedFacet);
+  }
+  return null;
+}
+
+function hookHandlerFacetProblem(facet: HookHandlerFacet): string {
+  switch (facet) {
+    case 'async-enabled': return "handler option 'async' enables unsupported asynchronous execution";
+    case 'async-non-boolean': return "handler option 'async' is not a supported boolean";
+    case 'argv-invalid': return "handler option 'argv' is not a non-empty string array with an executable";
+    case 'timeout-invalid': return "handler option 'timeout' is not a positive finite number";
+    case 'status-message-invalid': return "handler option 'statusMessage' is not a string";
+  }
 }
 
 function normalizeHookPolicy(input: HookCapabilityEvidence | null): HookCapabilityEvidence | null {
