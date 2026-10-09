@@ -1218,7 +1218,6 @@ export async function main(argv: string[]): Promise<number> {
           );
           break;
         }
-        if (pair.adapterResolved) plannedUpdateNativeIds.set(pair.record, pair.nativeId);
       }
     }
     if (scopeFailure !== null || (requestedName !== undefined && selectedPairs.length === 0)) {
@@ -1245,7 +1244,11 @@ export async function main(argv: string[]): Promise<number> {
       action: 'update',
       route: 'managed',
     }));
-    let updatePlan: readonly LifecyclePlanOperation[] = flags.dryRun ? Object.freeze([]) : freezePlan(baseOperations);
+    let updatePlan: readonly LifecyclePlanOperation[] = freezePlan(baseOperations);
+    selectedPairs.forEach((pair, index) => {
+      const nativeId = updatePlan[index]?.nativeId;
+      if (nativeId !== null && nativeId !== undefined) plannedUpdateNativeIds.set(pair.record, nativeId);
+    });
     let updateMutationStarted = false;
     try {
       const result = json
@@ -1356,7 +1359,7 @@ export async function main(argv: string[]): Promise<number> {
         reason: failure,
       }));
       const report = reportFor('update', flags.dryRun, updatePlan, skipped, {
-        terminalPhase: 'apply',
+        terminalPhase: flags.dryRun ? 'preflight' : 'apply',
         mutationStarted: updateMutationStarted,
         reason: failure,
       });

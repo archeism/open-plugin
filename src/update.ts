@@ -198,9 +198,9 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       continue;
     }
 
-    const adapterCanonicalNativeId = host.plannedNativeId(plugin);
-    const adapterNativeIds = new Set([adapterCanonicalNativeId, ...(host.legacyNativeIds?.(plugin) ?? [])]);
     const plannedNativeId = options.plannedNativeIds?.get(initialRecord);
+    const adapterCanonicalNativeId = plannedNativeId ?? host.plannedNativeId(plugin);
+    const adapterNativeIds = new Set([adapterCanonicalNativeId, ...(host.legacyNativeIds?.(plugin) ?? [])]);
     const canonicalNativeId = plannedNativeId ?? (adapterNativeIds.has(record.id) ? adapterCanonicalNativeId : record.id);
     const equivalentNativeIds = plannedNativeId !== undefined || adapterNativeIds.has(record.id)
       ? adapterNativeIds

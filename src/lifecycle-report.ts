@@ -344,6 +344,10 @@ function assertOutcome(
   }
   const reason = outcome['reason'];
   if (reason !== null) assertReason(reason as Record<string, unknown>);
+  if (isObject(reason) && reason['category'] === 'readback' &&
+      outcome['resourceState'] === 'potentially-changed' && outcome['result'] !== 'pending') {
+    throw contradiction(`unresolved readback outcome '${outcome['operationId']}' must remain pending`);
+  }
   if (isObject(reason) && reason['code'] === 'recovery.required' && outcome['result'] !== 'pending') {
     throw contradiction(`recovery.required outcome '${outcome['operationId']}' must remain pending`);
   }

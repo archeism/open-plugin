@@ -703,6 +703,53 @@ describe('lifecycle report contract', () => {
     expect(missingRecoveryDiagnostic).toContain('recoveryId');
   });
 
+  test('rejects unresolved readback as terminal while allowing a proven-safe terminal failure', () => {
+    const readbackReason = {
+      category: 'readback',
+      code: 'readback.mismatch',
+      diagnostic: 'native readback did not establish a safe terminal state',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    const unresolved = validReport();
+    unresolved.outcomes[0] = {
+      ...unresolved.outcomes[0]!,
+      result: 'failed',
+      resourceState: 'potentially-changed',
+      activationState: 'unknown',
+      reason: readbackReason,
+    };
+    unresolved.summary = {
+      ...unresolved.summary,
+      result: 'incomplete',
+      terminalPhase: 'readback',
+      failureCategory: 'readback',
+      reason: readbackReason,
+      recoveryId: null,
+      readbackId: 'op-1',
+    };
+
+    let unresolvedDiagnostic = '';
+    try { parseLifecycleReport(unresolved); }
+    catch (error) { unresolvedDiagnostic = (error as Error).message; }
+    expect(unresolvedDiagnostic).toContain('pending');
+
+    const safeTerminal: LifecycleReport = {
+      ...unresolved,
+      outcomes: [{
+        ...unresolved.outcomes[0]!,
+        resourceState: 'retained',
+        activationState: 'retained-prior',
+        changed: false,
+      }],
+      summary: {
+        ...unresolved.summary,
+        changed: false,
+      },
+    };
+    expect(parseLifecycleReport(safeTerminal)).toEqual(safeTerminal);
+  });
+
   test('distinguishes pending recovery requirements from terminal recovery failures', () => {
     const recoveryReport = (code: 'recovery.required' | 'recovery.failed', result: 'pending' | 'failed'): LifecycleReport => {
       const report = validReport();
