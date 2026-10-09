@@ -110,3 +110,13 @@ describe("yaml byte parity (capability yaml-parity)", () => {
     }
   });
 });
+
+describe("runtime.spawn failure settlement", () => {
+  test("a vanished binary settles exited with -1 and reports exitCode immediately", async () => {
+    const { spawn } = await import("../src/runtime");
+    const child = spawn(["/nonexistent/binary/for/plugnz/smoke", "--version"]);
+    const code = await child.exited;
+    expect(code).toBe(-1);
+    expect(child.exitCode).toBe(-1);
+  });
+});
