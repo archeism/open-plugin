@@ -8,7 +8,9 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
+import { createDeploymentScopeIdentity, type TargetIdentity } from './deployment-scope';
 import { stateFile } from './paths';
+import type { SourceBinding } from './source-reference';
 
 declare const Bun: {
   CryptoHasher: new (algorithm: 'sha256') => {
@@ -19,14 +21,10 @@ declare const Bun: {
 
 export type DeploymentScopeId = string;
 
-/** Temporary persisted alias; P03 supplies the canonical source-domain type. */
-export type PersistedSourceBinding =
-  | { kind: 'local'; locator: string }
-  | { kind: 'git'; locator: string; ref: string };
+/** Public compatibility alias for the canonical Source-domain type. */
+export type PersistedSourceBinding = SourceBinding;
 
-export interface PersistedTargetIdentity {
-  kind: string;
-  instance: string;
+export interface PersistedTargetIdentity extends TargetIdentity {
   /** Adapter-owned, bounded scalar context. Secret-looking keys are refused. */
   context?: Record<string, string | number | boolean>;
 }
@@ -393,7 +391,7 @@ function projectV2(state: LifecycleStateV2): InstallRecord[] {
     const record: InstallRecord = {
       host: scope.target.kind,
       id: activation.nativeId,
-      source: scope.source.locator,
+      source: compatibilitySourceUri(scope.source),
       sourceSha: revision,
       pins: activation.pins.length === 0 ? undefined : [...activation.pins],
       fingerprint: activation.fingerprints.source,
@@ -411,8 +409,10 @@ function validateScope(value: unknown, label: string): DeploymentScopeRecord {
   const rec = asObject(value, label);
   exactFields(rec, ['id', 'source', 'target', 'authority', 'lifecycle', 'selectorMode', 'desired', 'lastConverged', 'lastAttemptId', 'createdAt', 'updatedAt', 'retiredAt'], 'deployment scope');
   const id = requiredString(rec['id'], `${label}.id`);
-  validateSource(rec['source'], `${label}.source`);
-  validateTarget(rec['target'], `${label}.target`);
+  const source = validateSource(rec['source'], `${label}.source`);
+  const target = validateTarget(rec['target'], `${label}.target`);
+  const canonicalId = canonicalScopeId(source, target);
+  if (id !== canonicalId) invalid(`deployment scope '${id}' does not match canonical Source and target identity '${canonicalId}'`);
   oneOf(rec['authority'], ['legacy-import', 'authoritative'], `${label}.authority`);
   oneOf(rec['lifecycle'], ['active', 'retiring', 'retired'], `${label}.lifecycle`);
   oneOf(rec['selectorMode'], ['legacy-unknown', 'all', 'explicit', 'retired'], `${label}.selectorMode`);
@@ -435,7 +435,6 @@ function validateSource(value: unknown, label: string): PersistedSourceBinding {
   const kind = oneOf(rec['kind'], ['local', 'git'], `${label}.kind`);
   exactFields(rec, kind === 'git' ? ['kind', 'locator', 'ref'] : ['kind', 'locator'], 'source binding');
   const locator = requiredString(rec['locator'], `${label}.locator`);
-  assertCredentialFree(locator, `${label}.locator`);
   if (kind === 'local') {
     if (!isAbsolute(locator)) invalid(`${label}.locator must be an absolute path`);
   } else requiredString(rec['ref'], `${label}.ref`);
@@ -613,13 +612,30 @@ function validateTombstone(value: unknown, label: string): TombstoneRecord {
 
 function legacySourceBinding(source: string): PersistedSourceBinding {
   assertCredentialFree(source, 'legacy source');
-  if (isLegacyGitSource(source)) return { kind: 'git', locator: source, ref: 'HEAD' };
+  if (isLegacyGitSource(source)) {
+    const fragment = source.lastIndexOf('#');
+    return fragment === -1
+      ? { kind: 'git', locator: source, ref: 'HEAD' }
+      : { kind: 'git', locator: source.slice(0, fragment), ref: source.slice(fragment + 1) };
+  }
   if (!isAbsolute(source)) invalid(`legacy local source must be an absolute path: ${source}`);
   return { kind: 'local', locator: source };
 }
 
+function compatibilitySourceUri(source: PersistedSourceBinding): string {
+  return source.kind === 'git' && source.ref !== 'HEAD' ? `${source.locator}#${source.ref}` : source.locator;
+}
+
 function legacyScopeId(source: PersistedSourceBinding, targetKind: string, instance: string): string {
-  return `legacy-scope-${digest(JSON.stringify([source.kind, source.locator, source.kind === 'git' ? source.ref : '', targetKind, instance]))}`;
+  return canonicalScopeId(source, { kind: targetKind, instance });
+}
+
+function canonicalScopeId(source: PersistedSourceBinding, target: TargetIdentity): string {
+  try {
+    return createDeploymentScopeIdentity(source, target).id;
+  } catch (error) {
+    invalid((error as Error).message);
+  }
 }
 
 function legacyRelativeDir(record: InstallRecord): string | undefined {

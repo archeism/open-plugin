@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createDeploymentScopeIdentity } from '../src/deployment-scope';
 import {
   hasRetirementAuthority,
   readLifecycleState,
@@ -9,18 +10,22 @@ import {
   type LifecycleStateV2,
 } from '../src/state';
 import { writeLifecycleState, writeState } from '../src/state-write';
+import type { SourceBinding } from '../src/source-reference';
 import { withLifecycleCliHarness } from './lifecycle-cli-harness';
 
 const now = '2026-10-09T02:00:00.000Z';
 const earlier = '2026-10-09T01:00:00.000Z';
+const fixtureSource: SourceBinding = { kind: 'git', locator: 'https://github.com/acme/plugins.git', ref: 'main' };
+const fixtureTarget = { kind: 'dcode', instance: 'default' };
+const fixtureScopeId = createDeploymentScopeIdentity(fixtureSource, fixtureTarget).id;
 
 function stateFixture(): LifecycleStateV2 {
   return {
     version: 2,
     stateGeneration: 1,
     scopes: [{
-      id: 'scope-personal-dcode-default',
-      source: { kind: 'git', locator: 'https://github.com/acme/plugins.git', ref: 'main' },
+      id: fixtureScopeId,
+      source: { ...fixtureSource },
       target: { kind: 'dcode', instance: 'default', context: { profile: 'default' } },
       authority: 'authoritative',
       lifecycle: 'active',
@@ -56,7 +61,7 @@ function stateFixture(): LifecycleStateV2 {
       updatedAt: now,
     }],
     activations: [{
-      scopeId: 'scope-personal-dcode-default',
+      scopeId: fixtureScopeId,
       packageId: 'addy@personal',
       nativeId: 'addy@personal',
       sourceRelativeDir: 'plugins/addy',
@@ -77,10 +82,10 @@ function stateFixture(): LifecycleStateV2 {
       command: 'sync',
       phase: 'completed',
       mutationStarted: true,
-      scopeIds: ['scope-personal-dcode-default'],
+      scopeIds: [fixtureScopeId],
       journal: [{
         operationId: 'operation-7',
-        scopeId: 'scope-personal-dcode-default',
+        scopeId: fixtureScopeId,
         packageId: 'addy@personal',
         nativeId: 'addy@personal',
         action: 'update',
@@ -95,7 +100,7 @@ function stateFixture(): LifecycleStateV2 {
     }],
     tombstones: [{
       id: 'tombstone-old-toolbox',
-      scopeId: 'scope-personal-dcode-default',
+      scopeId: fixtureScopeId,
       packageId: 'toolbox@personal',
       nativeId: 'toolbox@personal',
       sourceRelativeDir: 'plugins/toolbox',
@@ -139,7 +144,7 @@ describe('state v2 public reader and writer', () => {
     expect(readState(file)[0]).toEqual({
       host: 'dcode',
       id: 'addy@personal',
-      source: 'https://github.com/acme/plugins.git',
+      source: 'https://github.com/acme/plugins.git#main',
       sourceSha: '2222222222222222222222222222222222222222',
       pins: ['addy-mcp'],
       fingerprint: 'source-v2',
@@ -174,7 +179,7 @@ describe('state v2 public reader and writer', () => {
       { mutate: value => { const activation = (value['activations'] as Array<Record<string, unknown>>)[0]!; activation['pending'] = { operation: 'update', phase: 'readback', attemptId: 'attempt-7', unexpected: true }; }, message: "unsupported pending operation field 'unexpected'" },
       { mutate: value => { (value['attempts'] as Array<Record<string, unknown>>)[0]!['unexpected'] = true; }, message: "unsupported lifecycle attempt field 'unexpected'" },
       { mutate: value => { (((value['attempts'] as Array<Record<string, unknown>>)[0]!['journal'] as Array<Record<string, unknown>>)[0]!)['unexpected'] = true; }, message: "unsupported journal entry field 'unexpected'" },
-      { mutate: value => { ((value['scopes'] as Array<Record<string, unknown>>)[0]!['source'] as Record<string, unknown>)['locator'] = 'https://token@example.invalid/repo.git'; }, message: 'must not contain credentials' },
+      { mutate: value => { ((value['scopes'] as Array<Record<string, unknown>>)[0]!['source'] as Record<string, unknown>)['locator'] = 'https://token@example.invalid/repo.git'; }, message: 'credential-free' },
       { mutate: value => { (((value['scopes'] as Array<Record<string, unknown>>)[0]!['target'] as Record<string, unknown>)['context'] as Record<string, unknown>)['apiToken'] = 'secret'; }, message: 'secret-bearing target context key' },
       { mutate: value => { ((value['activations'] as Array<Record<string, unknown>>)[0]!['ownership'] as Record<string, unknown>)['kind'] = 'legacy-claim'; }, message: 'legacy ownership cannot use a verified route' },
       { mutate: value => { ((value['tombstones'] as Array<Record<string, unknown>>)[0]!['ownership'] as Record<string, unknown>)['kind'] = 'legacy-claim'; }, message: 'tombstone ownership must be revalidated' },
@@ -204,6 +209,22 @@ describe('state v2 public reader and writer', () => {
       item.mutate(value);
       writeFileSync(file, JSON.stringify(value));
       expectThrow(() => readLifecycleState(file), item.message);
+    }
+  });
+
+  test('binds every stored scope id to its canonical Source and target identity', () => {
+    const { file } = tempStateFile();
+    const cases: Array<(value: LifecycleStateV2) => void> = [
+      value => { value.scopes[0]!.source = { kind: 'git', locator: 'https://github.com/acme/other.git', ref: 'main' }; },
+      value => { value.scopes[0]!.source = { kind: 'git', locator: fixtureSource.locator, ref: 'release' }; },
+      value => { value.scopes[0]!.target.instance = 'work'; },
+    ];
+
+    for (const mutate of cases) {
+      const value = JSON.parse(JSON.stringify(stateFixture())) as LifecycleStateV2;
+      mutate(value);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'does not match canonical Source and target identity');
     }
   });
 
@@ -257,6 +278,24 @@ describe('state v2 public reader and writer', () => {
 
     writeLifecycleState({ ...loaded.state, stateGeneration: 1 }, { globalPreflight: 'succeeded' }, file);
     expect(readLifecycleState(file).sourceVersion).toBe(2);
+  });
+
+  test('imports a legacy remote ref into its canonical Source binding and scope id', () => {
+    const { file } = tempStateFile();
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      installs: [{
+        host: 'codex',
+        id: 'demo@personal',
+        source: 'https://github.com/acme/plugins.git#release',
+        sourceSha: 'abc123',
+      }],
+    }));
+
+    const loaded = readLifecycleState(file);
+    const binding: SourceBinding = { kind: 'git', locator: 'https://github.com/acme/plugins.git', ref: 'release' };
+    expect(loaded.state.scopes[0]?.source).toEqual(binding);
+    expect(loaded.state.scopes[0]?.id).toBe(createDeploymentScopeIdentity(binding, { kind: 'codex', instance: 'default' }).id);
   });
 
   test('never downgrades an existing v2 document through the legacy writer', () => {

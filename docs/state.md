@@ -25,7 +25,11 @@ history. Its top level is:
   stable target instance. It records whether the scope came from a legacy
   import or an authoritative sync, its lifecycle and selector mode, the latest
   validated Desired generation, the last converged generation, its last
-  attempt, and known lifecycle timestamps.
+  attempt, and known lifecycle timestamps. Its `scope-v1-…` identifier is the
+  canonical length-framed hash of Source kind/locator/ref plus target
+  kind/instance. Snapshot revision and bounded adapter context are deliberately
+  excluded, so an update stays in the same scope while a changed Source binding
+  or target instance cannot silently reuse one.
 - A Desired generation records the immutable Source revision and fingerprint,
   the complete selected package/native identities, their required capability
   keys, per-package adoption intent, and validation time. An empty Desired
@@ -86,7 +90,9 @@ Version 1 remains strict: malformed JSON, unknown fields, invalid rows,
 duplicates, and unsupported versions are errors. A read imports rows in memory
 without changing the file:
 
-- rows are grouped into Source × host/default-instance scopes;
+- rows are grouped into Source × host/default-instance scopes using the same
+  canonical scope identity as newly resolved Sources; an explicit remote
+  `#ref` is separated from the credential-free repository locator;
 - scopes use `legacy-import` authority, have no Desired or last-converged
   generation, and cannot establish omission/prune authority;
 - every row becomes a `legacy-claim` Activation with unverified route and
