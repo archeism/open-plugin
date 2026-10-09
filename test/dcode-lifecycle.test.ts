@@ -100,6 +100,85 @@ describe('dcode lifecycle', () => {
       expect(readFileSync(join(copy(root), '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"fixture"}}}\n'); expect(readFileSync(join(copy(root), 'hooks/hooks.json'), 'utf8')).toBe('{"hooks":{}}\n');
     });
   });
+  test('refuses hook declarations that dcode would mask or partially ignore before activation', async () => {
+    for (const shape of ['masked-manifest', 'mixed-array'] as const) {
+      await isolated(async root => {
+        const item = incoming();
+        const inline = { PreToolUse: [{ hooks: [{ type: 'command', command: 'true' }] }] };
+        if (shape === 'masked-manifest') {
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({ name: 'addy', version: '0.1.0', hooks: inline })}\n`,
+          });
+        } else {
+          rmSync(join(item.plugin.dir, 'plugin.json'));
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({
+              name: 'addy', version: '0.1.0', hooks: ['./config/hooks.json', inline],
+            })}\n`,
+            'config/hooks.json': `${JSON.stringify({ hooks: inline })}\n`,
+          });
+        }
+
+        const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+        expect(error instanceof PackageCapabilityError).toBe(true);
+        expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+          { capabilityId: 'hooks', code: 'capability.unsupported' },
+        ]);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+      });
+    }
+  });
+  test('refuses hook groups whose dcode handler options or matchers would be dropped before activation', async () => {
+    const cases = [
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', async: true }] }, code: 'capability.unsupported', diagnostic: "handler option 'async' enables unsupported asynchronous execution" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', argv: [] }] }, code: 'capability.unsupported', diagnostic: "handler option 'argv' is not a non-empty string array with an executable" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', timeout: 0 }] }, code: 'capability.unsupported', diagnostic: "handler option 'timeout' is not a positive finite number" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', statusMessage: 1 }] }, code: 'capability.unsupported', diagnostic: "handler option 'statusMessage' is not a string" },
+      { event: 'Stop', group: { matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unsupported', diagnostic: "event 'Stop' does not support matcher 'Bash'" },
+      { event: 'PreToolUse', group: { matcher: '[', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unverified', diagnostic: "matcher '[' for event 'PreToolUse' uses unverified pattern syntax" },
+    ] as const;
+
+    for (const fixture of cases) {
+      await isolated(async root => {
+        const item = incoming();
+        writeFiles(item.plugin.dir, {
+          'hooks/hooks.json': `${JSON.stringify({ hooks: { [fixture.event]: [fixture.group] } })}\n`,
+        });
+
+        const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+        expect(error instanceof PackageCapabilityError).toBe(true);
+        expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+          { capabilityId: 'hooks', code: fixture.code },
+        ]);
+        expect(error.message).toContain(fixture.diagnostic);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+      });
+    }
+  });
+  test('admits the proven dcode command options and a declared JSON document without a json suffix', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      const hooks = {
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Write',
+            hooks: [{
+              type: 'command', command: 'true', async: false, argv: ['true'], timeout: 1, statusMessage: 'running',
+            }],
+          }],
+        },
+      };
+      writeFiles(item.plugin.dir, {
+        'plugin.json': `${JSON.stringify({ name: 'addy', version: '0.1.0', hooks: './config/hooks.conf' })}\n`,
+        'config/hooks.conf': `${JSON.stringify(hooks)}\n`,
+      });
+
+      await dcodeWriter.add(item.plugin, item.resolved);
+      expect(readFileSync(join(copy(root), 'config/hooks.conf'), 'utf8')).toBe(`${JSON.stringify(hooks)}\n`);
+    });
+  });
   test('refuses a .plugin-only manifest that the native loader does not read', async () => {
     await isolated(async root => {
       const item = incoming(); rmSync(join(item.plugin.dir, 'plugin.json')); writeFiles(item.plugin.dir, { '.plugin/plugin.json': '{"name":"addy","version":"0.1.0"}\n' });

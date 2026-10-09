@@ -167,7 +167,7 @@ agents, so its command refusal currently masks a second, untyped agent refusal.
 1. **Keep the pair blocked until dcode supports the components.** This has the
    strongest semantic guarantee but delivers none of that package to dcode.
 2. **Represent a package as component-level results.** Install the natively
-   supported skills/hooks while keeping commands/agents loud and red. This
+   supported skills and any actually declared hooks while keeping commands/agents loud and red. This
    delivers useful regular content but is not a successful full-package
    install; it changes the product's current all-or-nothing unit and therefore
    needs an explicit decision.
@@ -332,11 +332,16 @@ projection was deferred while other hosts were progressively added. It is now
 stale relative to the user's explicit decision that Addy should deploy to
 dcode like other regular plugin and skill packages.
 
-Addy contains 25 ordinary skills, nine TOML commands, four agents, and hooks.
-It has no current invocation-policy flags. If dcode is added to the allowlist
+Addy contains 25 ordinary skills, nine TOML commands, four agents, and nine
+scripts/docs under `hooks/`, but no `hooks/hooks.json` or manifest hook
+declaration. Those files are inert package resources, not an active hook
+component; Claude documents `hooks/hooks.json` as the default hook config and
+dcode 0.1.83 discovers that exact default document.
+[Claude plugin hooks](https://code.claude.com/docs/en/plugins-reference#hooks),
+[dcode manifest discovery](https://github.com/langchain-ai/deepagents/blob/caaa7e7c12d214afa5cf0a1afed8eb6232aa6f7b/libs/code/deepagents_code/plugins/manifest.py#L327-L341)
+Addy has no current invocation-policy flags. If dcode is added to the allowlist
 today, plugnz refuses `commandProjection` first; after that is addressed, the
-raw agents refusal remains. The ordinary skills and supported hook surface are
-not the blocker.
+raw agents refusal remains. Its ordinary skills are otherwise supportable.
 
 ### Delivery options and tradeoffs
 
