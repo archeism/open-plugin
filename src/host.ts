@@ -71,19 +71,6 @@ export interface AddOptions {
   adoptExisting?: boolean;
 }
 
-export type InstallStatus = 'installed' | 'unchanged' | 'unsupported' | 'unverified' | 'failed';
-
-/** Generic mutation result; readers keep their host-native data shapes. */
-export interface InstallOutcome {
-  plugin: string;
-  target: string;
-  status: InstallStatus;
-  dryRun: boolean;
-  diagnostic?: string;
-  nativeId?: string;
-  action?: 'install' | 'update' | 'remove';
-}
-
 export interface PinOptions {
   /** Report what would change without writing. */
   dryRun?: boolean;

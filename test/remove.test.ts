@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
 import { join } from 'node:path';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { withHostEnvAsync, initGitRepo, writeFiles, writeLedger } from './util';
 import { main } from '../src/cli';
@@ -14,6 +14,9 @@ import { piWriter } from '../src/hosts/pi-writer';
 import { hermes } from '../src/hosts/hermes';
 import { readState } from '../src/state';
 import { withKimiNative } from './kimi-fixture';
+import { cleanupWriters } from '../src/hosts/writers';
+import type { HostWriter } from '../src/host';
+import { parseLifecycleReport } from '../src/lifecycle-report';
 
 const pluginsMap = {
   'plugin.json': JSON.stringify({ name: "demo-plugin", mcpServers: { demo: { command: "demo" } } }, null, 2),
@@ -21,6 +24,51 @@ const pluginsMap = {
 };
 
 describe('remove', () => {
+  test('reports a target detection exception as a preflight defect', async () => {
+    await withHostEnvAsync('codex', async () => {
+      const originalWriters = [...cleanupWriters];
+      const exploding: HostWriter = {
+        id: 'codex',
+        gui: false,
+        detect: () => { throw new Error(); },
+        stores: () => [],
+        listInstalled: () => [],
+        mcpEntries: () => [],
+        add: async () => {},
+        remove: async () => {},
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, exploding);
+      console.log = (value: string) => output.push(value);
+      try {
+        expect(await main(['remove', 'demo', '--target', 'codex', '--json'])).toBe(1);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...originalWriters);
+        console.log = originalLog;
+      }
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect(report.outcomes).toEqual([]);
+      expect(report.summary).toEqual({
+        result: 'incomplete',
+        terminalPhase: 'preflight',
+        mutationStarted: false,
+        changed: false,
+        failureCategory: 'internal',
+        reason: {
+          category: 'internal',
+          code: 'internal.defect',
+          diagnostic: 'Error',
+          capabilityId: null,
+          evidenceId: null,
+        },
+        recoveryId: null,
+        readbackId: null,
+      });
+    });
+  });
+
   test('--target removes only that host record', async () => {
     await withHostEnvAsync('codex', async (home) => {
       writeLedger(home, [
@@ -36,7 +84,24 @@ describe('remove', () => {
   test('refuses an unrecorded native install', async () => {
     await withHostEnvAsync('codex', async () => {
       expect(codex.listInstalled().some((plugin) => plugin.id === 'demo-plugin@demo-market')).toBe(true);
-      expect(await main(['remove', 'demo-plugin@demo-market', '--target', 'codex'])).toBe(1);
+      const output: string[] = [];
+      const originalLog = console.log;
+      console.log = (value: string) => output.push(value);
+      try {
+        expect(await main(['remove', 'demo-plugin@demo-market', '--target', 'codex', '--json'])).toBe(1);
+      } finally {
+        console.log = originalLog;
+      }
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({
+        outcomes: report.outcomes,
+        terminalPhase: report.summary.terminalPhase,
+        reasonCode: report.summary.reason?.code,
+      }).toEqual({
+        outcomes: [],
+        terminalPhase: 'preflight',
+        reasonCode: 'internal.ambiguous-ownership',
+      });
       expect(codex.listInstalled().some((plugin) => plugin.id === 'demo-plugin@demo-market')).toBe(true);
     });
   });
@@ -78,6 +143,55 @@ describe('remove', () => {
       expect(hermes.listInstalled().some((plugin) => plugin.name === 'demo-plugin')).toBe(false);
       expect(existsSync(join(home, '.hermes/plugins/demo-plugin.plgnz-commands'))).toBe(false);
       expect(readState().find((record) => record.host === 'hermes')).toBeUndefined();
+    });
+  });
+
+  test('reports a post-remove ledger failure in the finalize phase', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-remove-finalize-'));
+      writeLedger(home, [{ host: 'codex', id: 'demo-plugin', source: sourceDir, sourceSha: 'fixture' }]);
+      const originalWriters = [...cleanupWriters];
+      const writer: HostWriter = {
+        id: 'codex',
+        gui: false,
+        detect: () => true,
+        stores: () => [],
+        listInstalled: () => [],
+        mcpEntries: () => [],
+        add: async () => {},
+        remove: async () => { chmodSync(home, 0o555); },
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, writer);
+      console.log = (value: string) => output.push(value);
+      let code: number;
+      try {
+        code = await main(['remove', 'demo-plugin', '--target', 'codex', '--json']);
+      } finally {
+        chmodSync(home, 0o755);
+        cleanupWriters.splice(0, cleanupWriters.length, ...originalWriters);
+        console.log = originalLog;
+      }
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({
+        code,
+        result: report.outcomes[0]?.result,
+        changed: report.outcomes[0]?.changed,
+        resourceState: report.outcomes[0]?.resourceState,
+        reasonCode: report.outcomes[0]?.reason?.code,
+        terminalPhase: report.summary.terminalPhase,
+        mutationStarted: report.summary.mutationStarted,
+      }).toEqual({
+        code: 1,
+        result: 'failed',
+        changed: true,
+        resourceState: 'potentially-changed',
+        reasonCode: 'runtime.operation-failed',
+        terminalPhase: 'finalize',
+        mutationStarted: true,
+      });
     });
   });
 

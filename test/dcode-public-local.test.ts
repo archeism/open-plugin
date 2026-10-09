@@ -22,7 +22,8 @@ test('public dcode local add returns the removable native id and leaves foreign 
     writeFileSync(enablement, JSON.stringify({ version: 1, enabledPlugins: { 'foreign@local': true } }));
     const env = { ...process.env, HOME: home, OPEN_PLUGIN_HOME: home, OPEN_PLUGIN_DCODE_ROOT: native };
     const cli = (...args: string[]) => {
-      const result = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), ...args, '--json'], { cwd: empty, env, encoding: 'utf8' });
+      const outputFlag = args[0] === 'list' ? '--json' : '--legacy-json';
+      const result = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), ...args, outputFlag], { cwd: empty, env, encoding: 'utf8' });
       return { code: result.status, data: JSON.parse(result.stdout) as any, stderr: result.stderr };
     };
     const added = cli('add', source, '--target', 'dcode');

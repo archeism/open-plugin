@@ -23,19 +23,39 @@ import { resolveSource, type PluginSource } from './source';
 import { readState, type InstallRecord } from './state';
 import { writeState } from './state-write';
 import { fingerprintInstallation } from './fingerprint';
-import { CompatibilityError } from './compatibility';
+import { CompatibilityError, compatibilityEvidenceId } from './compatibility';
+import type { LifecycleTerminalPhase } from './lifecycle-report';
+import { unknownErrorDiagnostic } from './error-diagnostic';
 
 export interface UpdateFinding {
   host: string;
+  /** Present when the finding belongs to one lifecycle package pair. */
+  package?: string;
+  nativeId?: string;
   mark: Mark;
-  /** A typed adapter refusal keeps its public InstallOutcome status. */
+  /** A typed adapter refusal keeps its public lifecycle capability status. */
   status?: 'unsupported' | 'unverified';
+  /** Exact capability refused by a typed adapter boundary. */
+  capabilityId?: string;
+  /** Exact evidence reference supplied by a typed adapter boundary. */
+  evidenceId?: string | null;
+  /** Terminal action reported only by a successfully read-back update. */
+  action?: 'update' | 'unchanged';
+  /** Stable lifecycle reason when the finding needs more than the runtime default. */
+  reasonCode?: 'internal.ambiguous-ownership' | 'readback.failed' | 'readback.mismatch';
+  /** Exact phase in which this finding prevented convergence. */
+  terminalPhase?: LifecycleTerminalPhase;
+  /** Present only after this package's durable mutation boundary was crossed. */
+  mutationStarted?: true;
+  /** Present only when a native mutation is known to have completed. */
+  changed?: true;
   message: string;
 }
 
 export interface UpdateResult {
   findings: UpdateFinding[];
   exitCode: number;
+  mutationStarted: boolean;
 }
 
 export interface UpdateOptions {
@@ -58,6 +78,20 @@ function idOf(plugin: PluginSource): string {
   return plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`;
 }
 
+function findingFor(
+  record: InstallRecord,
+  details: Omit<UpdateFinding, 'host' | 'package' | 'nativeId' | 'mutationStarted'>,
+  mutationStarted = false,
+): UpdateFinding {
+  return {
+    host: record.host,
+    package: record.id,
+    nativeId: record.id,
+    ...details,
+    ...(mutationStarted ? { mutationStarted: true as const } : {}),
+  };
+}
+
 function shortSha(sha: string): string {
   return sha.length > 8 ? sha.slice(0, 8) : sha;
 }
@@ -68,6 +102,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
   const save = options.writeState ?? writeState;
   const prefix = options.dryRun === true ? '[dry-run] ' : '';
   const findings: UpdateFinding[] = [];
+  let mutationStarted = false;
 
   const selectedHosts = new Set(hosts.map((host) => host.id));
   const records = state.filter((record) => selectedHosts.has(record.host)).filter((record) => name === undefined || record.id === name || idName(record.id) === name);
@@ -75,9 +110,10 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
     findings.push({
       host: 'plgnz',
       mark: '✗',
+      reasonCode: 'internal.ambiguous-ownership',
       message: `no install record for '${name}' in state.json — not installed by plgnz; refusing to modify it`,
     });
-    return { findings, exitCode: 1 };
+    return { findings, exitCode: 1, mutationStarted };
   }
   if (records.length === 0) {
     findings.push({
@@ -85,54 +121,68 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       mark: '!',
       message: 'nothing to update — state.json has no install records',
     });
-    return { findings, exitCode: 0 };
+    return { findings, exitCode: 0, mutationStarted };
   }
 
   for (const initialRecord of records) {
     const found = state.find((candidate) => candidate.host === initialRecord.host && candidate.id === initialRecord.id);
     if (found === undefined) continue;
     let record: InstallRecord = found;
+    let recordMutationStarted = false;
     const host = hosts.find((w) => w.id === record.host);
     if (host === undefined) {
-      findings.push({
-        host: record.host,
+      findings.push(findingFor(record, {
         mark: '✗',
+        terminalPhase: 'preflight',
         message: `unknown host in state.json for '${record.id}' — no host module owns it`,
-      });
+      }));
       continue;
     }
-    if (!host.detect()) {
-      findings.push({
-        host: host.id,
+    let detected: boolean;
+    try {
+      detected = host.detect();
+    } catch (error) {
+      findings.push(findingFor(record, {
+        mark: '✗',
+        terminalPhase: 'preflight',
+        message: `host detection for '${record.id}' failed — ${unknownErrorDiagnostic(error)}`,
+      }));
+      continue;
+    }
+    if (!detected) {
+      findings.push(findingFor(record, {
         mark: '!',
+        terminalPhase: 'preflight',
         message: `host not present on this machine — '${record.id}' skipped`,
-      });
+      }));
       continue;
     }
     if (record.pending === 'remove') {
-      findings.push({ host: host.id, mark: '✗', message: `removal of '${record.id}' is pending — retry remove before update` });
+      findings.push(findingFor(record, { mark: '✗', terminalPhase: 'preflight', message: `removal of '${record.id}' is pending — retry remove before update` }));
       continue;
     }
 
     let resolved;
+    let writerResult: void | 'unchanged';
+    let nativeChanged = false;
     try {
       resolved = resolveSource(record.source);
     } catch (e) {
-      findings.push({
-        host: host.id,
+      findings.push(findingFor(record, {
         mark: '✗',
-        message: `cannot resolve source of '${record.id}': ${record.source} — ${(e as Error).message}`,
-      });
+        terminalPhase: 'resolve',
+        message: `cannot resolve source of '${record.id}': ${record.source} — ${unknownErrorDiagnostic(e)}`,
+      }));
       continue;
     }
 
     const plugin = resolved.plugins.find((p) => idOf(p) === record.id) ?? resolved.plugins.find((p) => p.name === idName(record.id));
     if (plugin === undefined) {
-      findings.push({
-        host: host.id,
+      findings.push(findingFor(record, {
         mark: '✗',
+        terminalPhase: 'resolve',
         message: `source ${record.source} no longer provides '${record.id}' — re-add it by hand`,
-      });
+      }));
       continue;
     }
 
@@ -143,50 +193,105 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
         save(next);
         state = next;
         record = pending;
+        recordMutationStarted = true;
+        mutationStarted = true;
       }
-      await host.add(plugin, resolved, { dryRun: options.dryRun });
+      writerResult = await host.add(plugin, resolved, { dryRun: options.dryRun });
+      nativeChanged = options.dryRun !== true && writerResult !== 'unchanged';
     } catch (e) {
-      findings.push(e instanceof CompatibilityError
-        ? { host: host.id, mark: e.status === 'unverified' ? '!' : '✗', status: e.status, message: `re-add of '${record.id}' refused — ${e.message}` }
-        : { host: host.id, mark: '✗', message: `re-add of '${record.id}' failed — ${(e as Error).message}` });
+      findings.push(findingFor(record, e instanceof CompatibilityError
+        ? {
+            mark: e.status === 'unverified' ? '!' : '✗',
+            status: e.status,
+            capabilityId: e.capability,
+            evidenceId: compatibilityEvidenceId(e.evidence),
+            terminalPhase: recordMutationStarted ? 'apply' : 'preflight',
+            message: `re-add of '${record.id}' refused — ${e.message}`,
+          }
+        : { mark: '✗', terminalPhase: 'apply', message: `re-add of '${record.id}' failed — ${unknownErrorDiagnostic(e)}` }, recordMutationStarted));
       continue;
     }
-    let pinsOk: boolean;
+    let pins: { ok: boolean; changePlanned: boolean };
     try {
-      pinsOk = await repin(host, record, plugin, options, findings, prefix);
+      pins = await repin(host, record, plugin, options, findings, prefix, recordMutationStarted, nativeChanged);
     } catch (error) {
-      findings.push({ host: host.id, mark: '✗', message: `updated '${record.id}' but pin finalization failed — ${(error as Error).message}` });
+      findings.push(findingFor(record, {
+        mark: '✗',
+        terminalPhase: 'finalize',
+        ...(nativeChanged ? { changed: true as const } : {}),
+        message: `updated '${record.id}' but pin finalization failed — ${unknownErrorDiagnostic(error)}`,
+      }, recordMutationStarted));
       continue;
     }
-    if (!pinsOk) continue;
+    if (!pins.ok) continue;
+
+    const action = writerResult === 'unchanged' && !pins.changePlanned ? 'unchanged' : 'update';
+    const changed = nativeChanged || (options.dryRun !== true && pins.changePlanned);
 
     if (options.dryRun === true) {
-      findings.push({ host: host.id, mark: '✓', message: `${prefix}updated '${record.id}' from ${record.source} → ${shortSha(resolved.sha)}` });
+      findings.push(findingFor(record, { mark: '✓', action, message: `${prefix}${action === 'unchanged' ? 'unchanged' : 'updated'} '${record.id}' from ${record.source} → ${shortSha(resolved.sha)}` }, recordMutationStarted));
       continue;
     }
+    let installedFingerprint: string;
     try {
       const installed = host.listInstalled().find((candidate) => candidate.id === record.id);
-      if (installed === undefined || installed.enabled === false || installed.path === undefined) throw new Error('updated native representation is not enabled or has no readable path');
-      const finalized: InstallRecord = {
-        ...record,
-        sourceSha: resolved.sha,
-        installedAt: new Date().toISOString(),
-        ownership: record.ownership ?? 'plgnz',
-        sourceDir: plugin.sourceDir ?? plugin.dir,
-        installedFingerprint: fingerprintInstallation(installed),
-        ...(plugin.contentFingerprint !== undefined ? { fingerprint: plugin.contentFingerprint } : {}),
-      };
-      delete finalized.pending;
-      const next = state.map((candidate) => candidate === record ? finalized : candidate);
-      save(next);
-      state = next;
-      findings.push({ host: host.id, mark: '✓', message: `updated '${record.id}' from ${record.source} → ${shortSha(resolved.sha)}` });
+      if (installed === undefined || installed.enabled === false || installed.path === undefined) {
+        findings.push(findingFor(record, {
+          mark: '✗',
+          reasonCode: 'readback.mismatch',
+          terminalPhase: 'readback',
+          ...(changed ? { changed: true as const } : {}),
+          message: `updated native representation for '${record.id}' is not enabled or has no readable path`,
+        }, recordMutationStarted));
+        continue;
+      }
+      installedFingerprint = fingerprintInstallation(installed);
     } catch (error) {
-      findings.push({ host: host.id, mark: '✗', message: `updated '${record.id}' but could not finalize its ledger record — ${(error as Error).message}` });
+      findings.push(findingFor(record, {
+        mark: '✗',
+        reasonCode: 'readback.failed',
+        terminalPhase: 'readback',
+        ...(changed ? { changed: true as const } : {}),
+        message: `updated native representation for '${record.id}' could not be inspected — ${unknownErrorDiagnostic(error)}`,
+      }, recordMutationStarted));
+      continue;
     }
+    const finalized: InstallRecord = {
+      ...record,
+      sourceSha: resolved.sha,
+      installedAt: new Date().toISOString(),
+      ownership: record.ownership ?? 'plgnz',
+      sourceDir: plugin.sourceDir ?? plugin.dir,
+      installedFingerprint,
+      ...(plugin.contentFingerprint !== undefined ? { fingerprint: plugin.contentFingerprint } : {}),
+    };
+    delete finalized.pending;
+    const next = state.map((candidate) => candidate === record ? finalized : candidate);
+    try {
+      save(next);
+    } catch (error) {
+      findings.push(findingFor(record, {
+        mark: '✗',
+        terminalPhase: 'finalize',
+        ...(changed ? { changed: true as const } : {}),
+        message: `updated '${record.id}' but could not finalize its ledger record — ${unknownErrorDiagnostic(error)}`,
+      }, recordMutationStarted));
+      continue;
+    }
+    state = next;
+    findings.push(findingFor(record, {
+      mark: '✓',
+      action,
+      ...(changed ? { changed: true as const } : {}),
+      message: `${action === 'unchanged' ? 'unchanged' : 'updated'} '${record.id}' from ${record.source} → ${shortSha(resolved.sha)}`,
+    }, recordMutationStarted));
   }
 
-  return { findings, exitCode: findings.some((f) => f.mark === '✗' || f.status === 'unverified') ? 1 : 0 };
+  return {
+    findings,
+    exitCode: findings.some((f) => f.mark === '✗' || f.status === 'unverified') ? 1 : 0,
+    mutationStarted,
+  };
 }
 
 /** Re-apply the pins recorded for this install onto the freshly added copy. */
@@ -197,34 +302,52 @@ async function repin(
   options: UpdateOptions,
   findings: UpdateFinding[],
   prefix: string,
-): Promise<boolean> {
+  mutationStarted: boolean,
+  nativeChanged: boolean,
+): Promise<{ ok: boolean; changePlanned: boolean }> {
   const pins = record.pins ?? [];
-  if (pins.length === 0) return true;
-  const installed: InstalledPlugin | undefined = host.listInstalled().find((p) => p.id === record.id);
+  if (pins.length === 0) return { ok: true, changePlanned: false };
+  let installed: InstalledPlugin | undefined;
+  try {
+    installed = host.listInstalled().find((p) => p.id === record.id);
+  } catch (error) {
+    findings.push(findingFor(record, {
+      mark: '✗',
+      reasonCode: 'readback.failed',
+      terminalPhase: 'readback',
+      ...(nativeChanged ? { changed: true as const } : {}),
+      message: `cannot inspect '${record.id}' before re-applying pins — ${unknownErrorDiagnostic(error)}`,
+    }, mutationStarted));
+    return { ok: false, changePlanned: false };
+  }
   if (installed === undefined) {
-    findings.push({
-      host: host.id,
+    findings.push(findingFor(record, {
       mark: '!',
+      reasonCode: 'readback.mismatch',
+      terminalPhase: 'readback',
+      ...(nativeChanged ? { changed: true as const } : {}),
       message: `cannot re-apply pins for '${record.id}' — not found in the ${host.id} store after the update`,
-    });
-    return false;
+    }, mutationStarted));
+    return { ok: false, changePlanned: false };
   }
   const outcome = await host.pin(installed, { only: pins, dryRun: options.dryRun });
+  const changed = nativeChanged || (options.dryRun !== true && outcome.changes.length > 0);
   for (const change of outcome.changes) {
-    findings.push({
-      host: host.id,
+    findings.push(findingFor(record, {
       mark: '✓',
+      ...(changed ? { changed: true as const } : {}),
       message: `${prefix}re-pinned '${change.server}': '${change.from}' → ${change.to} (plugin ${plugin.name})`,
-    });
+    }, mutationStarted));
   }
   for (const refusal of outcome.refusals) {
-    findings.push({
-      host: host.id,
+    findings.push(findingFor(record, {
       mark: '✗',
+      terminalPhase: 'finalize',
+      ...(changed ? { changed: true as const } : {}),
       message:
         `${prefix}failed to re-apply the pin for '${refusal.server}': bare command '${refusal.command}' ` +
         `not found on PATH (plugin ${plugin.name})`,
-    });
+    }, mutationStarted));
   }
-  return outcome.refusals.length === 0;
+  return { ok: outcome.refusals.length === 0, changePlanned: outcome.changes.length > 0 };
 }
