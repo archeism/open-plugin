@@ -56,6 +56,14 @@ declare module 'node:child_process' {
   ): SpawnSyncResult;
 }
 
+declare module 'node:crypto' {
+  export interface Hash {
+    update(value: string | Uint8Array): Hash;
+    digest(format: 'hex'): string;
+  }
+  export function createHash(algorithm: string): Hash;
+}
+
 declare module 'node:os' {
   export function tmpdir(): string;
 }

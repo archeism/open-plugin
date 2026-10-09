@@ -23,7 +23,8 @@
     "LICENSE"
   ],
   "dependencies": {
-    "smol-toml": "^1.8.0"
+    "smol-toml": "^1.8.0",
+    "yaml": "2"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
