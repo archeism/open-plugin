@@ -92,6 +92,23 @@ export type HookDeclarationForm =
   | 'manifest-inline-wrapped'
   | 'manifest-inline-array';
 
+export type HookMatcherKind = 'all' | 'literal-set' | 'pattern';
+
+export type HookHandlerFacet =
+  | 'async-enabled'
+  | 'async-non-boolean'
+  | 'argv-invalid'
+  | 'timeout-invalid'
+  | 'status-message-invalid';
+
+export interface HookGroupDeclaration {
+  event: string;
+  matcher: string | null;
+  matcherKind: HookMatcherKind;
+  handlerTypes: string[];
+  handlerFacets: HookHandlerFacet[];
+}
+
 /** Source-authored hook configuration facts; target support remains profile-backed. */
 export interface HookDeclaration {
   source: string;
@@ -99,6 +116,8 @@ export interface HookDeclaration {
   form: HookDeclarationForm;
   events: string[];
   handlerTypes: string[];
+  groups: HookGroupDeclaration[];
+  handlerFacets: HookHandlerFacet[];
 }
 
 export interface PackageSemanticInventory {
@@ -393,9 +412,9 @@ function inventoryHooks(
   const components = new Set<string>();
   const configPaths = new Set<string>();
   const declarations: HookDeclaration[] = [];
-  const documents = new Map<string, Pick<HookDeclaration, 'events' | 'handlerTypes'>>();
+  const documents = new Map<string, HookObservation>();
 
-  const readDocument = (path: string): Pick<HookDeclaration, 'events' | 'handlerTypes'> => {
+  const readDocument = (path: string): HookObservation => {
     const cached = documents.get(path);
     if (cached !== undefined) return cached;
     const value = parseJsonObject(join(root, path), `hook configuration ${path}`);
@@ -488,19 +507,23 @@ function declaredHookPath(root: string, declaration: string): { path: string; di
     }
     return { path: document, directory: true };
   }
-  if (!stat.isFile() || !path.endsWith('.json')) {
-    invalid(`declared hook configuration must be a JSON file or native hook directory: ${declaration}`);
+  if (!stat.isFile()) {
+    invalid(`declared hook configuration must be a regular file or native hook directory: ${declaration}`);
   }
   return { path, directory: false };
 }
 
+type HookObservation = Pick<HookDeclaration, 'events' | 'handlerTypes' | 'groups' | 'handlerFacets'>;
+
 function validateHookEventMap(
   value: unknown,
   label: string,
-): Pick<HookDeclaration, 'events' | 'handlerTypes'> {
+): HookObservation {
   if (!isRecord(value)) invalid(`${label} must be a hook event object`);
   const events: string[] = [];
   const handlerTypes = new Set<string>();
+  const groupDeclarations: HookGroupDeclaration[] = [];
+  const handlerFacets = new Set<HookHandlerFacet>();
   for (const [event, groups] of Object.entries(value)) {
     if (event.trim() === '' || !Array.isArray(groups)) invalid(`${label} event '${event}' must be an array`);
     events.push(event);
@@ -509,17 +532,69 @@ function validateHookEventMap(
       if (group['matcher'] !== undefined && typeof group['matcher'] !== 'string') {
         invalid(`${label} event '${event}' group ${groupIndex} matcher must be a string`);
       }
+      const matcher = typeof group['matcher'] === 'string' ? group['matcher'] : null;
       if (!Array.isArray(group['hooks'])) invalid(`${label} event '${event}' group ${groupIndex} hooks must be an array`);
+      const groupHandlerTypes = new Set<string>();
+      const groupHandlerFacets = new Set<HookHandlerFacet>();
       for (const [hookIndex, hook] of group['hooks'].entries()) {
         if (!isRecord(hook) || typeof hook['type'] !== 'string' || hook['type'].trim() === '') {
           invalid(`${label} event '${event}' group ${groupIndex} hook ${hookIndex} needs a non-empty type`);
         }
         validateHookHandler(hook, `${label} event '${event}' group ${groupIndex} hook ${hookIndex}`);
         handlerTypes.add(hook['type']);
+        groupHandlerTypes.add(hook['type']);
+        for (const facet of hookHandlerFacets(hook)) {
+          handlerFacets.add(facet);
+          groupHandlerFacets.add(facet);
+        }
       }
+      groupDeclarations.push({
+        event,
+        matcher,
+        matcherKind: hookMatcherKind(matcher),
+        handlerTypes: [...groupHandlerTypes].sort(),
+        handlerFacets: [...groupHandlerFacets].sort(),
+      });
     }
   }
-  return { events: events.sort(), handlerTypes: [...handlerTypes].sort() };
+  return {
+    events: events.sort(),
+    handlerTypes: [...handlerTypes].sort(),
+    groups: groupDeclarations,
+    handlerFacets: [...handlerFacets].sort(),
+  };
+}
+
+function hookMatcherKind(value: string | null): HookMatcherKind {
+  if (value === null || value === '' || value === '*') return 'all';
+  if (/^[A-Za-z0-9_\s,|\-]+$/u.test(value) && value.split(/[|,]/u).some((part) => part.trim() !== '')) {
+    return 'literal-set';
+  }
+  return 'pattern';
+}
+
+function hookHandlerFacets(hook: Record<string, unknown>): HookHandlerFacet[] {
+  const facets = new Set<HookHandlerFacet>();
+  for (const field of ['async', 'async_']) {
+    if (!Object.hasOwn(hook, field) || hook[field] === null || hook[field] === false) continue;
+    facets.add(hook[field] === true ? 'async-enabled' : 'async-non-boolean');
+  }
+  if (hook['argv'] !== undefined && hook['argv'] !== null) {
+    const argv = hook['argv'];
+    if (!Array.isArray(argv) || argv.length === 0 || argv.some((part) => typeof part !== 'string') || (argv[0] as string).trim() === '') {
+      facets.add('argv-invalid');
+    }
+  }
+  if (hook['timeout'] !== undefined && hook['timeout'] !== null) {
+    const timeout = hook['timeout'];
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) facets.add('timeout-invalid');
+  }
+  for (const field of ['statusMessage', 'status_message']) {
+    if (hook[field] !== undefined && hook[field] !== null && typeof hook[field] !== 'string') {
+      facets.add('status-message-invalid');
+    }
+  }
+  return [...facets];
 }
 
 function validateHookHandler(hook: Record<string, unknown>, label: string): void {

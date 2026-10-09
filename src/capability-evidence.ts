@@ -5,6 +5,8 @@ import {
   requiredSemanticsForOperation,
   type CapabilityOperation,
   type HookDeclarationForm,
+  type HookHandlerFacet,
+  type HookMatcherKind,
   type PackageSemantic,
   type PackageSemanticInventory,
   type SourceType,
@@ -21,6 +23,12 @@ export interface HookCapabilityEvidence {
   supportedForms: readonly HookDeclarationForm[];
   supportedEvents: readonly string[];
   supportedHandlerTypes: readonly string[];
+  /** Events for which only an omitted, empty, or `*` matcher is effective. */
+  matcherlessEvents: readonly string[];
+  /** Matcher syntax this profile can prove without invoking the target runtime. */
+  supportedMatcherKinds: readonly HookMatcherKind[];
+  /** Known handler facets that make an otherwise valid declaration ineffective. */
+  unsupportedHandlerFacets: readonly HookHandlerFacet[];
 }
 
 export interface CapabilityEvidenceProfile {
@@ -137,6 +145,15 @@ const dcode0183Managed = createCapabilityEvidenceProfile({
       'SubagentStop',
     ],
     supportedHandlerTypes: ['command'],
+    matcherlessEvents: ['UserPromptSubmit', 'Stop'],
+    supportedMatcherKinds: ['all', 'literal-set'],
+    unsupportedHandlerFacets: [
+      'async-enabled',
+      'async-non-boolean',
+      'argv-invalid',
+      'timeout-invalid',
+      'status-message-invalid',
+    ],
   },
   evidence: [
     'docs/evidence/dcode-native-update-0.1.83-20261009.json',
@@ -314,7 +331,11 @@ function unsupportedHookDeclaration(
     const compatible = effective
       && policy.supportedForms.includes(declaration.form)
       && declaration.events.every((event) => policy.supportedEvents.includes(event))
-      && declaration.handlerTypes.every((type) => policy.supportedHandlerTypes.includes(type));
+      && declaration.groups.every((group) =>
+        group.handlerTypes.every((type) => policy.supportedHandlerTypes.includes(type))
+        && policy.supportedMatcherKinds.includes(group.matcherKind)
+        && (!policy.matcherlessEvents.includes(group.event) || group.matcherKind === 'all')
+        && group.handlerFacets.every((facet) => !policy.unsupportedHandlerFacets.includes(facet)));
     if (compatible) supportedSources.add(declaration.source);
     return compatible;
   });
@@ -330,11 +351,17 @@ function normalizeHookPolicy(input: HookCapabilityEvidence | null): HookCapabili
   const supportedForms = uniqueStrings(input.supportedForms, 'hook declaration form').sort() as HookDeclarationForm[];
   const supportedEvents = uniqueStrings(input.supportedEvents, 'hook event').sort();
   const supportedHandlerTypes = uniqueStrings(input.supportedHandlerTypes, 'hook handler type').sort();
+  const matcherlessEvents = uniqueStrings(input.matcherlessEvents, 'matcherless hook event').sort();
+  const supportedMatcherKinds = uniqueStrings(input.supportedMatcherKinds, 'hook matcher kind').sort() as HookMatcherKind[];
+  const unsupportedHandlerFacets = uniqueStrings(input.unsupportedHandlerFacets, 'unsupported hook handler facet').sort() as HookHandlerFacet[];
   return Object.freeze({
     manifestPrecedence: Object.freeze(manifestPrecedence),
     supportedForms: Object.freeze(supportedForms),
     supportedEvents: Object.freeze(supportedEvents),
     supportedHandlerTypes: Object.freeze(supportedHandlerTypes),
+    matcherlessEvents: Object.freeze(matcherlessEvents),
+    supportedMatcherKinds: Object.freeze(supportedMatcherKinds),
+    unsupportedHandlerFacets: Object.freeze(unsupportedHandlerFacets),
   });
 }
 
