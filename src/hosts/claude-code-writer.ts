@@ -24,7 +24,9 @@ export const claudeCodeWriter: HostWriter = {
     const registryFile = join(pluginsDir(), 'installed_plugins.json');
     const settingsFile = join(pluginsDir(), '..', 'settings.json');
     const marketplacesFile = join(pluginsDir(), 'known_marketplaces.json');
-    const wrapper = !existsSync(join(resolved.sourceUri, '.claude-plugin', 'marketplace.json')) ? join(pluginsDir(), 'marketplaces', `.plgnz-${marketplace}`) : undefined;
+    const snapshotRoot = resolved.snapshotDir ?? resolved.sourceUri;
+    const frozenSource = resolved.snapshot !== undefined;
+    const wrapper = frozenSource || !existsSync(join(snapshotRoot, '.claude-plugin', 'marketplace.json')) ? join(pluginsDir(), 'marketplaces', `.plgnz-${marketplace}`) : undefined;
     for (const path of [slot, registryFile, settingsFile, marketplacesFile]) assertManagedPath(path);
     const registry = readRegistry(registryFile);
     const settings = readSettings(settingsFile);
@@ -45,7 +47,7 @@ export const claudeCodeWriter: HostWriter = {
     assertTargetIsReplaceable(target, existing, id, resolved.sourceUri);
     assertNoForeignRegistryEntry(registry, id, target, resolved.sourceUri, legacy);
     if (!preserveNativeMarketplace && wrapper !== undefined) assertManagedPath(wrapper);
-    if (!preserveNativeMarketplace) validateMarketplaceRegistration(marketplaces, marketplace, resolved.sourceUri, plugin);
+    if (!preserveNativeMarketplace) validateMarketplaceRegistration(marketplaces, marketplace, snapshotRoot, resolved.sourceUri, plugin, frozenSource);
     if (opts?.dryRun) {
       const stage = mkdtempSync(join(tmpdir(), 'plgnz-claude-dry-run-'));
       try { stagePlugin(plugin.dir, stage, plugin.name, version); }
@@ -62,7 +64,7 @@ export const claudeCodeWriter: HostWriter = {
     let durable = false;
     try {
       stagePlugin(plugin.dir, stage, plugin.name, version);
-      const nextMarketplaces = preserveNativeMarketplace ? undefined : marketplacesWithLocalSource(marketplaces, marketplace, resolved.sourceUri, plugin);
+      const nextMarketplaces = preserveNativeMarketplace ? undefined : marketplacesWithLocalSource(marketplaces, marketplace, snapshotRoot, resolved.sourceUri, plugin, frozenSource);
       writeFileSync(join(stage, OWNERSHIP), JSON.stringify({ source: resolved.sourceUri, pluginId: id, fingerprint: plugin.contentFingerprint ?? '', ...(preserveNativeMarketplace ? { adopted: true } : {}) }));
       const unchanged = existing !== null && existing.fingerprint === (plugin.contentFingerprint ?? '') && sameTree(stage, target);
       if (unchanged) {
@@ -277,15 +279,15 @@ function readMarketplaces(file: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function marketplacesWithLocalSource(marketplaces: Record<string, unknown>, name: string, source: string, plugin: PluginSource): Record<string, unknown> {
-  const manifest = join(source, '.claude-plugin', 'marketplace.json');
-  const catalog = validateMarketplaceRegistration(marketplaces, name, source, plugin);
-  if (!existsSync(manifest)) {
+function marketplacesWithLocalSource(marketplaces: Record<string, unknown>, name: string, sourcePath: string, sourceIdentity: string, plugin: PluginSource, forceWrapper: boolean): Record<string, unknown> {
+  const manifest = join(sourcePath, '.claude-plugin', 'marketplace.json');
+  const catalog = validateMarketplaceRegistration(marketplaces, name, sourcePath, sourceIdentity, plugin, forceWrapper);
+  if (forceWrapper || !existsSync(manifest)) {
     const marker = join(catalog, OWNERSHIP);
     const copy = join(catalog, 'plugins', plugin.name);
     rmSync(copy, { recursive: true, force: true });
     cpSync(plugin.dir, copy, { recursive: true });
-    writeFileSync(join(copy, OWNERSHIP), JSON.stringify({ source, pluginId: `${plugin.name}@${name}`, fingerprint: plugin.contentFingerprint ?? '' }));
+    writeFileSync(join(copy, OWNERSHIP), JSON.stringify({ source: sourceIdentity, pluginId: `${plugin.name}@${name}`, fingerprint: plugin.contentFingerprint ?? '' }));
     mkdirSync(join(catalog, '.claude-plugin'), { recursive: true });
     const current = existsSync(join(catalog, '.claude-plugin', 'marketplace.json')) ? JSON.parse(readFileSync(join(catalog, '.claude-plugin', 'marketplace.json'), 'utf8')) as { plugins?: unknown[] } : {};
     const plugins = Array.isArray(current.plugins) ? current.plugins.filter(entry => !(typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['name'] === plugin.name)) : [];
@@ -301,16 +303,16 @@ function marketplacesWithLocalSource(marketplaces: Record<string, unknown>, name
 }
 
 /** Read-only preflight shared by real activation and dry-run. */
-function validateMarketplaceRegistration(marketplaces: Record<string, unknown>, name: string, source: string, plugin: PluginSource): string {
-  if (!source.startsWith('/')) throw new Error(`Claude Code marketplace registration for remote source ${name} is unverified`);
-  const manifest = join(source, '.claude-plugin', 'marketplace.json');
-  const catalog = existsSync(manifest) ? source : join(pluginsDir(), 'marketplaces', `.plgnz-${name}`);
+function validateMarketplaceRegistration(marketplaces: Record<string, unknown>, name: string, sourcePath: string, sourceIdentity: string, plugin: PluginSource, forceWrapper: boolean): string {
+  if (!sourcePath.startsWith('/')) throw new Error(`Claude Code marketplace registration for remote source ${name} is unverified`);
+  const manifest = join(sourcePath, '.claude-plugin', 'marketplace.json');
+  const catalog = !forceWrapper && existsSync(manifest) ? sourcePath : join(pluginsDir(), 'marketplaces', `.plgnz-${name}`);
   if (!existsSync(manifest) && existsSync(catalog)) {
     assertNoSymlinks(catalog);
     const wrapper = readOwnership(catalog);
     if (wrapper?.pluginId !== `marketplace@${name}` || wrapper.source !== 'plgnz-wrapper') throw new Error(`Claude Code marketplace wrapper ${catalog} is foreign; refusing to replace it`);
     const copy = join(catalog, 'plugins', plugin.name);
-    if (existsSync(copy) && readOwnership(copy)?.source !== source) throw new Error(`Claude Code marketplace wrapper plugin ${copy} is foreign; refusing to replace it`);
+    if (existsSync(copy) && readOwnership(copy)?.source !== sourceIdentity) throw new Error(`Claude Code marketplace wrapper plugin ${copy} is foreign; refusing to replace it`);
   }
   if (existsSync(join(catalog, '.claude-plugin', 'marketplace.json'))) {
     let document: unknown;
@@ -321,7 +323,7 @@ function validateMarketplaceRegistration(marketplaces: Record<string, unknown>, 
   const existing = marketplaces[name];
   if (typeof existing === 'object' && existing !== null) {
     const previous = ((existing as Record<string, unknown>)['source'] as Record<string, unknown> | undefined)?.['path'];
-    if (typeof previous === 'string' && previous !== catalog) throw new Error(`Claude Code marketplace ${name} is registered from a different source; refusing to replace it`);
+    if (typeof previous === 'string' && previous !== catalog && previous !== sourceIdentity) throw new Error(`Claude Code marketplace ${name} is registered from a different source; refusing to replace it`);
   }
   return catalog;
 }
@@ -465,7 +467,7 @@ function matchesNativeCatalogMember(marketplaces: Record<string, unknown>, name:
   const sourceRecord = source as Record<string, unknown>;
   const catalog = sourceRecord['path'];
   if (sourceRecord['source'] !== 'directory' || typeof catalog !== 'string' || catalog !== record['installLocation'] || !catalog.startsWith('/') || catalog === resolved.sourceUri) return false;
-  if (!containedPath(resolved.sourceUri, plugin.dir)) return false;
+  if (!containedPath(resolved.sourceUri, plugin.sourceDir ?? plugin.dir)) return false;
   const manifest = join(catalog, '.claude-plugin', 'marketplace.json');
   if (!existsSync(manifest)) return false;
   assertCatalogPath(catalog, manifest);

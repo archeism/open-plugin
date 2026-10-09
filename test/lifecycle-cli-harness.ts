@@ -53,7 +53,7 @@ const LOCKED_ENV = new Set([
 
 export interface StateDocument {
   version: number;
-  installs: Array<{ host: string; id: string; pending?: 'install' | 'remove' }>;
+  installs: Array<{ host: string; id: string; source: string; sourceSha: string; sourceDir?: string; pending?: 'install' | 'remove' }>;
 }
 
 export interface TreeSnapshot {

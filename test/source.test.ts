@@ -1,11 +1,25 @@
-import { describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtempSync } from 'node:fs';
-import { normalizeSource, resolveSource } from '../src/source';
+import { normalizeSource, resolveSource as resolveSourcePublic } from '../src/source';
 import { fingerprintTree } from '../src/fingerprint';
+import { commitAll, initGitRepo } from './util';
+
+const sourceHome = mkdtempSync(join(tmpdir(), 'plgnz-source-home-'));
+afterAll(() => rmSync(sourceHome, { recursive: true, force: true }));
+
+function resolveSource(source: string): ReturnType<typeof resolveSourcePublic> {
+  const previous = process.env['OPEN_PLUGIN_HOME'];
+  process.env['OPEN_PLUGIN_HOME'] = sourceHome;
+  try { return resolveSourcePublic(source); }
+  finally {
+    if (previous === undefined) delete process.env['OPEN_PLUGIN_HOME'];
+    else process.env['OPEN_PLUGIN_HOME'] = previous;
+  }
+}
 
 function plugin(dir: string, name = 'fixture'): void {
   mkdirSync(dir, { recursive: true });
@@ -15,6 +29,7 @@ function plugin(dir: string, name = 'fixture'): void {
 describe('resolveSource', () => {
   test('normalizes public owner/repo shorthand without treating it as local', () => {
     expect(normalizeSource('owner/repo')).toBe('https://github.com/owner/repo.git');
+    expect(normalizeSource('git@github.com:owner/repo.git#release')).toBe('git@github.com:owner/repo.git#release');
     expect(normalizeSource('./plugin')).toBe(resolve('./plugin'));
     expect(normalizeSource('../plugin')).toBe(resolve('../plugin'));
   });
@@ -29,6 +44,182 @@ describe('resolveSource', () => {
     expect(first.sourceUri).toBe(resolve(root));
     expect(first.plugins[0]?.contentFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(second.plugins[0]?.contentFingerprint === first.plugins[0]?.contentFingerprint).toBe(false);
+  });
+
+  test('freezes local source bytes before returning packages to lifecycle callers', () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-local-'));
+    plugin(root);
+    writeFileSync(join(root, 'resource.md'), 'frozen\n');
+
+    const resolved = resolveSource(root);
+    const frozen = resolved.plugins[0]!;
+    writeFileSync(join(root, 'resource.md'), 'edited after resolution\n');
+
+    expect({
+      sourceUri: resolved.sourceUri,
+      binding: resolved.snapshot.binding,
+      revision: resolved.snapshot.revision,
+      snapshotFingerprint: resolved.snapshot.fingerprint,
+      sourceDir: frozen.sourceDir,
+      relativeDir: frozen.relativeDir,
+      stagedBytes: readFileSync(join(frozen.dir, 'resource.md'), 'utf8'),
+      stagedAwayFromSource: frozen.dir !== root,
+    }).toEqual({
+      sourceUri: resolve(root),
+      binding: { kind: 'local', locator: resolve(root) },
+      revision: resolved.snapshot.fingerprint,
+      snapshotFingerprint: resolved.snapshot.fingerprint,
+      sourceDir: resolve(root),
+      relativeDir: '.',
+      stagedBytes: 'frozen\n',
+      stagedAwayFromSource: true,
+    });
+    expect(resolved.snapshot.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('freezes a mode-only local Source change as a distinct executable snapshot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-local-mode-'));
+    plugin(root, 'local-mode-fixture');
+    const executable = join(root, 'run.sh');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+    chmodSync(executable, 0o644);
+
+    const first = resolveSource(root);
+    chmodSync(executable, 0o755);
+    const second = resolveSource(root);
+
+    expect({
+      sameFingerprint: first.snapshot.fingerprint === second.snapshot.fingerprint,
+      sameSnapshot: first.snapshotDir === second.snapshotDir,
+      firstExecutable: executableBits(join(first.snapshotDir, 'run.sh')),
+      secondExecutable: executableBits(join(second.snapshotDir, 'run.sh')),
+      sameBytes: readFileSync(join(first.snapshotDir, 'run.sh'), 'utf8') === readFileSync(join(second.snapshotDir, 'run.sh'), 'utf8'),
+    }).toEqual({
+      sameFingerprint: false,
+      sameSnapshot: false,
+      firstExecutable: 0,
+      secondExecutable: 0o111,
+      sameBytes: true,
+    });
+    chmodSync(join(second.snapshotDir, 'run.sh'), 0o644);
+    expectThrow(() => resolveSource(root), 'Cached Source snapshot is corrupt');
+  });
+
+  test('binds a credentialed remote ref to one immutable revision', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-remote-'));
+    const checkout = join(root, 'checkout');
+    const remote = join(root, 'remote.git');
+    const fakeBin = join(root, 'bin');
+    const first = initGitRepo(checkout, {
+      'plugin.json': '{"name":"fixture","version":"1.0.0"}',
+      'resource.md': 'revision one\n',
+    });
+    expect(spawnSync('git', ['clone', '--quiet', '--bare', checkout, remote], { encoding: 'utf8' }).status).toBe(0);
+    writeFileSync(join(checkout, 'resource.md'), 'revision two\n');
+    const second = commitAll(checkout, 'move remote after resolution');
+    expect(spawnSync('git', ['-C', checkout, 'push', '--quiet', remote, `${second}:refs/heads/future`], { encoding: 'utf8' }).status).toBe(0);
+    mkdirSync(fakeBin, { recursive: true });
+    const git = join(fakeBin, 'git');
+    writeFileSync(git, `#!/bin/bash
+set -euo pipefail
+real_git=/usr/bin/git
+remote=${JSON.stringify(remote)}
+move_to=${JSON.stringify(second)}
+requested='https://user:super-secret@example.test/repo.git'
+args=("$@")
+for i in "\${!args[@]}"; do
+  if [[ "\${args[$i]}" == "$requested" || "\${args[$i]}" == "$requested#main" ]]; then args[$i]="$remote"; fi
+done
+if [[ "\${args[0]}" == ls-remote ]]; then
+  output=$("$real_git" "\${args[@]}")
+  "$real_git" --git-dir="$remote" update-ref refs/heads/main "$move_to"
+  printf '%s\n' "$output"
+  exit 0
+fi
+exec "$real_git" "\${args[@]}"
+`);
+    chmodSync(git, 0o755);
+    const previousGit = process.env['OPEN_PLUGIN_GIT_BIN'];
+    process.env['OPEN_PLUGIN_GIT_BIN'] = git;
+
+    try {
+      const resolved = resolveSource('https://user:super-secret@example.test/repo.git#main');
+      expect({
+        sourceUri: resolved.sourceUri,
+        snapshot: resolved.snapshot,
+        bytes: readFileSync(join(resolved.plugins[0]!.dir, 'resource.md'), 'utf8'),
+        remoteHead: spawnSync('/usr/bin/git', ['--git-dir', remote, 'rev-parse', 'refs/heads/main'], { encoding: 'utf8' }).stdout.trim(),
+        serializedLeaksCredential: JSON.stringify({ sourceUri: resolved.sourceUri, snapshot: resolved.snapshot }).includes('super-secret'),
+      }).toEqual({
+        sourceUri: 'https://example.test/repo.git#main',
+        snapshot: {
+          binding: { kind: 'git', locator: 'https://example.test/repo.git', ref: 'main' },
+          revision: first,
+          fingerprint: resolved.snapshot.fingerprint,
+        },
+        bytes: 'revision one\n',
+        remoteHead: second,
+        serializedLeaksCredential: false,
+      });
+      expect(resolved.snapshot.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      if (previousGit === undefined) delete process.env['OPEN_PLUGIN_GIT_BIN'];
+      else process.env['OPEN_PLUGIN_GIT_BIN'] = previousGit;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('materializes executable mode from distinct exact remote revisions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-remote-mode-'));
+    const checkout = join(root, 'checkout');
+    const remote = join(root, 'remote.git');
+    const fakeBin = join(root, 'bin');
+    const executable = join(checkout, 'run.sh');
+    const first = initGitRepo(checkout, {
+      'plugin.json': '{"name":"fixture","version":"1.0.0"}',
+      'run.sh': '#!/bin/sh\nexit 0\n',
+    });
+    chmodSync(executable, 0o755);
+    const second = commitAll(checkout, 'make script executable');
+    expect(spawnSync('git', ['clone', '--quiet', '--bare', checkout, remote], { encoding: 'utf8' }).status).toBe(0);
+    mkdirSync(fakeBin, { recursive: true });
+    const git = join(fakeBin, 'git');
+    writeFileSync(git, `#!/bin/bash
+set -euo pipefail
+real_git=/usr/bin/git
+remote=${JSON.stringify(remote)}
+requested='https://example.test/mode.git'
+args=("$@")
+for i in "\${!args[@]}"; do
+  if [[ "\${args[$i]}" == "$requested" ]]; then args[$i]="$remote"; fi
+done
+exec "$real_git" "\${args[@]}"
+`);
+    chmodSync(git, 0o755);
+    const previousGit = process.env['OPEN_PLUGIN_GIT_BIN'];
+    process.env['OPEN_PLUGIN_GIT_BIN'] = git;
+
+    try {
+      const before = resolveSource(`https://example.test/mode.git#${first}`);
+      const after = resolveSource(`https://example.test/mode.git#${second}`);
+      expect({
+        revisions: [before.snapshot.revision, after.snapshot.revision],
+        sameFingerprint: before.snapshot.fingerprint === after.snapshot.fingerprint,
+        sameSnapshot: before.snapshotDir === after.snapshotDir,
+        beforeExecutable: executableBits(join(before.snapshotDir, 'run.sh')),
+        afterExecutable: executableBits(join(after.snapshotDir, 'run.sh')),
+      }).toEqual({
+        revisions: [first, second],
+        sameFingerprint: false,
+        sameSnapshot: false,
+        beforeExecutable: 0,
+        afterExecutable: 0o111,
+      });
+    } finally {
+      if (previousGit === undefined) delete process.env['OPEN_PLUGIN_GIT_BIN'];
+      else process.env['OPEN_PLUGIN_GIT_BIN'] = previousGit;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test('uses a native-only Claude marketplace manifest for plugin identity and version', () => {
@@ -166,4 +357,8 @@ function expectThrow(fn: () => void, message: string): void {
 function writeBytes(path: string, bytes: number[]): void {
   const write = writeFileSync as unknown as (target: string, data: Uint8Array) => void;
   write(path, new Uint8Array(bytes));
+}
+
+function executableBits(path: string): number {
+  return statSync(path).mode & 0o111;
 }

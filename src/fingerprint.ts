@@ -1,4 +1,4 @@
-/** Stable raw-byte tree fingerprint shared by source capture and read-only verification. */
+/** Stable tree fingerprint shared by source capture and read-only verification. */
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { InstalledPlugin } from './host';
@@ -15,10 +15,20 @@ declare const TextEncoder: {
 };
 
 export function fingerprintTree(root: string): string {
+  return fingerprint(root, false);
+}
+
+/** Source proof excludes repository metadata that is not distributed to hosts. */
+export function fingerprintSourceTree(root: string): string {
+  return fingerprint(root, true);
+}
+
+function fingerprint(root: string, ignoreGitMetadata: boolean): string {
   if (lstatSync(root).isSymbolicLink()) throw new Error('cannot fingerprint symlink: .');
   const hash = new Bun.CryptoHasher('sha256');
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir).sort()) {
+      if (ignoreGitMetadata && entry === '.git') continue;
       const path = join(dir, entry);
       const relative = prefix === '' ? entry : `${prefix}/${entry}`;
       const stat = lstatSync(path);
@@ -28,6 +38,10 @@ export function fingerprintTree(root: string): string {
         walk(path, relative);
       } else if (stat.isFile()) {
         hash.update(`f\0${relative}\0`);
+        // Git and host loaders distinguish regular files from executables.
+        // Normalize to that portable semantic instead of hashing platform-
+        // specific read/write permission bits.
+        hash.update(stat.mode & 0o111 ? 'x\0' : '-\0');
         const content = new Bun.CryptoHasher('sha256');
         content.update(readBytes(path));
         hash.update(content.digest('hex'));
