@@ -26,6 +26,7 @@ import { fingerprintInstallation } from './fingerprint';
 import { CompatibilityError, compatibilityEvidenceId } from './compatibility';
 import type { LifecycleActivationState, LifecycleResourceState, LifecycleTerminalPhase } from './lifecycle-report';
 import { unknownErrorDiagnostic } from './error-diagnostic';
+import { captureNativeIdentity, type NativeIdentitySnapshot } from './native-identity';
 
 export interface UpdateFinding {
   host: string;
@@ -72,8 +73,8 @@ export interface UpdateOptions {
   writeState?: (records: InstallRecord[]) => void;
   /** Exact preflight-selected records. The full `state` is still preserved on writes. */
   records?: readonly InstallRecord[];
-  /** Adapter-owned canonical identity frozen by the public command before apply. */
-  plannedNativeIds?: ReadonlyMap<InstallRecord, string>;
+  /** Complete adapter-owned identity frozen by the public command before apply. */
+  nativeIdentitySnapshots?: ReadonlyMap<InstallRecord, NativeIdentitySnapshot>;
 }
 
 /** The plugin name part of a host-native id (`name@marketplace` or bare name). */
@@ -198,11 +199,24 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       continue;
     }
 
-    const plannedNativeId = options.plannedNativeIds?.get(initialRecord);
-    const adapterCanonicalNativeId = plannedNativeId ?? host.plannedNativeId(plugin);
-    const adapterNativeIds = new Set([adapterCanonicalNativeId, ...(host.legacyNativeIds?.(plugin) ?? [])]);
-    const canonicalNativeId = plannedNativeId ?? (adapterNativeIds.has(record.id) ? adapterCanonicalNativeId : record.id);
-    const equivalentNativeIds = plannedNativeId !== undefined || adapterNativeIds.has(record.id)
+    let identity = options.nativeIdentitySnapshots?.get(initialRecord);
+    if (identity === undefined) {
+      const captured = captureNativeIdentity(host, plugin);
+      if (!captured.ok) {
+        findings.push(findingFor(record, {
+          mark: '✗',
+          terminalPhase: 'preflight',
+          message: `native identity preflight for '${record.id}' failed — ${unknownErrorDiagnostic(captured.error)}`,
+        }));
+        continue;
+      }
+      identity = captured.identity;
+    }
+    const adapterCanonicalNativeId = identity.nativeId;
+    const adapterNativeIds = new Set(identity.equivalentNativeIds);
+    const carriedIdentity = options.nativeIdentitySnapshots?.has(initialRecord) === true;
+    const canonicalNativeId = carriedIdentity ? adapterCanonicalNativeId : adapterNativeIds.has(record.id) ? adapterCanonicalNativeId : record.id;
+    const equivalentNativeIds = carriedIdentity || adapterNativeIds.has(record.id)
       ? adapterNativeIds
       : new Set([record.id]);
     const equivalentRecords = records.filter((candidate) => candidate.host === record.host && equivalentNativeIds.has(candidate.id));

@@ -84,6 +84,89 @@ describe('add', () => {
     });
   });
 
+  test('captures canonical and legacy native identity exactly once before dry or applied add', async () => {
+    for (const dryRun of [true, false]) {
+      for (const failingHook of ['planned', 'legacy'] as const) {
+        for (const throwOn of [1, 2, 3]) {
+          await withHostEnvAsync('codex', async (home) => {
+            const sourceDir = join(home, `identity-${failingHook}-${throwOn}-${String(dryRun)}`);
+            initGitRepo(sourceDir, pluginsMap);
+            let plannedCalls = 0;
+            let legacyCalls = 0;
+            let addCalls = 0;
+            const writer: HostWriter = {
+              id: 'codex',
+              gui: false,
+              plannedNativeId: (plugin) => {
+                plannedCalls += 1;
+                if (failingHook === 'planned' && plannedCalls === throwOn) throw new Error(`planned identity failure ${throwOn}`);
+                return plugin.name;
+              },
+              legacyNativeIds: () => {
+                legacyCalls += 1;
+                if (failingHook === 'legacy' && legacyCalls === throwOn) throw new Error(`legacy identity failure ${throwOn}`);
+                return [];
+              },
+              detect: () => true,
+              stores: () => [],
+              listInstalled: () => [{ id: 'new-plugin', name: 'new-plugin', enabled: true, path: sourceDir }],
+              mcpEntries: () => [],
+              add: async () => { addCalls += 1; },
+              remove: async () => {},
+              pin: async () => ({ changes: [], refusals: [] }),
+            };
+            const originalWriters = [...writers];
+            const output: string[] = [];
+            const originalLog = console.log;
+            writers.splice(0, writers.length, writer);
+            console.log = (value: string) => output.push(value);
+            let code: number;
+            try {
+              code = await main(['add', sourceDir, '--target', 'codex', ...(dryRun ? ['--dry-run'] : []), '--json']);
+            } finally {
+              writers.splice(0, writers.length, ...originalWriters);
+              console.log = originalLog;
+            }
+            const report = parseLifecycleReport(JSON.parse(output.join('')));
+            const failsOnOnlyAllowedCall = throwOn === 1;
+
+            expect({
+              code,
+              plannedCalls,
+              legacyCalls,
+              addCalls,
+              planLength: report.plan.length,
+              outcomeLength: report.outcomes.length,
+              nativeId: report.plan[0]?.nativeId,
+              action: report.plan[0]?.action,
+              route: report.plan[0]?.route,
+              result: report.outcomes[0]?.result,
+              reasonCode: report.outcomes[0]?.reason?.code,
+              terminalPhase: report.summary.terminalPhase,
+              mutationStarted: report.summary.mutationStarted,
+              stateLength: readState().length,
+            }).toEqual({
+              code: failsOnOnlyAllowedCall ? 1 : 0,
+              plannedCalls: 1,
+              legacyCalls: 1,
+              addCalls: failsOnOnlyAllowedCall ? 0 : 1,
+              planLength: 1,
+              outcomeLength: 1,
+              nativeId: failsOnOnlyAllowedCall && failingHook === 'planned' ? null : 'new-plugin',
+              action: failsOnOnlyAllowedCall ? 'not-attempted' : 'install',
+              route: failsOnOnlyAllowedCall ? 'none' : 'managed',
+              result: failsOnOnlyAllowedCall ? 'failed' : 'succeeded',
+              reasonCode: failsOnOnlyAllowedCall ? 'internal.defect' : undefined,
+              terminalPhase: failsOnOnlyAllowedCall ? 'preflight' : 'complete',
+              mutationStarted: failsOnOnlyAllowedCall ? false : !dryRun,
+              stateLength: failsOnOnlyAllowedCall || dryRun ? 0 : 1,
+            });
+          });
+        }
+      }
+    }
+  });
+
   test('claude-code > writes registry and copies files', async () => {
     await withHostEnvAsync('claude-code', async (home) => {
       const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-source-'));

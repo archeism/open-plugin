@@ -703,7 +703,7 @@ describe('lifecycle report contract', () => {
     expect(missingRecoveryDiagnostic).toContain('recoveryId');
   });
 
-  test('rejects unresolved readback as terminal while allowing a proven-safe terminal failure', () => {
+  test('allows terminal failed readback only for the exact known-safe state pairs', () => {
     const readbackReason = {
       category: 'readback',
       code: 'readback.mismatch',
@@ -711,43 +711,45 @@ describe('lifecycle report contract', () => {
       capabilityId: null,
       evidenceId: null,
     } as const;
-    const unresolved = validReport();
-    unresolved.outcomes[0] = {
-      ...unresolved.outcomes[0]!,
-      result: 'failed',
-      resourceState: 'potentially-changed',
-      activationState: 'unknown',
-      reason: readbackReason,
-    };
-    unresolved.summary = {
-      ...unresolved.summary,
-      result: 'incomplete',
-      terminalPhase: 'readback',
-      failureCategory: 'readback',
-      reason: readbackReason,
-      recoveryId: null,
-      readbackId: 'op-1',
-    };
+    const safe = new Set([
+      'present/active-conforming',
+      'retained/retained-prior',
+      'retained/inactive',
+      'absent/inactive',
+    ]);
+    const observed = LIFECYCLE_RESOURCE_STATES.flatMap((resourceState) =>
+      LIFECYCLE_ACTIVATION_STATES.map((activationState) => {
+        const report = validReport();
+        report.outcomes[0] = {
+          ...report.outcomes[0]!,
+          result: 'failed',
+          resourceState,
+          activationState,
+          changed: false,
+          reason: readbackReason,
+        };
+        report.summary = {
+          ...report.summary,
+          result: 'incomplete',
+          terminalPhase: 'readback',
+          changed: false,
+          failureCategory: 'readback',
+          reason: readbackReason,
+          recoveryId: null,
+          readbackId: 'op-1',
+        };
+        const key = `${resourceState}/${activationState}`;
+        try {
+          parseLifecycleReport(report);
+          return { key, accepted: true };
+        } catch (error) {
+          return { key, accepted: false, code: (error as LifecycleReportValidationError).reason.code };
+        }
+      }));
 
-    let unresolvedDiagnostic = '';
-    try { parseLifecycleReport(unresolved); }
-    catch (error) { unresolvedDiagnostic = (error as Error).message; }
-    expect(unresolvedDiagnostic).toContain('pending');
-
-    const safeTerminal: LifecycleReport = {
-      ...unresolved,
-      outcomes: [{
-        ...unresolved.outcomes[0]!,
-        resourceState: 'retained',
-        activationState: 'retained-prior',
-        changed: false,
-      }],
-      summary: {
-        ...unresolved.summary,
-        changed: false,
-      },
-    };
-    expect(parseLifecycleReport(safeTerminal)).toEqual(safeTerminal);
+    expect(observed).toEqual(observed.map(({ key }) => safe.has(key)
+      ? { key, accepted: true }
+      : { key, accepted: false, code: 'protocol.contradictory-outcome' }));
   });
 
   test('distinguishes pending recovery requirements from terminal recovery failures', () => {

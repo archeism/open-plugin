@@ -348,6 +348,10 @@ function assertOutcome(
       outcome['resourceState'] === 'potentially-changed' && outcome['result'] !== 'pending') {
     throw contradiction(`unresolved readback outcome '${outcome['operationId']}' must remain pending`);
   }
+  if (isObject(reason) && reason['category'] === 'readback' && outcome['result'] === 'failed' &&
+      !isKnownSafeReadbackState(outcome['resourceState'], outcome['activationState'])) {
+    throw contradiction(`terminal readback outcome '${outcome['operationId']}' needs a known-safe resource and activation state`);
+  }
   if (isObject(reason) && reason['code'] === 'recovery.required' && outcome['result'] !== 'pending') {
     throw contradiction(`recovery.required outcome '${outcome['operationId']}' must remain pending`);
   }
@@ -410,6 +414,12 @@ function assertOutcome(
   if ((dryRun || outcome['result'] === 'not-attempted' || outcome['action'] === 'unchanged' || outcome['action'] === 'retain-prior' || outcome['route'] === 'none') && outcome['changed'] === true) {
     throw contradiction(`outcome '${outcome['operationId']}' cannot report changed=true`);
   }
+}
+
+function isKnownSafeReadbackState(resourceState: unknown, activationState: unknown): boolean {
+  return (resourceState === 'present' && activationState === 'active-conforming') ||
+    (resourceState === 'retained' && (activationState === 'retained-prior' || activationState === 'inactive')) ||
+    (resourceState === 'absent' && activationState === 'inactive');
 }
 
 function assertSummary(summary: Record<string, unknown>, outcomes: readonly Record<string, unknown>[], dryRun: boolean): void {

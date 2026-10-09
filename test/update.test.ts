@@ -91,155 +91,91 @@ describe('update · re-add from the recorded source', () => {
     });
   });
 
-  test('carries the frozen native identity into dry-run and applied update execution', async () => {
+  test('captures canonical and legacy native identity exactly once before dry or applied update', async () => {
     for (const dryRun of [true, false]) {
-      await withHostEnvAsync('cursor', async (home) => {
-        const repo = join(home, `src-frozen-update-identity-${String(dryRun)}`);
-        const sha = initGitRepo(repo, {
-          'demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
-        });
-        writeLedger(home, [{ host: 'cursor', id: 'demo', source: repo, sourceSha: sha }]);
-        const before = JSON.stringify(readState());
-        let plannedNativeIdCalls = 0;
-        const writer: HostWriter = {
-          id: 'cursor',
-          gui: false,
-          plannedNativeId: (plugin) => {
-            plannedNativeIdCalls += 1;
-            if (plannedNativeIdCalls >= 4) throw new Error(`forced identity failure ${plannedNativeIdCalls}`);
-            return plugin.name;
-          },
-          detect: () => true,
-          stores: () => [],
-          listInstalled: () => [{ id: 'demo', name: 'demo', enabled: true, path: join(repo, 'demo') }],
-          mcpEntries: () => [],
-          add: async () => 'unchanged',
-          remove: async () => {},
-          pin: async () => ({ changes: [], refusals: [] }),
-        };
-        const originalWriters = [...writers];
-        const output: string[] = [];
-        const originalLog = console.log;
-        writers.splice(0, writers.length, writer);
-        console.log = (value: string) => output.push(value);
-        let code: number;
-        try {
-          code = await main(['update', 'demo', '--target', 'cursor', ...(dryRun ? ['--dry-run'] : []), '--json']);
-        } finally {
-          writers.splice(0, writers.length, ...originalWriters);
-          console.log = originalLog;
+      for (const failingHook of ['planned', 'legacy'] as const) {
+        for (const throwOn of [1, 2, 3]) {
+          await withHostEnvAsync('cursor', async (home) => {
+            const repo = join(home, `src-update-identity-${failingHook}-${throwOn}-${String(dryRun)}`);
+            const sha = initGitRepo(repo, {
+              'demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+            });
+            writeLedger(home, [{ host: 'cursor', id: 'demo', source: repo, sourceSha: sha }]);
+            const before = JSON.stringify(readState());
+            let plannedCalls = 0;
+            let legacyCalls = 0;
+            let addCalls = 0;
+            const writer: HostWriter = {
+              id: 'cursor',
+              gui: false,
+              plannedNativeId: (plugin) => {
+                plannedCalls += 1;
+                if (failingHook === 'planned' && plannedCalls === throwOn) throw new Error(`planned identity failure ${throwOn}`);
+                return plugin.name;
+              },
+              legacyNativeIds: () => {
+                legacyCalls += 1;
+                if (failingHook === 'legacy' && legacyCalls === throwOn) throw new Error(`legacy identity failure ${throwOn}`);
+                return [];
+              },
+              detect: () => true,
+              stores: () => [],
+              listInstalled: () => [{ id: 'demo', name: 'demo', enabled: true, path: join(repo, 'demo') }],
+              mcpEntries: () => [],
+              add: async () => { addCalls += 1; return 'unchanged'; },
+              remove: async () => {},
+              pin: async () => ({ changes: [], refusals: [] }),
+            };
+            const originalWriters = [...writers];
+            const output: string[] = [];
+            const originalLog = console.log;
+            writers.splice(0, writers.length, writer);
+            console.log = (value: string) => output.push(value);
+            let code: number;
+            try {
+              code = await main(['update', 'demo', '--target', 'cursor', ...(dryRun ? ['--dry-run'] : []), '--json']);
+            } finally {
+              writers.splice(0, writers.length, ...originalWriters);
+              console.log = originalLog;
+            }
+            const report = parseLifecycleReport(JSON.parse(output.join('')));
+            const failsOnOnlyAllowedCall = throwOn === 1;
+
+            expect({
+              code,
+              plannedCalls,
+              legacyCalls,
+              addCalls,
+              planLength: report.plan.length,
+              outcomeLength: report.outcomes.length,
+              nativeId: report.plan[0]?.nativeId,
+              action: report.plan[0]?.action,
+              route: report.plan[0]?.route,
+              result: report.outcomes[0]?.result,
+              reasonCode: report.outcomes[0]?.reason?.code,
+              terminalPhase: report.summary.terminalPhase,
+              mutationStarted: report.summary.mutationStarted,
+              stateUnchanged: JSON.stringify(readState()) === before,
+            }).toEqual({
+              code: failsOnOnlyAllowedCall ? 1 : 0,
+              plannedCalls: 1,
+              legacyCalls: 1,
+              addCalls: failsOnOnlyAllowedCall ? 0 : 1,
+              planLength: 1,
+              outcomeLength: 1,
+              nativeId: failsOnOnlyAllowedCall && failingHook === 'planned' ? null : 'demo',
+              action: failsOnOnlyAllowedCall ? 'not-attempted' : dryRun ? 'unchanged' : 'update',
+              route: failsOnOnlyAllowedCall ? 'none' : 'managed',
+              result: failsOnOnlyAllowedCall ? 'failed' : 'succeeded',
+              reasonCode: failsOnOnlyAllowedCall ? 'internal.defect' : undefined,
+              terminalPhase: failsOnOnlyAllowedCall ? 'preflight' : 'complete',
+              mutationStarted: failsOnOnlyAllowedCall ? false : !dryRun,
+              stateUnchanged: failsOnOnlyAllowedCall || dryRun,
+            });
+          });
         }
-        const report = parseLifecycleReport(JSON.parse(output.join('')));
-        const after = readState();
-        const operationId = report.plan[0]?.operationId;
-
-        expect({
-          code,
-          plan: report.plan.map(({ operationId, package: packageName, nativeId }) => ({ operationId, package: packageName, nativeId })),
-          outcomes: report.outcomes.map(({ operationId, package: packageName, nativeId, result }) => ({ operationId, package: packageName, nativeId, result })),
-          mutationStarted: report.summary.mutationStarted,
-          changed: report.summary.changed,
-          stateUnchanged: JSON.stringify(after) === before,
-          records: after.map(({ id, pending }) => ({ id, pending })),
-        }).toEqual({
-          code: 0,
-          plan: [{ operationId, package: 'demo', nativeId: 'demo' }],
-          outcomes: [{ operationId, package: 'demo', nativeId: 'demo', result: 'succeeded' }],
-          mutationStarted: !dryRun,
-          changed: false,
-          stateUnchanged: dryRun,
-          records: [{ id: 'demo', pending: undefined }],
-        });
-        expect(plannedNativeIdCalls < 4).toBe(true);
-      });
-    }
-  });
-
-  test('retains the frozen dry-run pair when a downstream identity probe fails', async () => {
-    await withHostEnvAsync('cursor', async (home) => {
-      const repo = join(home, 'src-frozen-update-probe-failure');
-      const sha = initGitRepo(repo, {
-        'demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
-      });
-      writeLedger(home, [{ host: 'cursor', id: 'demo', source: repo, sourceSha: sha }]);
-      const before = JSON.stringify(readState());
-      let legacyIdentityCalls = 0;
-      let addCalls = 0;
-      const writer: HostWriter = {
-        id: 'cursor',
-        gui: false,
-        plannedNativeId,
-        legacyNativeIds: () => {
-          legacyIdentityCalls += 1;
-          if (legacyIdentityCalls >= 3) throw new Error(`forced downstream identity failure ${legacyIdentityCalls}`);
-          return [];
-        },
-        detect: () => true,
-        stores: () => [],
-        listInstalled: () => [{ id: 'demo', name: 'demo', enabled: true, path: join(repo, 'demo') }],
-        mcpEntries: () => [],
-        add: async () => { addCalls += 1; },
-        remove: async () => {},
-        pin: async () => ({ changes: [], refusals: [] }),
-      };
-      const originalWriters = [...writers];
-      const output: string[] = [];
-      const originalLog = console.log;
-      writers.splice(0, writers.length, writer);
-      console.log = (value: string) => output.push(value);
-      let code: number;
-      try {
-        code = await main(['update', 'demo', '--target', 'cursor', '--dry-run', '--json']);
-      } finally {
-        writers.splice(0, writers.length, ...originalWriters);
-        console.log = originalLog;
       }
-      const report = parseLifecycleReport(JSON.parse(output.join('')));
-
-      expect({
-        code,
-        legacyIdentityCalls,
-        addCalls,
-        plan: report.plan.map(({ operationId, package: packageName, nativeId }) => ({ operationId, package: packageName, nativeId })),
-        outcomes: report.outcomes.map(({ operationId, result, changed, reason }) => ({ operationId, result, changed, reason })),
-        summary: report.summary,
-        stateUnchanged: JSON.stringify(readState()) === before,
-      }).toEqual({
-        code: 1,
-        legacyIdentityCalls: 3,
-        addCalls: 0,
-        plan: [{ operationId: report.plan[0]!.operationId, package: 'demo', nativeId: 'demo' }],
-        outcomes: [{
-          operationId: report.plan[0]!.operationId,
-          result: 'not-attempted',
-          changed: false,
-          reason: {
-            category: 'internal',
-            code: 'internal.defect',
-            diagnostic: 'forced downstream identity failure 3',
-            capabilityId: null,
-            evidenceId: null,
-          },
-        }],
-        summary: {
-          result: 'incomplete',
-          terminalPhase: 'preflight',
-          mutationStarted: false,
-          changed: false,
-          failureCategory: 'internal',
-          reason: {
-            category: 'internal',
-            code: 'internal.defect',
-            diagnostic: 'forced downstream identity failure 3',
-            capabilityId: null,
-            evidenceId: null,
-          },
-          recoveryId: null,
-          readbackId: null,
-        },
-        stateUnchanged: true,
-      });
-    });
+    }
   });
 
   test('rejects a name outside the frozen target inventory before reading the ledger', async () => {

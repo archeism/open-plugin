@@ -71,6 +71,93 @@ function scopedRemoveState(entries: ReadonlyArray<{ target: string; source: stri
 }
 
 describe('remove', () => {
+  test('captures canonical and legacy native identity exactly once before dry or applied remove', async () => {
+    for (const dryRun of [true, false]) {
+      for (const failingHook of ['planned', 'legacy'] as const) {
+        for (const throwOn of [1, 2, 3]) {
+          await withHostEnvAsync('cursor', async (home) => {
+            const source = join(home, `remove-identity-${failingHook}-${throwOn}-${String(dryRun)}`);
+            const sha = initGitRepo(source, {
+              'plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+            });
+            writeLedger(home, [{ host: 'cursor', id: 'demo', source, sourceSha: sha }]);
+            const before = JSON.stringify(readState());
+            let plannedCalls = 0;
+            let legacyCalls = 0;
+            let removeCalls = 0;
+            const writer: HostWriter = {
+              id: 'cursor',
+              gui: false,
+              plannedNativeId: (plugin) => {
+                plannedCalls += 1;
+                if (failingHook === 'planned' && plannedCalls === throwOn) throw new Error(`planned identity failure ${throwOn}`);
+                return plugin.name;
+              },
+              legacyNativeIds: () => {
+                legacyCalls += 1;
+                if (failingHook === 'legacy' && legacyCalls === throwOn) throw new Error(`legacy identity failure ${throwOn}`);
+                return [];
+              },
+              detect: () => true,
+              stores: () => [],
+              listInstalled: () => [],
+              mcpEntries: () => [],
+              add: async () => {},
+              remove: async () => { removeCalls += 1; },
+              pin: async () => ({ changes: [], refusals: [] }),
+            };
+            const originalWriters = [...cleanupWriters];
+            const output: string[] = [];
+            const originalLog = console.log;
+            cleanupWriters.splice(0, cleanupWriters.length, writer);
+            console.log = (value: string) => output.push(value);
+            let code: number;
+            try {
+              code = await main(['remove', 'demo', '--target', 'cursor', ...(dryRun ? ['--dry-run'] : []), '--json']);
+            } finally {
+              cleanupWriters.splice(0, cleanupWriters.length, ...originalWriters);
+              console.log = originalLog;
+            }
+            const report = parseLifecycleReport(JSON.parse(output.join('')));
+            const failsOnOnlyAllowedCall = throwOn === 1;
+
+            expect({
+              code,
+              plannedCalls,
+              legacyCalls,
+              removeCalls,
+              planLength: report.plan.length,
+              outcomeLength: report.outcomes.length,
+              nativeId: report.plan[0]?.nativeId,
+              action: report.plan[0]?.action,
+              route: report.plan[0]?.route,
+              result: report.outcomes[0]?.result,
+              reasonCode: report.outcomes[0]?.reason?.code,
+              terminalPhase: report.summary.terminalPhase,
+              mutationStarted: report.summary.mutationStarted,
+              stateUnchanged: JSON.stringify(readState()) === before,
+            }).toEqual({
+              code: failsOnOnlyAllowedCall ? 1 : 0,
+              plannedCalls: 1,
+              legacyCalls: 1,
+              removeCalls: failsOnOnlyAllowedCall || dryRun ? 0 : 1,
+              planLength: 1,
+              outcomeLength: 1,
+              nativeId: failsOnOnlyAllowedCall && failingHook === 'planned' ? null : 'demo',
+              action: failsOnOnlyAllowedCall ? 'not-attempted' : 'retire-orphan',
+              route: failsOnOnlyAllowedCall ? 'none' : 'managed',
+              result: failsOnOnlyAllowedCall ? 'failed' : 'succeeded',
+              reasonCode: failsOnOnlyAllowedCall ? 'internal.defect' : undefined,
+              terminalPhase: failsOnOnlyAllowedCall ? 'preflight' : 'complete',
+              mutationStarted: failsOnOnlyAllowedCall ? false : !dryRun,
+              stateUnchanged: failsOnOnlyAllowedCall || dryRun,
+            });
+          });
+        }
+      }
+    }
+  });
+
   test('rejects ambiguity across all selected scopes before removing an earlier valid pair', async () => {
     await withHostEnvAsync('codex', async (home) => {
       writeFileSync(join(home, 'state.json'), JSON.stringify(scopedRemoveState([
