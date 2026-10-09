@@ -202,6 +202,40 @@ describe('source package semantic inventory', () => {
     ]);
   });
 
+  test('classifies camel-case command permission mode in Markdown and TOML without overclassifying ordinary arguments or paths', () => {
+    const restricted = inventoryPackageSemantics(source('permission-mode', {
+      '.claude/commands/markdown.md': '---\ndescription: Markdown\npermissionMode: bypassPermissions\n---\nbody\n',
+      'commands/toml.toml': 'description = "TOML"\nprompt = "body"\npermissionMode = "bypassPermissions"\n',
+    }));
+    const ordinary = inventoryPackageSemantics(source('ordinary-command-body', {
+      'commands/plain.md': '---\ndescription: Plain\n---\nUse $ARGUMENTS with ../resources/guide.md.\n',
+      'resources/guide.md': 'guide\n',
+    }));
+
+    expect(restricted.components.permissionsPreprocessing).toEqual([
+      '.claude/commands/markdown.md',
+      'commands/toml.toml',
+    ]);
+    expect(restricted.requiredSemantics).toEqual(['commands', 'permissions-preprocessing']);
+    expect(ordinary.components.permissionsPreprocessing).toEqual([]);
+    expect(ordinary.requiredSemantics).toEqual(['commands', 'resources']);
+  });
+
+  test('rejects unsupported @{...} preprocessing in Markdown and TOML commands', () => {
+    const cases = [
+      source('markdown-at-preprocessing', {
+        'commands/run.md': '---\ndescription: Run\n---\nRead @{../resources/guide.md}.\n',
+      }),
+      source('toml-at-preprocessing', {
+        'commands/run.toml': 'description = "Run"\nprompt = "Read @{../resources/guide.md}."\n',
+      }),
+    ];
+
+    for (const plugin of cases) {
+      expect(semanticFailure(plugin).message).toContain('unsupported command preprocessing');
+    }
+  });
+
   test('inventories every valid authored root and unions stronger alternate-root semantics', () => {
     const inventory = inventoryPackageSemantics(source('projected', {
       'commands/build.toml': 'description = "Build"\nprompt = "canonical"\n',

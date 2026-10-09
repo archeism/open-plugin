@@ -449,6 +449,7 @@ function parseComponentDefinition(
 
   const identity = kind === 'agent' ? record['name'] : filenameIdentity;
   if (typeof identity !== 'string' || identity.trim() === '') invalid(`${kind} identity is required: ${path}`);
+  if (kind === 'command' && /@\{/u.test(body)) invalid(`unsupported command preprocessing: ${path}`);
   const declarations = kind === 'command' ? componentInvocationDeclarations(record, dialect, path) : [];
   const policy: ComponentInvocationPolicy = {
     component: kind,
@@ -526,6 +527,7 @@ const PERMISSION_FIELDS = [
   'disallowed_tools',
   'permission-mode',
   'permission_mode',
+  'permissionMode',
   'preprocess',
   'preprocessing',
   'hooks',

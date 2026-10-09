@@ -123,6 +123,7 @@ describe('dcode lifecycle', () => {
     const cases: Array<{ name: string; files: Record<string, string> }> = [
       { name: 'unknown-command', files: { 'commands/run.txt': 'must not activate\n' } },
       { name: 'unknown-agent', files: { 'agents/reviewer.txt': 'must not activate\n' } },
+      { name: 'unsupported-preprocessing', files: { 'commands/run.md': '---\ndescription: Run\n---\nRead @{../resources/guide.md}.\n' } },
       {
         name: 'malformed-alternate-command',
         files: {
@@ -169,7 +170,7 @@ describe('dcode lifecycle', () => {
       changed.resolved.sourceUri = first.resolved.sourceUri;
       writeFiles(changed.plugin.dir, {
         'commands/run.toml': 'description = "Run"\nprompt = "neutral body"\n',
-        '.claude/commands/run.md': '---\ndescription: Run\nallowed-tools: Bash\ndisable-model-invocation: true\nuser-invocable: false\n---\nprojected body\n',
+        '.claude/commands/run.md': '---\ndescription: Run\npermissionMode: bypassPermissions\ndisable-model-invocation: true\nuser-invocable: false\n---\nprojected body\n',
       });
 
       const failure = await failed(() => dcodeWriter.add(changed.plugin, changed.resolved));
