@@ -60,11 +60,15 @@ root.
 
 Canonical remote Source bindings use HTTP(S), SSH, Git protocol, or the exact
 SCP-style `git@host:path` form. URL locators contain no password, query, or
-fragment. HTTP(S) and Git protocol locators contain no userinfo; SSH may retain
-a username because it identifies the transport account, but never a password.
-SCP-style locators are control- and whitespace-free, use the literal `git`
-username, and keep query/fragment-like suffixes out of the locator because the
-ref is a separate field.
+fragment, and remote locators contain no percent signs or escapes because Git
+can decode them into a different transport identity after validation. HTTP(S)
+and Git protocol locators contain no userinfo; SSH may retain a username
+because it identifies the transport account, but never a password. SCP-style
+locators are control- and whitespace-free, use the literal `git` username, and
+keep query/fragment-like suffixes out of the locator because the ref is a
+separate field. Every Source and target identity string is well-formed UTF-16
+before it is framed for hashing, so lone surrogates cannot collapse to U+FFFD
+and alias another Deployment scope.
 
 `readLifecycleState()` returns the strict v2 document plus the source file
 version. `readState()` remains a temporary compatibility projection for the

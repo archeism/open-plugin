@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDeploymentScopeIdentity } from '../src/deployment-scope';
+import { createDeploymentScopeIdentity, type TargetIdentity } from '../src/deployment-scope';
 import {
   hasRetirementAuthority,
   readLifecycleState,
@@ -139,9 +139,14 @@ function addOtherScope(state: LifecycleStateV2): string {
 }
 
 function rebindFixtureSource(state: LifecycleStateV2, source: SourceBinding): void {
-  const id = createDeploymentScopeIdentity(source, fixtureTarget).id;
+  rebindFixtureIdentity(state, source, fixtureTarget);
+}
+
+function rebindFixtureIdentity(state: LifecycleStateV2, source: SourceBinding, target: TargetIdentity): void {
+  const id = createDeploymentScopeIdentity(source, target).id;
   state.scopes[0]!.id = id;
   state.scopes[0]!.source = source;
+  state.scopes[0]!.target = target;
   state.activations[0]!.scopeId = id;
   state.attempts[0]!.scopeIds = [id];
   state.attempts[0]!.journal[0]!.scopeId = id;
@@ -694,6 +699,17 @@ describe('state v2 public reader and writer', () => {
       'git://example.invalid/owner/repo.git#synthetic-secret',
       'git@example.invalid:owner/repo.git?token=synthetic',
       'git@example.invalid:owner/repo.git#synthetic-secret',
+      'http://example.invalid/owner/%2Frepo.git',
+      'https://example.invalid/owner/%2Frepo.git',
+      'ssh://alice%3Asupersecret@example.invalid/owner/repo.git',
+      'ssh://alice%0Ainjected@example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/%C2%85repo.git',
+      'ssh://alice%2Fsecret@example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/%.git',
+      'ssh://git@example.invalid/owner/%GG.git',
+      'ssh://git@example.invalid/owner/%F0%9F%9A%80.git',
+      'git://example.invalid/owner/%2Frepo.git',
+      'git@example.invalid:owner/%2Frepo.git',
     ];
 
     for (const locator of locators) {
@@ -715,6 +731,84 @@ describe('state v2 public reader and writer', () => {
       'stable value',
     );
     expect(existsSync(file)).toBe(false);
+  });
+
+  test('never persists an unpaired UTF-16 surrogate in any scope identity field', () => {
+    const replacement = '\uFFFD';
+    const remote: SourceBinding = { kind: 'git', locator: 'git@example.invalid:owner/repo.git', ref: 'main' };
+    const target: TargetIdentity = { kind: 'dcode', instance: 'default' };
+
+    function expectIdentityNotWritten(
+      acceptedSource: SourceBinding,
+      rejectedSource: SourceBinding,
+      acceptedTarget: TargetIdentity,
+      rejectedTarget: TargetIdentity,
+    ): void {
+      const { file } = tempStateFile();
+      const value = stateFixture();
+      rebindFixtureIdentity(value, acceptedSource, acceptedTarget);
+      value.scopes[0]!.source = rejectedSource;
+      value.scopes[0]!.target = rejectedTarget;
+      expectThrow(
+        () => writeLifecycleState(value, { globalPreflight: 'succeeded' }, file),
+        'well-formed UTF-16',
+      );
+      expect(existsSync(file)).toBe(false);
+    }
+
+    for (const unpaired of ['\uD800', '\uDC00']) {
+      expectIdentityNotWritten(
+        { kind: 'git', locator: 'git@example.invalid:owner/repo-' + replacement + '.git', ref: 'main' },
+        { kind: 'git', locator: 'git@example.invalid:owner/repo-' + unpaired + '.git', ref: 'main' },
+        target,
+        target,
+      );
+      expectIdentityNotWritten(
+        { ...remote, ref: 'release-' + replacement },
+        { ...remote, ref: 'release-' + unpaired },
+        target,
+        target,
+      );
+      expectIdentityNotWritten(
+        remote,
+        remote,
+        { kind: 'dcode-' + replacement, instance: 'default' },
+        { kind: 'dcode-' + unpaired, instance: 'default' },
+      );
+      expectIdentityNotWritten(
+        remote,
+        remote,
+        { kind: 'dcode', instance: 'work-' + replacement },
+        { kind: 'dcode', instance: 'work-' + unpaired },
+      );
+    }
+  });
+
+  test('round-trips percent signs outside remote locators and well-formed non-BMP identity text', () => {
+    const cases: Array<{ source: SourceBinding; target: TargetIdentity }> = [
+      {
+        source: { kind: 'local', locator: '/tmp/100%/plugin-\uD83D\uDE80' },
+        target: { kind: 'dcode-\uD83D\uDE80', instance: 'work-\uD83D\uDCBB' },
+      },
+      {
+        source: {
+          kind: 'git',
+          locator: 'git@example.invalid:owner/repo-\uD83D\uDE80.git',
+          ref: 'release%candidate-\uD83D\uDE80',
+        },
+        target: { kind: 'dcode-\uD83D\uDE80', instance: 'work-\uD83D\uDCBB' },
+      },
+    ];
+
+    for (const { source, target } of cases) {
+      const { file } = tempStateFile();
+      const value = stateFixture();
+      rebindFixtureIdentity(value, source, target);
+      writeLifecycleState(value, { globalPreflight: 'succeeded' }, file);
+      const scope = readLifecycleState(file).state.scopes[0]!;
+      expect(scope.source).toEqual(source);
+      expect(scope.target).toEqual(target);
+    }
   });
 
   test('validates before atomic replacement and removes its temporary file on failure', () => {
