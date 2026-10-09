@@ -18,7 +18,7 @@ export const claudeCodeWriter: HostWriter = {
   supportsAdoption: true,
   plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace || 'local'}`,
   legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [plugin.name] : [],
-  unresolvedLegacyNativeIdConflicts: (persisted, requested) =>
+  persistedNativeIdMayAlias: (persisted, requested) =>
     !persisted.includes('@') && (requested === persisted || requested === `${persisted}@local`),
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const marketplace = plugin.marketplace || 'local';

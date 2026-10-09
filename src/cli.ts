@@ -385,10 +385,25 @@ function logicalNativeName(nativeId: string): string {
   return nativeId.includes('@') ? nativeId.slice(0, nativeId.indexOf('@')) : nativeId;
 }
 
-function requestedIdentityMatches(identity: PreparedNativeIdentity, persistedId: string, requested: string | undefined): boolean {
-  const logicalPersistedId = logicalNativeName(persistedId);
-  return requested === undefined || requested === identity.package || requested === identity.nativeId ||
-    requested === persistedId || requested === logicalPersistedId || identity.equivalentNativeIds.has(requested);
+function requestedPersistedIdentityMatches(
+  writer: HostWriter,
+  packageId: string,
+  persistedId: string,
+  requested: string | undefined,
+): boolean {
+  if (requested === undefined) return true;
+  return requested === packageId || requested === persistedId || requested === logicalNativeName(persistedId) ||
+    writer.persistedNativeIdMayAlias?.(persistedId, requested) === true;
+}
+
+function requestedCapturedIdentityMatches(
+  identity: PreparedNativeIdentity,
+  persistedId: string,
+  requested: string | undefined,
+): boolean {
+  if (requested === undefined) return true;
+  return requested === identity.package || requested === identity.nativeId || requested === persistedId ||
+    requested === logicalNativeName(persistedId) || identity.equivalentNativeIds.has(requested);
 }
 
 function usageReport(command: LifecycleCommandName, dryRun: boolean, diagnostic: string, code: Extract<LifecycleReasonCode, `usage.${string}`> = 'usage.invalid-argument'): LifecycleReport {
@@ -612,21 +627,27 @@ export async function main(argv: string[]): Promise<number> {
     }> = [];
     let preflightFailure: LifecycleReason | null = null;
     for (const writer of selection.selected) {
-      const candidates = reportScopesForTarget(lifecycleState, writer.id, 'default').flatMap((match) => {
+      const persistedCandidates = reportScopesForTarget(lifecycleState, writer.id, 'default').flatMap((match) => {
         const record = state[match.activationIndex];
         if (record === undefined || record.host !== writer.id || record.id !== match.activation.nativeId) {
           preflightFailure = reason('internal', 'internal.invariant', `install record '${match.activation.nativeId}' on ${writer.id} has no exact deployment scope identity`);
           return [];
         }
-        const identity = preparedNativeIdentity(writer, record, match.activation.packageId, match.activation.sourceRelativeDir);
-        return [{
-          match,
-          record,
-          identity,
-        }];
+        return [{ match, record }];
       });
       if (preflightFailure !== null) break;
-      const matches = candidates.filter(({ identity, record }) => requestedIdentityMatches(identity, record.id, target));
+      const selectedCandidates = persistedCandidates.filter(({ match, record }) => requestedPersistedIdentityMatches(
+        writer,
+        match.activation.packageId,
+        record.id,
+        target,
+      ));
+      const matches = selectedCandidates.map(({ match, record }) => ({
+        match,
+        record,
+        identity: preparedNativeIdentity(writer, record, match.activation.packageId, match.activation.sourceRelativeDir),
+      })).filter(({ identity, record }) =>
+        identity.failure !== null || !identity.adapterResolved || requestedCapturedIdentityMatches(identity, record.id, target));
       if (matches.length > 1) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', `multiple ${writer.id}/default deployment scopes own native package '${target}'`);
         break;
@@ -654,9 +675,7 @@ export async function main(argv: string[]): Promise<number> {
         });
         continue;
       }
-      if (candidates.some(({ record: candidateRecord, identity: candidateIdentity }) =>
-        candidateIdentity.failure === null &&
-        !candidateIdentity.adapterResolved && writer.unresolvedLegacyNativeIdConflicts?.(candidateRecord.id, target) === true)) {
+      if (!identity.adapterResolved && writer.persistedNativeIdMayAlias?.(record.id, target) === true) {
         preflightFailure = reason(
           'internal',
           'internal.ambiguous-ownership',
@@ -664,7 +683,7 @@ export async function main(argv: string[]): Promise<number> {
         );
         break;
       }
-      const equivalentMatches = candidates.filter((candidate) => identity.equivalentNativeIds.has(candidate.record.id));
+      const equivalentMatches = matches.filter((candidate) => identity.equivalentNativeIds.has(candidate.record.id));
       if (equivalentMatches.length > 1) {
         preflightFailure = reason(
           'internal',
@@ -1272,16 +1291,13 @@ export async function main(argv: string[]): Promise<number> {
     const selectedTargetKinds = new Set(selection.selected.map((writer) => writer.id));
     const scopesById = new Map(lifecycleState.scopes.map((scope) => [scope.id, scope]));
     const requestedName = flags.positionals[0];
-    const candidatePairs: Array<{
+    const persistedCandidates: Array<{
       record: InstallRecord;
       scope: DeploymentScopeIdentity;
       package: string;
-      nativeId: string | null;
+      sourceRelativeDir?: string;
       host: string;
-      legacyNativeIds: readonly string[];
-      equivalentNativeIds: ReadonlySet<string>;
-      adapterResolved: boolean;
-      failure: LifecycleReason | null;
+      writer: HostWriter;
     }> = [];
     const nativeIdentitySnapshots = new Map<InstallRecord, NativeIdentitySnapshot>();
     let scopeFailure: LifecycleReason | null = null;
@@ -1299,24 +1315,55 @@ export async function main(argv: string[]): Promise<number> {
         scopeFailure = reason('internal', 'internal.invariant', `selected update target '${stored.target.kind}' has no writer`);
         return;
       }
-      const identity = preparedNativeIdentity(writer, record, activation.packageId, activation.sourceRelativeDir);
-      candidatePairs.push({
+      persistedCandidates.push({
         record,
         scope: createDeploymentScopeIdentity(stored.source, { kind: stored.target.kind, instance: stored.target.instance }),
+        package: activation.packageId,
+        ...(activation.sourceRelativeDir === undefined ? {} : { sourceRelativeDir: activation.sourceRelativeDir }),
+        host: stored.target.kind,
+        writer,
+      });
+    });
+    const selectedCandidates = persistedCandidates.filter((candidate) => requestedPersistedIdentityMatches(
+      candidate.writer,
+      candidate.package,
+      candidate.record.id,
+      requestedName,
+    ));
+    const selectedPairs: Array<{
+      record: InstallRecord;
+      scope: DeploymentScopeIdentity;
+      package: string;
+      nativeId: string | null;
+      host: string;
+      legacyNativeIds: readonly string[];
+      equivalentNativeIds: ReadonlySet<string>;
+      adapterResolved: boolean;
+      failure: LifecycleReason | null;
+    }> = selectedCandidates.map((candidate) => {
+      const identity = preparedNativeIdentity(
+        candidate.writer,
+        candidate.record,
+        candidate.package,
+        candidate.sourceRelativeDir,
+      );
+      return {
+        record: candidate.record,
+        scope: candidate.scope,
         package: identity.package,
         nativeId: identity.nativeId,
-        host: stored.target.kind,
+        host: candidate.host,
         legacyNativeIds: identity.legacyNativeIds,
         equivalentNativeIds: identity.equivalentNativeIds,
         adapterResolved: identity.adapterResolved,
         failure: identity.failure,
-      });
-    });
-    const selectedPairs = candidatePairs.filter((pair) => requestedIdentityMatches(pair, pair.record.id, requestedName));
+      };
+    }).filter((pair) =>
+      pair.failure !== null || !pair.adapterResolved || requestedCapturedIdentityMatches(pair, pair.record.id, requestedName));
     if (scopeFailure === null) {
       for (const pair of selectedPairs) {
         if (pair.failure !== null) continue;
-        const equivalentRecords = candidatePairs.filter((candidate) =>
+        const equivalentRecords = selectedPairs.filter((candidate) =>
           candidate.host === pair.host &&
           candidate.scope.target.instance === pair.scope.target.instance &&
           pair.equivalentNativeIds.has(candidate.record.id));

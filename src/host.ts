@@ -115,8 +115,8 @@ export interface HostWriter extends HostReader {
   readonly plannedNativeId: (plugin: PluginSource) => string;
   /** Adapter-owned obsolete ledger identities eligible for migration to plannedNativeId. */
   readonly legacyNativeIds?: (plugin: PluginSource) => readonly string[];
-  /** Adapter-owned relation for a Source-unresolved historical ID and a requested identity. */
-  readonly unresolvedLegacyNativeIdConflicts?: (persistedNativeId: string, requestedNativeId: string) => boolean;
+  /** Pure, conservative relation used to select a persisted ID before dynamic identity capture. */
+  readonly persistedNativeIdMayAlias?: (persistedNativeId: string, requestedIdentity: string) => boolean;
   add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'>;
   remove(id: string, opts?: RemoveOptions): Promise<void>;
   /**

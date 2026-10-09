@@ -50,9 +50,9 @@ test('active adapters own the exact canonical and historical native identity mat
     dcodeWriter,
   ].map((writer) => ({
     host: writer.id,
-    local: writer.unresolvedLegacyNativeIdConflicts?.('demo', 'demo@local'),
-    marketplace: writer.unresolvedLegacyNativeIdConflicts?.('demo', 'demo@personal'),
-    canonical: writer.unresolvedLegacyNativeIdConflicts?.('demo@local', 'demo@local'),
+    local: writer.persistedNativeIdMayAlias?.('demo', 'demo@local'),
+    marketplace: writer.persistedNativeIdMayAlias?.('demo', 'demo@personal'),
+    canonical: writer.persistedNativeIdMayAlias?.('demo@local', 'demo@local'),
   }))).toEqual([
     { host: 'claude-code', local: true, marketplace: false, canonical: false },
     { host: 'codex', local: true, marketplace: false, canonical: false },
@@ -60,15 +60,17 @@ test('active adapters own the exact canonical and historical native identity mat
     { host: 'dcode', local: true, marketplace: false, canonical: false },
   ]);
   expect({
-    cursorLegacyToBare: cursorWriter.unresolvedLegacyNativeIdConflicts?.('demo@personal', 'demo'),
-    cursorLegacyToQualified: cursorWriter.unresolvedLegacyNativeIdConflicts?.('demo@personal', 'demo@other'),
-    cursorCanonical: cursorWriter.unresolvedLegacyNativeIdConflicts?.('demo', 'demo'),
-    kimiBareToRoot: kimiWriter.unresolvedLegacyNativeIdConflicts?.('demo', 'demo'),
-    kimiBareToMarketplace: kimiWriter.unresolvedLegacyNativeIdConflicts?.('demo', 'demo@personal'),
-    kimiCanonical: kimiWriter.unresolvedLegacyNativeIdConflicts?.('demo@personal', 'demo@personal'),
+    cursorLegacyToBare: cursorWriter.persistedNativeIdMayAlias?.('demo@personal', 'demo'),
+    cursorLegacyToQualified: cursorWriter.persistedNativeIdMayAlias?.('demo@personal', 'demo@other'),
+    cursorCanonicalToQualified: cursorWriter.persistedNativeIdMayAlias?.('demo', 'demo@personal'),
+    cursorCanonical: cursorWriter.persistedNativeIdMayAlias?.('demo', 'demo'),
+    kimiBareToRoot: kimiWriter.persistedNativeIdMayAlias?.('demo', 'demo'),
+    kimiBareToMarketplace: kimiWriter.persistedNativeIdMayAlias?.('demo', 'demo@personal'),
+    kimiCanonical: kimiWriter.persistedNativeIdMayAlias?.('demo@personal', 'demo@personal'),
   }).toEqual({
     cursorLegacyToBare: true,
     cursorLegacyToQualified: true,
+    cursorCanonicalToQualified: true,
     cursorCanonical: false,
     kimiBareToRoot: true,
     kimiBareToMarketplace: true,

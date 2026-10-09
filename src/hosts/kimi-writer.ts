@@ -21,7 +21,7 @@ export const kimiWriter: HostWriter = {
   supportsAdoption: true,
   plannedNativeId: (plugin) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`,
   legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [] : [plugin.name],
-  unresolvedLegacyNativeIdConflicts: (persisted, requested) =>
+  persistedNativeIdMayAlias: (persisted, requested) =>
     !persisted.includes('@') && (requested === persisted || requested.startsWith(`${persisted}@`)),
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
