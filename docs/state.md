@@ -34,12 +34,15 @@ history. Its top level is:
   the complete selected package/native identities, their required capability
   keys, per-package adoption intent, and validation time. An empty Desired
   generation is invalid; ending a scope uses explicit Source retirement.
+  Generation numbers are positive safe integers.
 - An Activation is keyed by scope, package, and native identity. It records the
-  Source-relative directory and revision, Source/projected/installed
+  canonical Source-relative directory and revision, Source/projected/installed
   fingerprints, lifecycle route and evidence key, ownership proof,
   activation/readback state, pending operation, pins, and known timestamps.
 - An Attempt contains command/phase/mutation state and a recovery journal with
-  stable operation IDs. Pending Activation entries reference a durable Attempt.
+  stable operation IDs. A scope's last Attempt must include that scope. A
+  pending Activation's Attempt must include its scope and exactly one journal
+  entry for the same package and native identity.
 - A tombstone retains only lifecycle proof and history: identities, route and
   evidence, verified ownership/adoption proof, fingerprints, pins, retention
   state, and timestamps. The schema has no field for credentials,
@@ -49,7 +52,9 @@ Every object is closed: unknown fields, malformed enum values, duplicates, and
 broken references fail the complete read. Source locators reject embedded
 credentials. Adapter context is restricted to bounded scalar entries and
 secret-bearing key names are rejected. Pins and capability keys are sorted and
-unique so persisted state is deterministic.
+unique so persisted state is deterministic. Source-relative directories use
+`/`, contain no empty, `.` or `..` segments, and use `.` alone for the Source
+root.
 
 `readLifecycleState()` returns the strict v2 document plus the source file
 version. `readState()` remains a temporary compatibility projection for the
@@ -65,6 +70,12 @@ Ownership proof is a closed union:
 - `created` records a verified plugnz creation proof.
 - `adopted` records a verified adoption proof and adoption timestamp.
 
+Verified routes use a closed `capability-profile` evidence reference. Verified
+ownership uses a closed `managed-marker` or `native-record` proof reference.
+Each reference contains only a canonical key of at most 256 characters; URI,
+credential, traversal, and arbitrary metadata shapes are rejected. The same
+constraint applies to active records, journals, and tombstones.
+
 Only `created` and `adopted` pass `hasRetirementAuthority()`. The planner must
 also require an authoritative scope and successful Desired convergence before
 retirement; the ownership helper alone is necessary, not sufficient. A
@@ -76,9 +87,10 @@ tombstone cannot be constructed from a legacy claim.
 `{ globalPreflight: "succeeded" }` authorization. It validates the complete
 document before creating a same-directory temporary file, requires
 `stateGeneration` to advance exactly once, then atomically renames the file.
-The first v2 save is generation 1; each later save is the previous generation
-plus one. Validation or replacement failure leaves the prior file intact and
-removes the temporary file.
+Every persisted generation is a positive safe integer. The first v2 save is
+generation 1; each later save is the previous generation plus one, and the
+maximum safe integer cannot advance. Validation or replacement failure leaves
+the prior file intact and removes the temporary file.
 
 The v1 compatibility writer refuses to overwrite a v2 document. This prevents
 automatic downgrade while the later lifecycle-executor tickets move additive
@@ -108,4 +120,7 @@ write v2. There is no automatic downgrade to v1.
 The legacy fields were `host`, `id`, `source`, `sourceSha`, optional
 `installedAt`, `pins`, `fingerprint`, `sourceDir`, `installedFingerprint`,
 `ownership`, and `pending`. They remain documented here only for strict import
-and transition compatibility.
+and transition compatibility. A present `installedAt` must be the canonical
+UTC timestamp emitted by v1 writers; it is preserved in imported Activation
+and recovery history, while malformed legacy timestamps are rejected instead
+of silently discarded.

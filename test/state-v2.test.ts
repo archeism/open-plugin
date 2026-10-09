@@ -66,8 +66,8 @@ function stateFixture(): LifecycleStateV2 {
       nativeId: 'addy@personal',
       sourceRelativeDir: 'plugins/addy',
       sourceRevision: '2222222222222222222222222222222222222222',
-      route: { kind: 'managed', evidenceKey: 'dcode/0.1.83/managed/update' },
-      ownership: { kind: 'created', proofKey: 'marker:addy', verifiedAt: earlier },
+      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/update' } },
+      ownership: { kind: 'created', proofKey: { kind: 'managed-marker', key: 'addy' }, verifiedAt: earlier },
       fingerprints: { source: 'source-v2', projected: 'projected-v2', installed: 'installed-v2' },
       activationState: 'active',
       readbackState: 'verified',
@@ -90,7 +90,7 @@ function stateFixture(): LifecycleStateV2 {
         nativeId: 'addy@personal',
         action: 'update',
         state: 'completed',
-        route: { kind: 'managed', evidenceKey: 'dcode/0.1.83/managed/update' },
+        route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/update' } },
         startedAt: earlier,
         updatedAt: now,
       }],
@@ -105,8 +105,8 @@ function stateFixture(): LifecycleStateV2 {
       nativeId: 'toolbox@personal',
       sourceRelativeDir: 'plugins/toolbox',
       sourceRevision: '1111111111111111111111111111111111111111',
-      route: { kind: 'managed', evidenceKey: 'dcode/0.1.83/managed/retire' },
-      ownership: { kind: 'adopted', proofKey: 'native-row:toolbox', verifiedAt: earlier, adoptedAt: earlier },
+      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/retire' } },
+      ownership: { kind: 'adopted', proofKey: { kind: 'native-record', key: 'toolbox' }, verifiedAt: earlier, adoptedAt: earlier },
       fingerprints: { source: 'toolbox-source', projected: 'toolbox-projected', installed: 'toolbox-installed' },
       pins: [],
       retentionState: 'plugin-state-retained',
@@ -119,6 +119,21 @@ function stateFixture(): LifecycleStateV2 {
 function tempStateFile(prefix = 'plgnz-state-v2-'): { root: string; file: string } {
   const root = mkdtempSync(join(tmpdir(), prefix));
   return { root, file: join(root, 'state.json') };
+}
+
+function addOtherScope(state: LifecycleStateV2): string {
+  const source: SourceBinding = { kind: 'local', locator: '/tmp/other-source' };
+  const target = { kind: 'codex', instance: 'default' };
+  const id = createDeploymentScopeIdentity(source, target).id;
+  state.scopes.push({
+    id,
+    source,
+    target,
+    authority: 'legacy-import',
+    lifecycle: 'active',
+    selectorMode: 'legacy-unknown',
+  });
+  return id;
 }
 
 function expectThrow(fn: () => void, message: string): void {
@@ -174,7 +189,9 @@ describe('state v2 public reader and writer', () => {
       { mutate: value => { ((((value['scopes'] as Array<Record<string, unknown>>)[0]!['desired'] as Record<string, unknown>)['packages'] as Array<Record<string, unknown>>)[0]!)['unexpected'] = true; }, message: "unsupported desired package field 'unexpected'" },
       { mutate: value => { (value['activations'] as Array<Record<string, unknown>>)[0]!['unexpected'] = true; }, message: "unsupported activation field 'unexpected'" },
       { mutate: value => { ((value['activations'] as Array<Record<string, unknown>>)[0]!['route'] as Record<string, unknown>)['unexpected'] = true; }, message: "unsupported route field 'unexpected'" },
+      { mutate: value => { ((((value['activations'] as Array<Record<string, unknown>>)[0]!['route'] as Record<string, unknown>)['evidenceKey'] as Record<string, unknown>))['metadata'] = 'secret'; }, message: "unsupported capability evidence reference field 'metadata'" },
       { mutate: value => { ((value['activations'] as Array<Record<string, unknown>>)[0]!['ownership'] as Record<string, unknown>)['unexpected'] = true; }, message: "unsupported ownership proof field 'unexpected'" },
+      { mutate: value => { ((((value['activations'] as Array<Record<string, unknown>>)[0]!['ownership'] as Record<string, unknown>)['proofKey'] as Record<string, unknown>))['metadata'] = 'secret'; }, message: "unsupported ownership proof reference field 'metadata'" },
       { mutate: value => { ((value['activations'] as Array<Record<string, unknown>>)[0]!['fingerprints'] as Record<string, unknown>)['unexpected'] = true; }, message: "unsupported fingerprints field 'unexpected'" },
       { mutate: value => { const activation = (value['activations'] as Array<Record<string, unknown>>)[0]!; activation['pending'] = { operation: 'update', phase: 'readback', attemptId: 'attempt-7', unexpected: true }; }, message: "unsupported pending operation field 'unexpected'" },
       { mutate: value => { (value['attempts'] as Array<Record<string, unknown>>)[0]!['unexpected'] = true; }, message: "unsupported lifecycle attempt field 'unexpected'" },
@@ -209,6 +226,136 @@ describe('state v2 public reader and writer', () => {
       item.mutate(value);
       writeFileSync(file, JSON.stringify(value));
       expectThrow(() => readLifecycleState(file), item.message);
+    }
+  });
+
+  test('rejects recovery references that do not resolve to the same exact activation scope and identity', () => {
+    const { file } = tempStateFile();
+    const cases: Array<{ mutate(value: LifecycleStateV2): void; message: string }> = [
+      {
+        mutate: value => {
+          const otherScopeId = addOtherScope(value);
+          value.attempts[0]!.scopeIds = [otherScopeId];
+          value.attempts[0]!.journal[0]!.scopeId = otherScopeId;
+        },
+        message: 'last attempt does not include that scope',
+      },
+      {
+        mutate: value => {
+          const otherScopeId = addOtherScope(value);
+          value.scopes[0]!.lastAttemptId = undefined;
+          value.activations[0]!.pending = { operation: 'update', phase: 'readback', attemptId: 'attempt-7' };
+          value.attempts[0]!.scopeIds = [otherScopeId];
+          value.attempts[0]!.journal[0]!.scopeId = otherScopeId;
+        },
+        message: 'pending attempt does not include its scope',
+      },
+      {
+        mutate: value => {
+          value.scopes[0]!.lastAttemptId = undefined;
+          value.activations[0]!.pending = { operation: 'update', phase: 'readback', attemptId: 'attempt-7' };
+          value.attempts[0]!.journal[0]!.packageId = 'different@personal';
+        },
+        message: 'pending attempt must contain exactly one matching package/native journal entry',
+      },
+    ];
+
+    for (const item of cases) {
+      const value = JSON.parse(JSON.stringify(stateFixture())) as LifecycleStateV2;
+      item.mutate(value);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), item.message);
+    }
+  });
+
+  test('rejects credential-bearing route evidence and ownership proof in retained history', () => {
+    const { file } = tempStateFile();
+    const cases: Array<(value: LifecycleStateV2) => void> = [
+      value => {
+        value.tombstones[0]!.route = {
+          kind: 'managed',
+          evidenceKey: { kind: 'capability-profile', key: 'https://token@example.invalid/evidence' },
+        };
+      },
+      value => {
+        value.tombstones[0]!.ownership = {
+          kind: 'adopted',
+          proofKey: { kind: 'native-record', key: 'https://token@example.invalid/proof' },
+          verifiedAt: earlier,
+          adoptedAt: earlier,
+        };
+      },
+      value => {
+        value.tombstones[0]!.route = {
+          kind: 'managed',
+          evidenceKey: { kind: 'capability-profile', key: 'x'.repeat(257) },
+        };
+      },
+      value => {
+        value.tombstones[0]!.ownership = {
+          kind: 'adopted',
+          proofKey: { kind: 'native-record', key: 'api-token-secret' },
+          verifiedAt: earlier,
+          adoptedAt: earlier,
+        };
+      },
+    ];
+
+    for (const mutate of cases) {
+      const value = JSON.parse(JSON.stringify(stateFixture())) as LifecycleStateV2;
+      mutate(value);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'credential-free bounded reference');
+    }
+  });
+
+  test('requires persisted state and desired generations to be positive safe integers without rollover', () => {
+    const { file } = tempStateFile();
+    const zero = stateFixture();
+    zero.stateGeneration = 0;
+    writeFileSync(file, JSON.stringify(zero));
+    expectThrow(() => readLifecycleState(file), 'stateGeneration must be a safe integer >= 1');
+
+    const unsafeDesired = stateFixture();
+    unsafeDesired.scopes[0]!.desired!.generation = Number.MAX_SAFE_INTEGER + 1;
+    writeFileSync(file, JSON.stringify(unsafeDesired));
+    expectThrow(() => readLifecycleState(file), 'desired.generation must be a safe integer >= 1');
+
+    const unsafeState = stateFixture();
+    unsafeState.stateGeneration = Number.MAX_SAFE_INTEGER + 1;
+    writeFileSync(file, JSON.stringify(unsafeState));
+    const before = readFileSync(file, 'utf8');
+    expectThrow(
+      () => writeLifecycleState(unsafeState, { globalPreflight: 'succeeded' }, file),
+      'stateGeneration must be a safe integer >= 1',
+    );
+    expect(readFileSync(file, 'utf8')).toBe(before);
+
+    const maximum = stateFixture();
+    maximum.stateGeneration = Number.MAX_SAFE_INTEGER;
+    writeFileSync(file, JSON.stringify(maximum));
+    expectThrow(
+      () => writeLifecycleState(maximum, { globalPreflight: 'succeeded' }, file),
+      'cannot advance beyond the maximum safe integer',
+    );
+  });
+
+  test('rejects traversal and every non-canonical Source-relative path shape', () => {
+    const { file } = tempStateFile();
+    const cases: Array<(value: LifecycleStateV2) => void> = [
+      value => { value.scopes[0]!.desired!.packages[0]!.sourceRelativeDir = 'dir/..'; },
+      value => { value.activations[0]!.sourceRelativeDir = 'plugins/./addy'; },
+      value => { value.tombstones[0]!.sourceRelativeDir = 'plugins\\toolbox'; },
+      value => { value.activations[0]!.sourceRelativeDir = './plugins/addy'; },
+      value => { value.activations[0]!.sourceRelativeDir = 'plugins//addy'; },
+      value => { value.activations[0]!.sourceRelativeDir = 'plugins/addy/'; },
+    ];
+
+    for (const mutate of cases) {
+      const value = JSON.parse(JSON.stringify(stateFixture())) as LifecycleStateV2;
+      mutate(value);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'must be a canonical Source-relative path');
     }
   });
 
@@ -271,13 +418,33 @@ describe('state v2 public reader and writer', () => {
     expect(loaded.state.scopes[0]?.createdAt).toBeUndefined();
     expect(loaded.state.activations[0]?.ownership).toEqual({ kind: 'legacy-claim' });
     expect(loaded.state.activations[0]?.sourceRevision).toBe('abc123');
+    expect(loaded.state.activations[0]?.activatedAt).toBe(earlier);
+    expect(loaded.state.activations[0]?.createdAt).toBe(earlier);
+    expect(loaded.state.activations[0]?.updatedAt).toBe(earlier);
     expect(loaded.state.activations[0]?.pending?.operation).toBe('retire');
     expect(loaded.state.attempts[0]?.command).toBe('legacy-recovery');
     expect(loaded.state.attempts[0]?.journal[0]?.action).toBe('remove');
+    expect(loaded.state.attempts[0]?.startedAt).toBe(earlier);
     expect(hasRetirementAuthority(loaded.state.activations[0]!)).toBe(false);
 
     writeLifecycleState({ ...loaded.state, stateGeneration: 1 }, { globalPreflight: 'succeeded' }, file);
     expect(readLifecycleState(file).sourceVersion).toBe(2);
+  });
+
+  test('rejects a malformed legacy installedAt rather than silently erasing it on import', () => {
+    const { file } = tempStateFile();
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      installs: [{
+        host: 'codex',
+        id: 'demo@personal',
+        source: '/srv/personal',
+        sourceSha: 'abc123',
+        installedAt: 'sometime yesterday',
+      }],
+    }));
+
+    expectThrow(() => readLifecycleState(file), 'installedAt must be an ISO-8601 UTC timestamp');
   });
 
   test('imports a legacy remote ref into its canonical Source binding and scope id', () => {

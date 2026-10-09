@@ -36,6 +36,9 @@ export function writeLifecycleState(
   }
   validateLifecycleState(state);
   const previous = readLifecycleState(file);
+  if (previous.sourceVersion === 2 && previous.state.stateGeneration === Number.MAX_SAFE_INTEGER) {
+    throw new Error('stateGeneration cannot advance beyond the maximum safe integer');
+  }
   const expectedGeneration = previous.sourceVersion === 2 ? previous.state.stateGeneration + 1 : 1;
   if (state.stateGeneration !== expectedGeneration) {
     throw new Error(`stateGeneration must advance from ${previous.state.stateGeneration} to ${expectedGeneration}`);

@@ -61,14 +61,23 @@ export interface DeploymentScopeRecord {
   retiredAt?: string;
 }
 
+export interface CapabilityEvidenceReferenceRecord {
+  kind: 'capability-profile';
+  key: string;
+}
+
+export type OwnershipProofReferenceRecord =
+  | { kind: 'managed-marker'; key: string }
+  | { kind: 'native-record'; key: string };
+
 export type LifecycleRouteRecord =
   | { kind: 'legacy-unverified' }
-  | { kind: 'managed' | 'native'; evidenceKey: string };
+  | { kind: 'managed' | 'native'; evidenceKey: CapabilityEvidenceReferenceRecord };
 
 export type OwnershipProofRecord =
   | { kind: 'legacy-claim' }
-  | { kind: 'created'; proofKey: string; verifiedAt: string }
-  | { kind: 'adopted'; proofKey: string; verifiedAt: string; adoptedAt: string };
+  | { kind: 'created'; proofKey: OwnershipProofReferenceRecord; verifiedAt: string }
+  | { kind: 'adopted'; proofKey: OwnershipProofReferenceRecord; verifiedAt: string; adoptedAt: string };
 
 export interface FingerprintRecord {
   source?: string;
@@ -221,10 +230,14 @@ export function readState(file: string = stateFile()): InstallRecord[] {
 
 /** Validate and return the exact state value for writer and reader parity. */
 export function validateLifecycleState(value: unknown): LifecycleStateV2 {
+  return validateLifecycleStateDocument(value, 1);
+}
+
+function validateLifecycleStateDocument(value: unknown, minimumStateGeneration: 0 | 1): LifecycleStateV2 {
   const root = asObject(value, 'root');
   exactFields(root, ['version', 'stateGeneration', 'scopes', 'activations', 'attempts', 'tombstones'], 'root');
   if (root['version'] !== 2) throw new Error(`Unsupported state.json version: ${String(root['version'])}`);
-  integer(root['stateGeneration'], 'stateGeneration', 0);
+  safeInteger(root['stateGeneration'], 'stateGeneration', minimumStateGeneration);
   const scopes = array(root['scopes'], 'scopes').map((item, index) => validateScope(item, `scopes[${index}]`));
   const activations = array(root['activations'], 'activations').map((item, index) => validateActivation(item, `activations[${index}]`));
   const attempts = array(root['attempts'], 'attempts').map((item, index) => validateAttempt(item, `attempts[${index}]`));
@@ -236,14 +249,26 @@ export function validateLifecycleState(value: unknown): LifecycleStateV2 {
   unique(activations.map(activation => activationKey(activation)), 'activation identity');
 
   const scopeIds = new Set(scopes.map(scope => scope.id));
-  const attemptIds = new Set(attempts.map(attempt => attempt.id));
+  const attemptsById = new Map(attempts.map(attempt => [attempt.id, attempt]));
   const operationIds: string[] = [];
   for (const scope of scopes) {
-    if (scope.lastAttemptId !== undefined && !attemptIds.has(scope.lastAttemptId)) invalid(`deployment scope '${scope.id}' references unknown last attempt '${scope.lastAttemptId}'`);
+    if (scope.lastAttemptId === undefined) continue;
+    const attempt = attemptsById.get(scope.lastAttemptId);
+    if (attempt === undefined) invalid(`deployment scope '${scope.id}' references unknown last attempt '${scope.lastAttemptId}'`);
+    if (!attempt.scopeIds.includes(scope.id)) invalid(`deployment scope '${scope.id}' last attempt does not include that scope`);
   }
   for (const activation of activations) {
     if (!scopeIds.has(activation.scopeId)) invalid(`activation '${activationKey(activation)}' references unknown scope '${activation.scopeId}'`);
-    if (activation.pending !== undefined && !attemptIds.has(activation.pending.attemptId)) invalid(`activation '${activationKey(activation)}' references unknown pending attempt '${activation.pending.attemptId}'`);
+    if (activation.pending === undefined) continue;
+    const attempt = attemptsById.get(activation.pending.attemptId);
+    if (attempt === undefined) invalid(`activation '${activationKey(activation)}' references unknown pending attempt '${activation.pending.attemptId}'`);
+    if (!attempt.scopeIds.includes(activation.scopeId)) invalid(`activation '${activationKey(activation)}' pending attempt does not include its scope`);
+    const matchingEntries = attempt.journal.filter(entry =>
+      entry.scopeId === activation.scopeId
+      && entry.packageId === activation.packageId
+      && entry.nativeId === activation.nativeId
+    );
+    if (matchingEntries.length !== 1) invalid(`activation '${activationKey(activation)}' pending attempt must contain exactly one matching package/native journal entry`);
   }
   for (const attempt of attempts) {
     for (const scopeId of attempt.scopeIds) if (!scopeIds.has(scopeId)) invalid(`attempt '${attempt.id}' references unknown scope '${scopeId}'`);
@@ -293,7 +318,7 @@ function parseV1Install(value: unknown, index: number): InstallRecord {
   const id = rec['id'];
   const source = rec['source'];
   const sourceSha = rec['sourceSha'];
-  optionalLegacyString(rec['installedAt'], 'installedAt');
+  if (rec['installedAt'] !== undefined) timestamp(rec['installedAt'], 'installedAt');
   const pins = optionalLegacyPins(rec['pins']);
   optionalLegacyString(rec['fingerprint'], 'fingerprint');
   optionalLegacyString(rec['sourceDir'], 'sourceDir');
@@ -380,7 +405,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
     }
   }
   state.scopes = [...scopes.values()];
-  return validateLifecycleState(state);
+  return validateLifecycleStateDocument(state, 0);
 }
 
 function projectV2(state: LifecycleStateV2): InstallRecord[] {
@@ -462,7 +487,7 @@ function validateTarget(value: unknown, label: string): PersistedTargetIdentity 
 function validateDesired(value: unknown, label: string): DesiredGenerationRecord {
   const rec = asObject(value, label);
   exactFields(rec, ['generation', 'revision', 'sourceFingerprint', 'packages', 'validatedAt'], 'desired generation');
-  integer(rec['generation'], `${label}.generation`, 1);
+  safeInteger(rec['generation'], `${label}.generation`, 1);
   requiredString(rec['revision'], `${label}.revision`);
   requiredString(rec['sourceFingerprint'], `${label}.sourceFingerprint`);
   timestamp(rec['validatedAt'], `${label}.validatedAt`);
@@ -518,7 +543,7 @@ function validateRoute(value: unknown, label: string): LifecycleRouteRecord {
   const rec = asObject(value, label);
   const kind = oneOf(rec['kind'], ['legacy-unverified', 'managed', 'native'], `${label}.kind`);
   exactFields(rec, kind === 'legacy-unverified' ? ['kind'] : ['kind', 'evidenceKey'], 'route');
-  if (kind !== 'legacy-unverified') requiredString(rec['evidenceKey'], `${label}.evidenceKey`);
+  if (kind !== 'legacy-unverified') validateCapabilityEvidenceReference(rec['evidenceKey'], `${label}.evidenceKey`);
   return value as LifecycleRouteRecord;
 }
 
@@ -527,7 +552,7 @@ function validateOwnership(value: unknown, label: string): OwnershipProofRecord 
   const kind = oneOf(rec['kind'], ['legacy-claim', 'created', 'adopted'], `${label}.kind`);
   exactFields(rec, kind === 'legacy-claim' ? ['kind'] : kind === 'created' ? ['kind', 'proofKey', 'verifiedAt'] : ['kind', 'proofKey', 'verifiedAt', 'adoptedAt'], 'ownership proof');
   if (kind !== 'legacy-claim') {
-    requiredString(rec['proofKey'], `${label}.proofKey`);
+    validateOwnershipProofReference(rec['proofKey'], `${label}.proofKey`);
     timestamp(rec['verifiedAt'], `${label}.verifiedAt`);
   }
   if (kind === 'adopted') timestamp(rec['adoptedAt'], `${label}.adoptedAt`);
@@ -541,6 +566,22 @@ function validateFingerprints(value: unknown, label: string): FingerprintRecord 
   optionalString(rec['projected'], `${label}.projected`);
   optionalString(rec['installed'], `${label}.installed`);
   return value as FingerprintRecord;
+}
+
+function validateCapabilityEvidenceReference(value: unknown, label: string): CapabilityEvidenceReferenceRecord {
+  const rec = asObject(value, label);
+  exactFields(rec, ['kind', 'key'], 'capability evidence reference');
+  oneOf(rec['kind'], ['capability-profile'], `${label}.kind`);
+  boundedReferenceKey(rec['key'], `${label}.key`);
+  return value as CapabilityEvidenceReferenceRecord;
+}
+
+function validateOwnershipProofReference(value: unknown, label: string): OwnershipProofReferenceRecord {
+  const rec = asObject(value, label);
+  exactFields(rec, ['kind', 'key'], 'ownership proof reference');
+  oneOf(rec['kind'], ['managed-marker', 'native-record'], `${label}.kind`);
+  boundedReferenceKey(rec['key'], `${label}.key`);
+  return value as OwnershipProofReferenceRecord;
 }
 
 function validatePending(value: unknown, label: string): PendingOperationRecord {
@@ -710,8 +751,8 @@ function optionalLegacyPins(value: unknown): string[] | undefined {
   return value as string[];
 }
 
-function integer(value: unknown, label: string, minimum: number): number {
-  if (!Number.isInteger(value) || (value as number) < minimum) invalid(`${label} must be an integer >= ${minimum}`);
+function safeInteger(value: unknown, label: string, minimum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) invalid(`${label} must be a safe integer >= ${minimum}`);
   return value as number;
 }
 
@@ -736,9 +777,31 @@ function validTimestamp(value: unknown): value is string {
 }
 
 function relativePath(value: unknown, label: string): string {
-  const path = requiredString(value, label).replaceAll('\\', '/');
-  if (isAbsolute(path) || path === '..' || path.startsWith('../') || path.includes('/../')) invalid(`${label} must stay relative to the Source snapshot`);
+  const path = requiredString(value, label);
+  if (path === '.') return path;
+  const segments = path.split('/');
+  if (
+    path.trim() !== path
+    || path.includes('\\')
+    || /[\u0000-\u001f\u007f]/u.test(path)
+    || isAbsolute(path)
+    || /^[a-z]:\//iu.test(path)
+    || segments.some(segment => segment === '' || segment === '.' || segment === '..')
+  ) invalid(`${label} must be a canonical Source-relative path`);
   return path;
+}
+
+function boundedReferenceKey(value: unknown, label: string): string {
+  const key = requiredString(value, label);
+  const segments = key.split('/');
+  if (
+    key.length > 256
+    || key.trim() !== key
+    || !/^[a-z0-9][a-z0-9._/+~-]*$/iu.test(key)
+    || SECRET_CONTEXT_KEY.test(key)
+    || segments.some(segment => segment === '' || segment === '.' || segment === '..')
+  ) invalid(`${label} must be a credential-free bounded reference key`);
+  return key;
 }
 
 function sortedUniqueRequired(values: string[], label: string, allowEmpty = false): void {
