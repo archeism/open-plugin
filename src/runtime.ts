@@ -59,9 +59,13 @@ export function spawn(command: readonly string[], options: SpawnOptions = {}): C
   let child: ReturnType<typeof nodeSpawn> | undefined;
   let failedSpawn = false;
   try {
+    // No caller reads this child's output (the Kimi lifecycle polls HTTP),
+    // so streams are ignored: an unread pipe would block a chatty child at
+    // the buffer size. cwd/timeout forward like spawnSync's.
     child = nodeSpawn(command[0]!, [...command.slice(1)], {
       ...(options.env === undefined ? {} : { env: options.env }),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      stdio: 'ignore',
     });
   } catch {
     failedSpawn = true;

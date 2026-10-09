@@ -4,7 +4,7 @@ Set up npm Trusted Publishing for the `plugnz` package with these exact GitHub A
 
 The workflow uses GitHub's OIDC identity; no npm token or repository secret is needed. GitHub-hosted Actions runners are free for public repositories.
 
-For each release, bump `package.json` to the next `0.0.x` patch version, run the local tests and checks, and inspect `npm pack --dry-run --ignore-scripts`. Push the reviewed change to `main`, then manually run **Publish to npm** from GitHub Actions on `main` with that exact version. The workflow checks the version and branch before publishing. Running it is the separate authorization to release; adding this workflow does not publish anything.
+For each release, bump `package.json` to the next `0.0.x` patch version, run the local tests and checks, and inspect `bun run build && npm pack --dry-run --ignore-scripts  # dist/ must exist: files ships [dist] only`. Push the reviewed change to `main`, then manually run **Publish to npm** from GitHub Actions on `main` with that exact version. The workflow checks the version and branch before publishing. Running it is the separate authorization to release; adding this workflow does not publish anything.
 
 The published package ships `dist/plugnz.mjs` — one plain-JavaScript ESM bundle with a `node` shebang — so `npx plugnz` works on any machine with Node >= 22 and `bunx plugnz` keeps working. Bun remains the build and development toolchain only: the workflow installs with Bun, builds with `bun run build` (scripts/build.mjs, `--target=node`), and smoke-checks the bundle under plain Node before publishing. Never commit `dist/`; the artifact exists only inside the publish run.
 

@@ -63,17 +63,20 @@ NODE_JSON="$(PATH="$PATH" node "$BUNDLE" doctor --json 2>/dev/null || true)"
 [ -n "$NODE_JSON" ] || { echo "doctor produced no output on real stores"; exit 1; }
 # Whole-document comparison with finding arrays order-normalized: a field
 # change (host, mark, pluginId) must fail the gate, not just message text.
-printf '%s' "$BUN_JSON" > /tmp/doctor-bun.json
-printf '%s' "$NODE_JSON" > /tmp/doctor-node.json
-if node <<'NODE'
+DOC_DIR="$(mktemp -d)"
+printf '%s' "$BUN_JSON" > "$DOC_DIR/bun.json"
+printf '%s' "$NODE_JSON" > "$DOC_DIR/node.json"
+if node - "$DOC_DIR" <<'NODE'
 const fs = require("node:fs");
 const normalize = (doc) => { const value = JSON.parse(doc); const entries = Array.isArray(value) ? [value] : Object.values(value).filter(Array.isArray); for (const entry of entries) entry.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))); return JSON.stringify(value); };
-process.exit(normalize(fs.readFileSync("/tmp/doctor-bun.json", "utf8")) === normalize(fs.readFileSync("/tmp/doctor-node.json", "utf8")) ? 0 : 1);
+const bun = fs.readFileSync(process.argv[2] + "/bun.json", "utf8"), node = fs.readFileSync(process.argv[2] + "/node.json", "utf8");
+if (bun === "[]" && node === "[]") { console.log("note: empty home stores (CI) — parity leg is trivially equal"); process.exit(0); }
+process.exit(normalize(bun) === normalize(node) ? 0 : 1);
 NODE
 then
   echo "ok: doctor documents identical (order-normalized) between bun and node artifacts ($(printf '%s' "$NODE_JSON" | grep -c '✗' || true) pre-existing stale findings, unchanged by the artifact)"
 else
   echo "runtime parity failed: bun and node doctor documents differ"; exit 1
 fi
-rm -f /tmp/doctor-bun.json /tmp/doctor-node.json
+rm -rf "$DOC_DIR"
 echo "node-smoke: ALL GREEN"

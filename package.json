@@ -23,12 +23,10 @@
     "README.md",
     "LICENSE"
   ],
-  "dependencies": {
+  "devDependencies": {
+    "typescript": "^7.0.2",
     "smol-toml": "^1.8.0",
     "yaml": "2"
-  },
-  "devDependencies": {
-    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=22"

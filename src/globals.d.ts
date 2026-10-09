@@ -131,7 +131,7 @@ declare module 'node:child_process' {
   export function spawnSync(
     command: string,
     args: string[],
-    options: { cwd?: string; env?: Record<string, string | undefined>; timeout?: number; killSignal?: 'SIGKILL'; stdio?: unknown; encoding: 'buffer' },
+    options: { cwd?: string; env?: Record<string, string | undefined>; timeout?: number; killSignal?: 'SIGKILL'; stdio?: unknown; maxBuffer?: number; encoding: 'buffer' },
   ): SpawnSyncBufferResult;
   export interface ChildProcessLike {
     exitCode: number | null;
@@ -139,7 +139,7 @@ declare module 'node:child_process' {
     on(event: 'error', listener: (error: Error) => void): ChildProcessLike;
     kill(): void;
   }
-  export function spawn(command: string, args: string[], options: { env?: Record<string, string | undefined>; stdio?: unknown }): ChildProcessLike;
+  export function spawn(command: string, args: string[], options: { env?: Record<string, string | undefined>; cwd?: string; stdio?: unknown }): ChildProcessLike;
 }
 
 declare module 'node:net' {

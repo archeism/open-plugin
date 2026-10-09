@@ -4,12 +4,10 @@
   "workspaces": {
     "": {
       "name": "plugnz",
-      "dependencies": {
-        "smol-toml": "^1.8.0",
-        "yaml": "2",
-      },
       "devDependencies": {
+        "smol-toml": "^1.8.0",
         "typescript": "^7.0.2",
+        "yaml": "2",
       },
     },
   },

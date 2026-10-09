@@ -18,7 +18,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 "$NPM_BIN" pack --ignore-scripts >/dev/null
 TARBALL="$(ls plugnz-*.tgz | tail -1)"
-env PATH="$STRICT" "$NPM_BIN" install --prefix "$T/prefix" --no-save "$PWD/$TARBALL" >/dev/null
+env PATH="$STRICT" "$NPM_BIN" install --prefix "$T/prefix" --no-save "$TARBALL" >/dev/null
 BIN="$T/prefix/node_modules/.bin/plugnz"
 test -x "$BIN"
 
