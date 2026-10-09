@@ -1,4 +1,6 @@
 declare function setTimeout(callback: () => void, ms: number): unknown;
+declare function clearTimeout(handle: unknown): void;
+declare const performance: { now(): number };
 
 /**
  * Minimal ambient declarations for the node builtins and globals this project
@@ -84,6 +86,7 @@ declare module 'bun:test' {
     toMatch(pattern: RegExp): void;
     toHaveLength(expected: number): void;
     toBeGreaterThan(expected: number): void;
+    toBeLessThan(expected: number): void;
     toBeUndefined(): void;
   };
 }

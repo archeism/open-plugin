@@ -120,3 +120,15 @@ describe("runtime.spawn failure settlement", () => {
     expect(child.exitCode).toBe(-1);
   });
 });
+
+describe("runtime.spawn option forwarding", () => {
+  test("timeout kills the child and settles exited with -1", async () => {
+    const { spawn } = await import("../src/runtime");
+    const sleeper = "/bin/sleep";
+    const child = spawn([sleeper, "30"], { timeout: 120 });
+    const started = performance.now();
+    const code = await child.exited;
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(code).toBe(-1);
+  });
+});

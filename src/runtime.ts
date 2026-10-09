@@ -72,8 +72,11 @@ export function spawn(command: readonly string[], options: SpawnOptions = {}): C
   }
   const exited = new Promise<number>((resolve) => {
     if (child === undefined) { resolve(-1); return; }
-    child.on('exit', (code) => resolve(code ?? -1));
-    child.on('error', () => { failedSpawn = true; resolve(-1); });
+    let settled = false;
+    const settle = (code: number): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(code); } };
+    const timer = options.timeout === undefined ? undefined : setTimeout(() => { child?.kill(); settle(-1); }, options.timeout);
+    child.on('exit', (code) => settle(code ?? -1));
+    child.on('error', () => { failedSpawn = true; settle(-1); });
   });
   return {
     get exitCode() { return failedSpawn ? -1 : child?.exitCode ?? null; },
