@@ -25,6 +25,8 @@ import { kimiNativeEnv, resetKimiNativeStore, withKimiNative } from './kimi-fixt
 import { parseLifecycleReport } from '../src/lifecycle-report';
 import { writers } from '../src/hosts/writers';
 
+const plannedNativeId: HostWriter['plannedNativeId'] = (plugin) => plugin.name;
+
 const SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
 
 function mcpJson(servers: Record<string, { type: string; command: string }>): string {
@@ -49,7 +51,7 @@ describe('update · re-add from the recorded source', () => {
       const originalWriters = [...writers];
       const exploding: HostWriter = {
         id: 'codex',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => { throw ''; },
         stores: () => [],
         listInstalled: () => [],
@@ -169,7 +171,7 @@ describe('update · re-add from the recorded source', () => {
         { host: 'bad-host', id: 'bad', source: repo, sourceSha: sha },
       ]);
       const base = {
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => [],
@@ -193,7 +195,7 @@ describe('update · re-add from the recorded source', () => {
       const repo = join(home, 'src-repo');
       const sha = sourceRepo(repo, 'demo-plugin', { tool: { type: 'stdio', command: '/bin/echo' } });
       const writer: HostWriter = {
-        id: 'compat-host', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        id: 'compat-host', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => { throw new CompatibilityError('compat-host', 'update', 'unverified', 'test evidence'); },
         remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
       };
@@ -230,12 +232,12 @@ describe('update · re-add from the recorded source', () => {
       ]);
       let laterAddCalls = 0;
       const refusing: HostWriter = {
-        id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        id: 'cursor', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => { throw new CompatibilityError('cursor', 'update', 'unverified', 'test evidence'); },
         remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
       };
       const later: HostWriter = {
-        id: 'kimi', gui: false, detect: () => true, stores: () => [],
+        id: 'kimi', gui: false, plannedNativeId, detect: () => true, stores: () => [],
         listInstalled: () => [{ id: 'demo-plugin', name: 'demo-plugin', enabled: true, path: join(repo, 'demo-plugin') }],
         mcpEntries: () => [],
         add: async () => { laterAddCalls += 1; },
@@ -326,7 +328,7 @@ describe('update · re-add from the recorded source', () => {
       const sha = sourceRepo(repo, 'demo-plugin', { tool: { type: 'stdio', command: '/bin/echo' } });
       const writer: HostWriter = {
         id: 'pin-host',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => { throw new Error('forced pin inventory failure'); },
@@ -371,7 +373,7 @@ describe('update · re-add from the recorded source', () => {
       let durable = copy(initial);
       let writes = 0;
       const writer = (id: string): HostWriter => ({
-        id, gui: false, detect: () => true, stores: () => [], listInstalled: () => [{ id: id.replace('-host', ''), name: id.replace('-host', ''), enabled: true, path: join(repo, id.replace('-host', '')) }], mcpEntries: () => [],
+        id, gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [{ id: id.replace('-host', ''), name: id.replace('-host', ''), enabled: true, path: join(repo, id.replace('-host', '')) }], mcpEntries: () => [],
         add: async () => {}, remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
       });
       const result = await runUpdate(undefined, {
@@ -386,6 +388,7 @@ describe('update · re-add from the recorded source', () => {
       expect(result.exitCode).toBe(1);
       expect(result.findings.find((finding) => finding.host === 'first-host')?.terminalPhase).toBe('finalize');
       expect(result.findings.find((finding) => finding.host === 'first-host')?.changed).toBe(true);
+      expect(result.findings.find((finding) => finding.host === 'first-host')?.reasonCode).toBe('recovery.required');
       expect(durable.find((record) => record.host === 'first-host')?.pending).toBe('install');
       expect(durable.find((record) => record.host === 'second-host')?.pending).toBeUndefined();
     });
@@ -400,7 +403,7 @@ describe('update · re-add from the recorded source', () => {
         const originalWriters = [...writers];
         const writer: HostWriter = {
           id: 'cursor',
-          gui: false,
+          gui: false, plannedNativeId,
           detect: () => true,
           stores: () => [],
           listInstalled: () => {
@@ -431,17 +434,21 @@ describe('update · re-add from the recorded source', () => {
           result: report.outcomes[0]?.result,
           changed: report.outcomes[0]?.changed,
           resourceState: report.outcomes[0]?.resourceState,
+          activationState: report.outcomes[0]?.activationState,
           reasonCode: report.outcomes[0]?.reason?.code,
           terminalPhase: report.summary.terminalPhase,
           mutationStarted: report.summary.mutationStarted,
+          recoveryId: report.summary.recoveryId,
         }).toEqual({
           code: 1,
-          result: 'failed',
+          result: scenario === 'readback' ? 'failed' : 'pending',
           changed: true,
-          resourceState: 'potentially-changed',
-          reasonCode: scenario === 'readback' ? 'readback.failed' : 'runtime.operation-failed',
+          resourceState: scenario === 'readback' ? 'potentially-changed' : 'present',
+          activationState: scenario === 'readback' ? 'unknown' : 'active-conforming',
+          reasonCode: scenario === 'readback' ? 'readback.failed' : 'recovery.required',
           terminalPhase: scenario,
           mutationStarted: true,
+          recoveryId: scenario === 'readback' ? null : report.plan[0]!.operationId,
         });
       });
     }
@@ -463,7 +470,7 @@ describe('update · re-add from the recorded source', () => {
         let probes = 0;
         return {
           id,
-          gui: false,
+          gui: false, plannedNativeId,
           detect: () => {
             probes += 1;
             if (failThirdProbe && probes === 3) throw new Error('forced late host probe failure');
@@ -537,7 +544,7 @@ describe('update · re-add from the recorded source', () => {
       const originalWriters = [...writers];
       const writer = (id: 'cursor' | 'kimi', plugin: 'first' | 'second'): HostWriter => ({
         id,
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => [{ id: plugin, name: plugin, enabled: true, path: repo }],
@@ -596,7 +603,7 @@ describe('update · re-add from the recorded source', () => {
       let addCalls = 0;
       const writer: HostWriter = {
         id: 'cursor',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => [
@@ -651,7 +658,7 @@ describe('update · re-add from the recorded source', () => {
     for (const scenario of [
       { name: 'applied', dryRun: false, refusal: false, result: 'succeeded', changed: true, mutationStarted: true, terminalPhase: 'complete' },
       { name: 'planned', dryRun: true, refusal: false, result: 'succeeded', changed: false, mutationStarted: false, terminalPhase: 'complete' },
-      { name: 'partial', dryRun: false, refusal: true, result: 'failed', changed: true, mutationStarted: true, terminalPhase: 'finalize' },
+      { name: 'partial', dryRun: false, refusal: true, result: 'pending', changed: true, mutationStarted: true, terminalPhase: 'finalize' },
     ] as const) {
       await withHostEnvAsync('cursor', async (home) => {
         const repo = join(home, `src-pin-${scenario.name}`);
@@ -661,7 +668,7 @@ describe('update · re-add from the recorded source', () => {
         const observedDryRuns: Array<boolean | undefined> = [];
         const writer: HostWriter = {
           id: 'cursor',
-          gui: false,
+          gui: false, plannedNativeId,
           detect: () => true,
           stores: () => [],
           listInstalled: () => [{ id: 'demo', name: 'demo', enabled: true, path: repo }],
@@ -702,9 +709,11 @@ describe('update · re-add from the recorded source', () => {
           result: report.outcomes[0]?.result,
           changed: report.outcomes[0]?.changed,
           resourceState: report.outcomes[0]?.resourceState,
+          reasonCode: report.outcomes[0]?.reason?.code,
           terminalPhase: report.summary.terminalPhase,
           mutationStarted: report.summary.mutationStarted,
           summaryChanged: report.summary.changed,
+          recoveryId: report.summary.recoveryId,
         }).toEqual({
           code: scenario.refusal ? 1 : 0,
           observedDryRuns: [scenario.dryRun],
@@ -712,9 +721,11 @@ describe('update · re-add from the recorded source', () => {
           result: scenario.result,
           changed: scenario.changed,
           resourceState: scenario.refusal ? 'potentially-changed' : 'present',
+          reasonCode: scenario.refusal ? 'recovery.required' : undefined,
           terminalPhase: scenario.terminalPhase,
           mutationStarted: scenario.mutationStarted,
           summaryChanged: scenario.changed,
+          recoveryId: scenario.refusal ? report.plan[0]!.operationId : null,
         });
       });
     }

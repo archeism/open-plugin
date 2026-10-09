@@ -13,6 +13,7 @@ type Move = { target: string; backup?: string };
 
 export const piWriter: HostWriter = {
   ...pi,
+  plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace ?? 'local'}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const market = plugin.marketplace ?? 'local'; const id = `${plugin.name}@${market}`;
     identity(plugin.name, 'plugin'); identity(market, 'marketplace');

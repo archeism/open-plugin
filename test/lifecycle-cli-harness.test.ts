@@ -289,6 +289,46 @@ describe('isolated lifecycle CLI harness', () => {
     });
   });
 
+  test('freezes Cursor marketplace identity exactly as its native readback and final ledger record', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('cursor-marketplace-source', {
+        '.claude-plugin/marketplace.json': JSON.stringify({
+          name: 'personal',
+          plugins: [{ name: 'demo', source: './plugins/demo' }],
+        }),
+        'plugins/demo/plugin.json': '{"name":"demo","version":"1.0.0"}\n',
+      });
+
+      const result = harness.run(['add', source, '--target', 'cursor', '--json']);
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      const state = JSON.parse(bytesToText(result.state.after!)) as StateDocument;
+      const repeated = harness.run(['add', source, '--target', 'cursor', '--json']);
+      const repeatedReport = parseLifecycleReport(JSON.parse(repeated.stdout));
+      const repeatedState = JSON.parse(bytesToText(repeated.state.after!)) as StateDocument;
+
+      expect({
+        exitCode: result.exitCode,
+        planned: report.plan.map(({ nativeId }) => nativeId),
+        reported: report.outcomes.map(({ nativeId }) => nativeId),
+        recorded: state.installs.map(({ id }) => id),
+        repeatedExitCode: repeated.exitCode,
+        repeatedPlanned: repeatedReport.plan.map(({ nativeId }) => nativeId),
+        repeatedReported: repeatedReport.outcomes.map(({ nativeId }) => nativeId),
+        repeatedRecorded: repeatedState.installs.map(({ id }) => id),
+      }).toEqual({
+        exitCode: 0,
+        planned: ['demo'],
+        reported: ['demo'],
+        recorded: ['demo'],
+        repeatedExitCode: 0,
+        repeatedPlanned: ['demo'],
+        repeatedReported: ['demo'],
+        repeatedRecorded: ['demo'],
+      });
+    });
+  });
+
   test('classifies the absence of any writer as a runtime preflight failure', async () => {
     await withLifecycleCliHarness((harness) => {
       const source = harness.source('no-writer-source', {

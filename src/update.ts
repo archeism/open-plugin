@@ -24,7 +24,7 @@ import { readState, type InstallRecord } from './state';
 import { writeState } from './state-write';
 import { fingerprintInstallation } from './fingerprint';
 import { CompatibilityError, compatibilityEvidenceId } from './compatibility';
-import type { LifecycleTerminalPhase } from './lifecycle-report';
+import type { LifecycleActivationState, LifecycleResourceState, LifecycleTerminalPhase } from './lifecycle-report';
 import { unknownErrorDiagnostic } from './error-diagnostic';
 
 export interface UpdateFinding {
@@ -49,6 +49,10 @@ export interface UpdateFinding {
   mutationStarted?: true;
   /** Present only when a native mutation is known to have completed. */
   changed?: true;
+  /** Known native resource state when readback completed before ledger finalization failed. */
+  resourceState?: LifecycleResourceState;
+  /** Known native activation state when readback completed before ledger finalization failed. */
+  activationState?: LifecycleActivationState;
   message: string;
 }
 
@@ -232,6 +236,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       findings.push(findingFor(record, {
         mark: '✗',
         terminalPhase: 'finalize',
+        ...(recordMutationStarted ? { reasonCode: 'recovery.required' as const } : {}),
         ...(nativeChanged ? { changed: true as const } : {}),
         message: `updated '${record.id}' but pin finalization failed — ${unknownErrorDiagnostic(error)}`,
       }, recordMutationStarted));
@@ -290,8 +295,11 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
     } catch (error) {
       findings.push(findingFor(record, {
         mark: '✗',
+        reasonCode: 'recovery.required',
         terminalPhase: 'finalize',
         ...(changed ? { changed: true as const } : {}),
+        resourceState: 'present',
+        activationState: 'active-conforming',
         message: `updated '${record.id}' but could not finalize its ledger record — ${unknownErrorDiagnostic(error)}`,
       }, recordMutationStarted));
       break;
@@ -361,6 +369,7 @@ async function repin(
     findings.push(findingFor(record, {
       mark: '✗',
       terminalPhase: 'finalize',
+      ...(mutationStarted ? { reasonCode: 'recovery.required' as const } : {}),
       ...(changed ? { changed: true as const } : {}),
       message:
         `${prefix}failed to re-apply the pin for '${refusal.server}': bare command '${refusal.command}' ` +

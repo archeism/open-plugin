@@ -603,6 +603,146 @@ describe('lifecycle report contract', () => {
     })).toEqual(Array(13).fill('protocol.contradictory-outcome'));
   });
 
+  test('requires recovery.required to identify mutated work that is pending or potentially changed', () => {
+    const recoveryReason = {
+      category: 'recovery',
+      code: 'recovery.required',
+      diagnostic: 'durable pending intent requires recovery',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    const recoveryReport = (): LifecycleReport => {
+      const report = validReport();
+      report.outcomes[0] = {
+        ...report.outcomes[0]!,
+        result: 'failed',
+        resourceState: 'unknown',
+        activationState: 'unknown',
+        changed: false,
+        reason: recoveryReason,
+      };
+      report.summary = {
+        ...report.summary,
+        result: 'incomplete',
+        terminalPhase: 'finalize',
+        mutationStarted: true,
+        changed: false,
+        failureCategory: 'recovery',
+        reason: null,
+        recoveryId: 'op-1',
+      };
+      return report;
+    };
+
+    const noMutation = recoveryReport();
+    noMutation.summary.mutationStarted = false;
+    const noRecoverableOutcome = recoveryReport();
+    const potentiallyChanged = recoveryReport();
+    potentiallyChanged.outcomes[0] = {
+      ...potentiallyChanged.outcomes[0]!,
+      resourceState: 'potentially-changed',
+    };
+
+    expect([noMutation, noRecoverableOutcome].map((report) => {
+      try {
+        parseLifecycleReport(report);
+        return 'accepted';
+      } catch (error) {
+        return (error as LifecycleReportValidationError).reason.code;
+      }
+    })).toEqual([
+      'protocol.contradictory-outcome',
+      'protocol.contradictory-outcome',
+    ]);
+    expect(parseLifecycleReport(potentiallyChanged)).toEqual(potentiallyChanged);
+  });
+
+  test('rejects capability outcomes that imply pair mutation except applied disablement containment', () => {
+    const capabilityReason = {
+      category: 'capability',
+      code: 'capability.unsupported',
+      diagnostic: 'target cannot preserve the required semantics',
+      capabilityId: 'commands',
+      evidenceId: null,
+    } as const;
+    const capabilityReport = (): LifecycleReport => {
+      const report = validReport();
+      report.plan[0] = { ...report.plan[0]!, action: 'not-attempted', route: 'none' };
+      report.outcomes[0] = {
+        ...report.outcomes[0]!,
+        action: 'not-attempted',
+        route: 'none',
+        result: 'failed',
+        resourceState: 'unknown',
+        activationState: 'unknown',
+        changed: false,
+        reason: capabilityReason,
+      };
+      report.summary = {
+        ...report.summary,
+        result: 'incomplete',
+        terminalPhase: 'apply',
+        mutationStarted: true,
+        changed: false,
+        failureCategory: 'capability',
+        reason: null,
+      };
+      return report;
+    };
+
+    const potentiallyChangedRefusal = capabilityReport();
+    potentiallyChangedRefusal.outcomes[0] = {
+      ...potentiallyChangedRefusal.outcomes[0]!,
+      resourceState: 'potentially-changed',
+    };
+    const knownTerminalRefusal = capabilityReport();
+    knownTerminalRefusal.outcomes[0] = {
+      ...knownTerminalRefusal.outcomes[0]!,
+      resourceState: 'present',
+      activationState: 'active-conforming',
+    };
+    const changedUpdate = capabilityReport();
+    changedUpdate.plan[0] = { ...changedUpdate.plan[0]!, action: 'update', route: 'managed' };
+    changedUpdate.outcomes[0] = {
+      ...changedUpdate.outcomes[0]!,
+      action: 'update',
+      route: 'managed',
+      resourceState: 'potentially-changed',
+      changed: true,
+    };
+    changedUpdate.summary.changed = true;
+    const preMutationUpdate = capabilityReport();
+    preMutationUpdate.plan[0] = { ...preMutationUpdate.plan[0]!, action: 'update', route: 'managed' };
+    preMutationUpdate.outcomes[0] = {
+      ...preMutationUpdate.outcomes[0]!,
+      action: 'update',
+      route: 'managed',
+    };
+
+    expect([potentiallyChangedRefusal, knownTerminalRefusal, changedUpdate, preMutationUpdate].map((report) => {
+      try {
+        parseLifecycleReport(report);
+        return 'accepted';
+      } catch (error) {
+        return (error as LifecycleReportValidationError).reason.code;
+      }
+    })).toEqual(Array(4).fill('protocol.contradictory-outcome'));
+
+    const appliedDisablement = capabilityReport();
+    appliedDisablement.plan[0] = { ...appliedDisablement.plan[0]!, action: 'disable-nonconforming', route: 'managed' };
+    appliedDisablement.outcomes[0] = {
+      ...appliedDisablement.outcomes[0]!,
+      action: 'disable-nonconforming',
+      route: 'managed',
+      resourceState: 'retained',
+      activationState: 'inactive',
+      changed: true,
+    };
+    appliedDisablement.summary.changed = true;
+    appliedDisablement.summary.readbackId = 'op-1';
+    expect(parseLifecycleReport(appliedDisablement)).toEqual(appliedDisablement);
+  });
+
   test('rejects an aggregate failure category unrelated to every failed pair', () => {
     const report = validReport();
     const runtimeReason = {

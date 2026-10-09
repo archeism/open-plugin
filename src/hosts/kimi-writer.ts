@@ -19,6 +19,7 @@ type Registry = { version: 1; plugins: Array<Record<string, unknown>> };
 export const kimiWriter: HostWriter = {
   ...kimi,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
     const ownedId = plugin.marketplace === undefined ? id : `${id}@${plugin.marketplace}`;

@@ -19,6 +19,8 @@ import { CompatibilityError } from '../src/compatibility';
 import { kimiNativeEnv, withKimiNative } from './kimi-fixture';
 import { LifecycleReportValidationError, parseLifecycleReport } from '../src/lifecycle-report';
 
+const plannedNativeId: HostWriter['plannedNativeId'] = (plugin) => plugin.name;
+
 const pluginsMap = {
   'plugin.json': JSON.stringify({ name: "new-plugin", mcpServers: { demo: { command: "demo" } } }, null, 2),
   'mcp.json': JSON.stringify({ mcpServers: { demo: { command: "demo" } } }, null, 2)
@@ -37,7 +39,7 @@ describe('add', () => {
       const originalWriters = [...writers];
       const exploding: HostWriter = {
         id: 'codex',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => {
           throw new Proxy(Object.create(null), {
             getPrototypeOf: () => { throw new Error('prototype trap'); },
@@ -551,13 +553,13 @@ describe('add', () => {
         initGitRepo(sourceDir, pluginsMap);
         const originalWriters = [...writers];
         const refusing: HostWriter = {
-          id: 'codex', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+          id: 'codex', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
           add: async () => { throw new CompatibilityError('codex', 'install', 'unsupported', scenario.evidence); },
           remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
         };
         let laterAddCalls = 0;
         const later: HostWriter = {
-          id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+          id: 'cursor', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
           add: async () => { laterAddCalls += 1; },
           remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
         };
@@ -644,7 +646,7 @@ describe('add', () => {
         const originalWriters = [...writers];
         const probing: HostWriter = {
           id: 'codex',
-          gui: false,
+          gui: false, plannedNativeId,
           detect: () => true,
           stores: () => [],
           listInstalled: scenario.listInstalled,
@@ -692,7 +694,7 @@ describe('add', () => {
       const originalWriters = [...writers];
       const writer: HostWriter = {
         id: 'codex',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => {
@@ -722,17 +724,21 @@ describe('add', () => {
         result: report.outcomes[0]?.result,
         changed: report.outcomes[0]?.changed,
         resourceState: report.outcomes[0]?.resourceState,
+        activationState: report.outcomes[0]?.activationState,
         reasonCode: report.outcomes[0]?.reason?.code,
         terminalPhase: report.summary.terminalPhase,
         mutationStarted: report.summary.mutationStarted,
+        recoveryId: report.summary.recoveryId,
       }).toEqual({
         code: 1,
         result: 'pending',
         changed: true,
-        resourceState: 'potentially-changed',
+        resourceState: 'present',
+        activationState: 'active-conforming',
         reasonCode: 'recovery.required',
         terminalPhase: 'finalize',
         mutationStarted: true,
+        recoveryId: report.plan[0]!.operationId,
       });
     });
   });

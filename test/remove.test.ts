@@ -20,6 +20,8 @@ import { parseLifecycleReport } from '../src/lifecycle-report';
 import { createDeploymentScopeIdentity } from '../src/deployment-scope';
 import type { LifecycleStateV2 } from '../src/state';
 
+const plannedNativeId: HostWriter['plannedNativeId'] = (plugin) => plugin.name;
+
 const pluginsMap = {
   'plugin.json': JSON.stringify({ name: "demo-plugin", mcpServers: { demo: { command: "demo" } } }, null, 2),
   'mcp.json': JSON.stringify({ mcpServers: { demo: { command: "demo" } } }, null, 2)
@@ -78,7 +80,7 @@ describe('remove', () => {
       ])));
       let removeCalls = 0;
       const writer = (id: 'codex' | 'cursor'): HostWriter => ({
-        id, gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        id, gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => {}, remove: async () => { removeCalls += 1; },
         pin: async () => ({ changes: [], refusals: [] }),
       });
@@ -131,13 +133,13 @@ describe('remove', () => {
       ]);
       let laterRemoveCalls = 0;
       const refusing: HostWriter = {
-        id: 'codex', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        id: 'codex', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => {},
         remove: async () => { throw new Error('late remove refusal'); },
         pin: async () => ({ changes: [], refusals: [] }),
       };
       const later: HostWriter = {
-        id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        id: 'cursor', gui: false, plannedNativeId, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => {}, remove: async () => { laterRemoveCalls += 1; },
         pin: async () => ({ changes: [], refusals: [] }),
       };
@@ -214,7 +216,7 @@ describe('remove', () => {
       const originalWriters = [...cleanupWriters];
       const exploding: HostWriter = {
         id: 'codex',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => { throw new Error(); },
         stores: () => [],
         listInstalled: () => [],
@@ -338,7 +340,7 @@ describe('remove', () => {
       const originalWriters = [...cleanupWriters];
       const writer: HostWriter = {
         id: 'codex',
-        gui: false,
+        gui: false, plannedNativeId,
         detect: () => true,
         stores: () => [],
         listInstalled: () => [],
@@ -365,17 +367,21 @@ describe('remove', () => {
         result: report.outcomes[0]?.result,
         changed: report.outcomes[0]?.changed,
         resourceState: report.outcomes[0]?.resourceState,
+        activationState: report.outcomes[0]?.activationState,
         reasonCode: report.outcomes[0]?.reason?.code,
         terminalPhase: report.summary.terminalPhase,
         mutationStarted: report.summary.mutationStarted,
+        recoveryId: report.summary.recoveryId,
       }).toEqual({
         code: 1,
         result: 'pending',
         changed: true,
-        resourceState: 'potentially-changed',
+        resourceState: 'absent',
+        activationState: 'inactive',
         reasonCode: 'recovery.required',
         terminalPhase: 'finalize',
         mutationStarted: true,
+        recoveryId: report.plan[0]!.operationId,
       });
     });
   });

@@ -104,8 +104,10 @@ import type { PluginSource, ResolvedSource } from './source';
 export interface HostWriter extends HostReader {
   /** Whether this writer implements explicit legacy adoption. */
   readonly supportsAdoption?: boolean;
-  /** Host-native identity known before apply, when it differs from the portable package identity. */
-  readonly plannedNativeId?: (plugin: PluginSource) => string;
+  /** Exact public native identity this adapter will expose through readback after apply. */
+  readonly plannedNativeId: (plugin: PluginSource) => string;
+  /** Adapter-owned obsolete ledger identities eligible for migration to plannedNativeId. */
+  readonly legacyNativeIds?: (plugin: PluginSource) => readonly string[];
   add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'>;
   remove(id: string): Promise<void>;
   /**

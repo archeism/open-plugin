@@ -5,14 +5,14 @@
 import { runDoctor, formatFinding, type DoctorFinding } from './doctor';
 import { hosts } from './hosts';
 import { cleanupWriters, writers } from './hosts/writers';
-import { resolveSource } from './source';
+import { resolveSource, type PluginSource } from './source';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
 import { writeState } from './state-write';
 import type { InstallRecord } from './state';
 import { runPin } from './pin';
 import { runUpdate, type UpdateFinding } from './update';
 import { fingerprintInstallation } from './fingerprint';
-import type { HostReader } from './host';
+import type { HostReader, HostWriter } from './host';
 import { consumerProfiles, findConsumerProfile, type ConsumerProfile } from './consumer-profiles';
 import { CompatibilityError, compatibilityEvidenceId, requireCompatible } from './compatibility';
 import {
@@ -291,6 +291,15 @@ function reportFor(
       readbackId: options.readbackId ?? readbackOutcome?.operationId ?? null,
     },
   });
+}
+
+/** Native identity is an adapter contract, never a generic marketplace guess. */
+function plannedNativeIdFor(writer: HostWriter, plugin: PluginSource): string {
+  return writer.plannedNativeId(plugin);
+}
+
+function stateNativeIdsFor(writer: HostWriter, plugin: PluginSource): ReadonlySet<string> {
+  return new Set([plannedNativeIdFor(writer, plugin), ...(writer.legacyNativeIds?.(plugin) ?? [])]);
 }
 
 function usageReport(command: LifecycleCommandName, dryRun: boolean, diagnostic: string, code: Extract<LifecycleReasonCode, `usage.${string}`> = 'usage.invalid-argument'): LifecycleReport {
@@ -598,8 +607,8 @@ export async function main(argv: string[]): Promise<number> {
         outcomes.push(outcomeFor(operation, {
           result: pairMutationStarted ? 'pending' : 'failed',
           changed: pairChanged,
-          resourceState: pairMutationStarted ? 'potentially-changed' : 'unknown',
-          activationState: 'unknown',
+          resourceState: pairChanged ? 'absent' : pairMutationStarted ? 'potentially-changed' : 'unknown',
+          activationState: pairChanged ? 'inactive' : 'unknown',
           reason: failure,
         }));
         const skipped = reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier remove failure');
@@ -630,6 +639,7 @@ export async function main(argv: string[]): Promise<number> {
     let activeOperationId: string | undefined;
     let activePairMutationStarted = false;
     let activePairChanged = false;
+    let activeReadbackConfirmed = false;
     let activeTerminalPhase: LifecycleTerminalPhase = 'apply';
     let mutationStarted = false;
     let sourceSnapshots: LifecycleSourceSnapshotContext[] = [];
@@ -742,7 +752,7 @@ export async function main(argv: string[]): Promise<number> {
             scope: createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' }),
             sourceSnapshotId,
             package: plugin.name,
-            nativeId: plugin.marketplace ? `${plugin.name}@${plugin.marketplace}` : plugin.name,
+            nativeId: plannedNativeIdFor(writer, plugin),
             action: 'not-attempted',
             route: 'none',
           });
@@ -767,9 +777,7 @@ export async function main(argv: string[]): Promise<number> {
         for (const writer of selection.selected) {
           const writerScope = createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' });
           for (const plugin of pluginSelection.selected) {
-            const fallbackNativeId = plugin.marketplace ? `${plugin.name}@${plugin.marketplace}` : plugin.name;
-            const expectedIds = new Set([fallbackNativeId, plugin.name, `${plugin.name}@${plugin.marketplace ?? 'local'}`]);
-            const nativeId = state.find((record) => record.host === writer.id && expectedIds.has(record.id))?.id ?? writer.plannedNativeId?.(plugin) ?? fallbackNativeId;
+            const nativeId = plannedNativeIdFor(writer, plugin);
             try {
               const writerResult = json
                 ? await withLogsOnStderr(() => writer.add(plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting }))
@@ -804,9 +812,11 @@ export async function main(argv: string[]): Promise<number> {
       }
 
       const executionPairs = selection.selected.flatMap((writer) => pluginSelection.selected.map((plugin) => {
-        const fallbackNativeId = plugin.marketplace ? `${plugin.name}@${plugin.marketplace}` : plugin.name;
-        const expectedIds = new Set([fallbackNativeId, plugin.name, `${plugin.name}@${plugin.marketplace ?? 'local'}`]);
-        const nativeId = state.find((record) => record.host === writer.id && expectedIds.has(record.id))?.id ?? writer.plannedNativeId?.(plugin) ?? fallbackNativeId;
+        const nativeId = plannedNativeIdFor(writer, plugin);
+        const priorIds = stateNativeIdsFor(writer, plugin);
+        if (state.filter((record) => record.host === writer.id && priorIds.has(record.id)).length > 1) {
+          throw new Error(`multiple ${writer.id} ledger records match planned native identity '${nativeId}'`);
+        }
         return {
           writer,
           plugin,
@@ -829,17 +839,20 @@ export async function main(argv: string[]): Promise<number> {
           activeOperationId = operation.operationId;
           activePairMutationStarted = false;
           activePairChanged = false;
+          activeReadbackConfirmed = false;
           activeTerminalPhase = 'apply';
-          const nativeId = operation.nativeId ?? (plugin.marketplace ? `${plugin.name}@${plugin.marketplace}` : plugin.name);
+          const nativeId = operation.nativeId ?? plannedNativeIdFor(w, plugin);
           {
-            const expectedIds = new Set([nativeId, plugin.name, `${plugin.name}@${plugin.marketplace ?? 'local'}`]);
-            const idx = state.findIndex(r => r.host === w.id && expectedIds.has(r.id));
+            const stateIds = stateNativeIdsFor(w, plugin);
+            const idx = state.findIndex(r => r.host === w.id && stateIds.has(r.id));
             const previous = idx !== -1 ? state[idx] : undefined;
             const rec: InstallRecord = {
               ...(previous ?? {
               host: w.id,
               id: nativeId,
               }),
+              host: w.id,
+              id: nativeId,
               source: resolved.sourceUri,
               sourceSha: resolved.sha,
               ownership: previous?.ownership ?? 'plgnz',
@@ -872,17 +885,18 @@ export async function main(argv: string[]): Promise<number> {
             try {
               const installed = w.listInstalled();
               const expectedMarketplace = plugin.marketplace ?? 'local';
-              match = installed.find(p => expectedIds.has(p.id) && p.name === plugin.name &&
+              match = installed.find(p => p.id === nativeId && p.name === plugin.name &&
                 (p.marketplace === expectedMarketplace || (expectedMarketplace === 'local' && p.marketplace === undefined)) && p.enabled !== false);
               if (match?.path === undefined) throw new LifecycleCommandError(reason('readback', 'readback.mismatch', `native install readback is missing ${nativeId}`));
               installedFingerprint = fingerprintInstallation(match);
+              activeReadbackConfirmed = true;
             } catch (error) {
               if (error instanceof LifecycleCommandError) throw error;
               throw new LifecycleCommandError(reason('readback', 'readback.failed', unknownErrorDiagnostic(error)));
             }
             const finalized: InstallRecord = {
               ...rec,
-              id: match?.id ?? nativeId,
+              id: nativeId,
               source: resolved.sourceUri,
               sourceSha: resolved.sha,
               installedAt: new Date().toISOString(),
@@ -917,8 +931,8 @@ export async function main(argv: string[]): Promise<number> {
         failures.push(outcomeFor(operation, {
           result: active ? activeResult : 'not-attempted',
           changed: active && activePairChanged,
-          resourceState: active && activePairMutationStarted ? 'potentially-changed' : 'unknown',
-          activationState: 'unknown',
+          resourceState: active && activeReadbackConfirmed ? 'present' : active && activePairMutationStarted ? 'potentially-changed' : 'unknown',
+          activationState: active && activeReadbackConfirmed ? 'active-conforming' : 'unknown',
           reason: active ? failureReason : reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier install failure'),
         }));
       }
@@ -1113,7 +1127,6 @@ export async function main(argv: string[]): Promise<number> {
         updatePlan = freezePlan(selectedPairs.map((pair, index) => {
           const findings = groups.get(`${pair.scope.id}\u0000${pair.nativeId}`) ?? [];
           const failed = findings.find((finding) => finding.mark !== '✓' || finding.status !== undefined);
-          const capability = failed?.status === 'unsupported' || failed?.status === 'unverified';
           const successfulAction = findings.find((finding) => finding.action !== undefined)?.action;
           return planOperation({
             command: 'update',
@@ -1137,13 +1150,14 @@ export async function main(argv: string[]): Promise<number> {
           });
         }
         const failed = findings.find((finding) => finding.mark !== '✓' || finding.status !== undefined);
-        const capability = failed?.status === 'unsupported' || failed?.status === 'unverified';
+        const capabilityStatus = failed?.status === 'unsupported' || failed?.status === 'unverified';
         const succeeded = failed === undefined;
         const pairMutationStarted = findings.some((finding) => finding.mutationStarted === true);
         const pairChanged = findings.some((finding) => finding.changed === true);
         const failureBeforeApply = failed?.terminalPhase === 'parse' || failed?.terminalPhase === 'resolve' ||
           failed?.terminalPhase === 'freeze' || failed?.terminalPhase === 'preflight';
         const earlyFailureAlongsideMutation = !succeeded && result.mutationStarted && !pairMutationStarted && failureBeforeApply;
+        const capability = capabilityStatus && !pairMutationStarted && !pairChanged && failureBeforeApply && failed?.resourceState !== 'potentially-changed';
         if (!succeeded) commandTerminalPhase = earlyFailureAlongsideMutation ? 'apply' : failed.terminalPhase;
         const failure = succeeded ? null : capability
           ? reason(
@@ -1161,8 +1175,8 @@ export async function main(argv: string[]): Promise<number> {
         return outcomeFor(operation, {
           result: succeeded ? 'succeeded' : failure?.category === 'recovery' ? 'pending' : 'failed',
           changed: pairChanged,
-          resourceState: !succeeded && pairMutationStarted ? 'potentially-changed' : !succeeded ? 'unknown' : undefined,
-          activationState: !succeeded ? 'unknown' : undefined,
+          resourceState: !succeeded ? failed.resourceState ?? (pairMutationStarted ? 'potentially-changed' : 'unknown') : undefined,
+          activationState: !succeeded ? failed.activationState ?? 'unknown' : undefined,
           reason: failure,
         });
       });
