@@ -66,6 +66,10 @@ _Avoid_: Successful update, nonconforming activation
 An active installation known to violate a required package semantic, regardless of whether the host can load it.
 _Avoid_: Retained activation, working install
 
+**Retained plugin state**:
+Mutable plugin-created data and inactive host metadata preserved after deployed code is retired.
+_Avoid_: Active registration, deployed code
+
 ## Host lifecycle
 
 **Native lifecycle route**:
