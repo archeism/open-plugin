@@ -33,6 +33,9 @@ jobs:
           bun scripts/build.mjs
           node dist/plugnz.mjs --version --json
       - name: Plain-Node contract smoke (bun-free PATH)
+        env:
+          # Only the 22 leg owns Node-22 enforcement; other legs delegate.
+          REQUIRE_LOCAL_22: ${{ matrix.node == '22' && 'true' || 'false' }}
         run: bash test/node-smoke.sh
       - name: Tarball installation smoke (npx shape)
         run: bash test/tarball-smoke.sh

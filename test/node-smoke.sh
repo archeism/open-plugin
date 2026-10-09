@@ -30,10 +30,10 @@ if [ "$NODE_MAJOR" = "22" ]; then
 elif [ -n "$NODE22" ]; then
   env PATH="/usr/bin:/bin:$(dirname "$NODE22")" "$NODE22" "$BUNDLE" --version --json | grep -q '"name":"plugnz"'
   echo "ok: $("$NODE22" --version) identity byte-stable (bun-free PATH)"
-elif [ "${CI:-}" = "true" ] || [ "${CI:-}" = "1" ]; then
-  echo "CI must run this script under Node 22 (see .github/workflows/node-compat.yml)"; exit 1
+elif [ "${REQUIRE_LOCAL_22:-}" = "true" ]; then
+  echo "this job requires an on-path Node 22 and none was found"; exit 1
 else
-  echo "note: no local node@22; the node-compat workflow owns this leg"
+  echo "note: no local node@22; enforcement lives in the node-compat workflow's 22 leg (REQUIRE_LOCAL_22)"
 fi
 
 echo "== isolated lifecycle under plain node (cursor target) =="
