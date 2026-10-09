@@ -36,6 +36,10 @@ _Avoid_: Filter, discovered packages
 Authoritative reconciliation of a Deployment scope to its Desired set, including retirement of omitted Managed installations.
 _Avoid_: Add, update
 
+**Source retirement**:
+The explicit end of a Deployment scope when its Source should no longer be managed for a target host.
+_Avoid_: Missing source, failed sync
+
 ## Installation authority
 
 **Managed installation**:
@@ -54,6 +58,14 @@ _Avoid_: Foreign plugin, orphan
 A Managed installation omitted from the Desired set established by a successful Sync of the same Deployment scope.
 _Avoid_: Missing source, stale install, unmanaged install
 
+**Retained activation**:
+A previously conforming Managed installation kept active because its proposed replacement could not be activated safely.
+_Avoid_: Successful update, nonconforming activation
+
+**Nonconforming activation**:
+An active installation known to violate a required package semantic, regardless of whether the host can load it.
+_Avoid_: Retained activation, working install
+
 ## Host lifecycle
 
 **Native lifecycle route**:
@@ -63,3 +75,7 @@ _Avoid_: Native store, native loader, updater command
 **Managed materialization**:
 Activation performed by plugnz when no capable Native lifecycle route exists for the exact operation.
 _Avoid_: Native update, fallback after failure
+
+**Route migration**:
+Replacement of a Managed installation through a different proven lifecycle route while preserving its package semantics and ownership.
+_Avoid_: Update, fallback
