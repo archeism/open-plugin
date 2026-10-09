@@ -66,11 +66,15 @@ and Git protocol locators contain no userinfo; SSH may retain a username
 because it identifies the transport account, but never a password. SCP-style
 locators are control- and whitespace-free, use the literal `git` username, and
 keep query/fragment-like suffixes out of the locator because the ref is a
-separate field. Git refs use the same canonical grammar at public Source
-parsing and durable-state boundaries; `#` is forbidden because the transition
-projection encodes a binding as `locator#ref`. Every Source and target identity
-string is well-formed UTF-16 before it is framed for hashing, so lone
-surrogates cannot collapse to U+FFFD and alias another Deployment scope.
+separate field. Public Source parsing may remove HTTP(S) userinfo into the
+ephemeral fetch locator; it preserves every other transport byte for canonical
+validation, and rejects queries for every transport rather than erasing them.
+Git refs use the same canonical grammar at public Source parsing and
+durable-state boundaries; `HEAD` is the explicit sentinel, components obey
+Git's branch ref rules, and `#` is forbidden because the transition projection
+encodes a binding as `locator#ref`. Every Source and target identity string is
+well-formed UTF-16 before it is framed for hashing, so lone surrogates cannot
+collapse to U+FFFD and alias another Deployment scope.
 
 `readLifecycleState()` returns the strict v2 document plus the source file
 version. `readState()` remains a temporary compatibility projection for the

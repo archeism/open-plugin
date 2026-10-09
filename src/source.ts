@@ -214,8 +214,8 @@ function parseSource(source: string): ParsedSource {
     const hash = source.indexOf('#');
     const rawLocator = hash === -1 ? source : source.slice(0, hash);
     const ref = validateGitRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
-    const fetchLocator = withoutFragment(rawLocator);
-    const locator = credentialFreeLocator(fetchLocator);
+    const fetchLocator = rawLocator;
+    const locator = credentialFreeHttpLocator(rawLocator);
     const binding: SourceBinding = { kind: 'git', locator, ref };
     validateSourceBinding(binding);
     return { binding, sourceUri: formatSourceBinding(binding), fetchLocator };
@@ -240,22 +240,13 @@ function formatSourceBinding(binding: SourceBinding): string {
   return binding.kind === 'git' && binding.ref !== 'HEAD' ? `${binding.locator}#${binding.ref}` : binding.locator;
 }
 
-function withoutFragment(locator: string): string {
-  if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
-  const value = new URL(locator);
-  value.hash = '';
-  return value.toString();
-}
-
-function credentialFreeLocator(locator: string): string {
-  const scheme = /^(http|https|ssh|git):\/\//u.exec(locator)?.[1];
-  if (scheme === undefined) return locator;
-  const value = new URL(locator);
-  if (scheme !== 'ssh') value.username = '';
-  value.password = '';
-  value.search = '';
-  value.hash = '';
-  return value.toString();
+function credentialFreeHttpLocator(locator: string): string {
+  const match = /^(https?:\/\/)([^/?#]*)([\s\S]*)$/u.exec(locator);
+  if (match === null) return locator;
+  const authority = match[2]!;
+  const at = authority.lastIndexOf('@');
+  if (at === -1) return locator;
+  return `${match[1]!}${authority.slice(at + 1)}${match[3]!}`;
 }
 
 function resolveRemoteRevision(fetchLocator: string, ref: string, displayLocator: string): string {

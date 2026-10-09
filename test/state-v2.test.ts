@@ -701,6 +701,7 @@ describe('state v2 public reader and writer', () => {
     ]) {
       for (const ref of [
         'HEAD',
+        'main',
         'feature/release',
         'v1.2.3',
         '0123456789abcdef0123456789abcdef01234567',
@@ -734,6 +735,14 @@ describe('state v2 public reader and writer', () => {
       ['bad*ref', 'scope-v1-f35036a6a988ae8d8908ea55416f4b819b0b64a8ec7421b4ac0ff9f77f7f46f1'],
       ['bad\\ref', 'scope-v1-1f44be616664e67eb5038f9f1358fc649dfe267434bfd739d7503d092d8cfe70'],
       ['bad[ref', 'scope-v1-bfabd664c265072ae10fa5a876bba6fe65d1064380f24e2381518c74c35513c5'],
+      ['.bad', 'scope-v1-30d29c1fddc3cd3f17a9a4e0e4044dd52f077f4f0bea0ef50773cfb32ce8502d'],
+      ['bad.', 'scope-v1-378cc1a314bc17deb089d0905afd6d8937aeafc140032b1773031b61a3dd42d9'],
+      ['bad.lock', 'scope-v1-a339dc011f3d07a26efe5ce79b02df5007945d21136924f6b3ad9b6cc6470d77'],
+      ['a//b', 'scope-v1-555c07b34d117e1e64b009db0c067f75f18444e4ec7b41bbac56dbbf4661736a'],
+      ['/bad', 'scope-v1-cf22cb1157459dda0df1a4beccc2aa7aece8fc0fd60c039df83e4182f373d17e'],
+      ['bad/', 'scope-v1-ead65ee478f9df6cbead065a585bcf8f4065db0bec89d4ddc7e8d67ef7f60d90'],
+      ['a/.bad', 'scope-v1-05073466f82053ab364e305205bd81ea9b8490c3df78feb75806bfd67ce19ecd'],
+      ['a/b.lock', 'scope-v1-000c255b2e4b5f0665a5cbe699377188777cdf7a84e4be3399a3e149d803a140'],
     ] as const;
 
     for (const [ref, id] of cases) {
@@ -753,11 +762,15 @@ describe('state v2 public reader and writer', () => {
     const locators = [
       'https://alice@example.invalid/owner/repo.git',
       'https://example.invalid/owner/repo.git?token=synthetic',
+      'http://127.0.0.1:19420/owner/repo.git?token=synthetic',
       'https://example.invalid/owner/repo.git#synthetic-secret',
       'ssh://alice:secret@example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/repo.git?token=synthetic',
       'ssh://example.invalid/owner/repo.git?token=synthetic',
       'ssh://example.invalid/owner/repo.git#synthetic-secret',
+      'git://alice@example.invalid/owner/repo.git',
       'git://alice:secret@example.invalid/owner/repo.git',
+      'git://127.0.0.1:19418/owner/repo.git?token=synthetic',
       'git://example.invalid/owner/repo.git?token=synthetic',
       'git://example.invalid/owner/repo.git#synthetic-secret',
       'git@example.invalid:owner/repo.git?token=synthetic',
@@ -997,6 +1010,14 @@ describe('state v2 public reader and writer', () => {
       'bad*ref',
       'bad\\ref',
       'bad[ref',
+      '.bad',
+      'bad.',
+      'bad.lock',
+      'a//b',
+      '/bad',
+      'bad/',
+      'a/.bad',
+      'a/b.lock',
     ]) {
       writeFileSync(file, JSON.stringify({
         version: 1,

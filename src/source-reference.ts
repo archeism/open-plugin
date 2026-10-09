@@ -48,10 +48,15 @@ export function validateStableIdentityString(value: string, label: string): void
 /** The canonical ref grammar shared by public Source parsing and durable identity. */
 export function validateGitRef(ref: string): string {
   validateWellFormedIdentityString(ref, 'Git ref');
+  if (ref === 'HEAD') return ref;
   if (ref === '' || /[\u0000-\u0020\u007f]/u.test(ref) || ref.startsWith('-') || ref.includes('..') || ref.includes('@{') || /[~^:?#*\\[]/u.test(ref)) {
     throw new Error(`Invalid git ref: ${ref}`);
   }
   validateStableIdentityString(ref, 'Git ref');
+  const components = ref.split('/');
+  if (ref.endsWith('.') || components.some(component => component === '' || component.startsWith('.') || component.endsWith('.lock'))) {
+    throw new Error(`Invalid git ref: ${ref}`);
+  }
   return ref;
 }
 

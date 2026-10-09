@@ -48,6 +48,14 @@ describe('resolveSource', () => {
       'bad*ref',
       'bad\\ref',
       'bad[ref',
+      '.bad',
+      'bad.',
+      'bad.lock',
+      'a//b',
+      '/bad',
+      'bad/',
+      'a/.bad',
+      'a/b.lock',
     ]) {
       expectThrow(() => normalizeSource(locator + '#' + ref), 'Invalid git ref');
     }
@@ -83,6 +91,7 @@ describe('resolveSource', () => {
     ]) {
       for (const projection of [
         locator,
+        locator + '#main',
         locator + '#feature/release',
         locator + '#v1.2.3',
         locator + '#0123456789abcdef0123456789abcdef01234567',
@@ -90,13 +99,29 @@ describe('resolveSource', () => {
     }
   });
 
-  test('keeps URL transport credentials and query data out of canonical Source projections', () => {
-    expect(normalizeSource('https://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
-      .toBe('https://example.invalid/owner/repo.git#main');
-    expect(normalizeSource('ssh://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
+  test('removes only HTTP(S) userinfo from the durable Source identity', () => {
+    expect(normalizeSource('http://alice:secret@example.invalid/owner/repo.git#main'))
+      .toBe('http://example.invalid/owner/repo.git#main');
+    expect(normalizeSource('https://alice:secret@example.invalid:8443/owner/repo.git#main'))
+      .toBe('https://example.invalid:8443/owner/repo.git#main');
+    expect(normalizeSource('ssh://alice@example.invalid/owner/repo.git#main'))
       .toBe('ssh://alice@example.invalid/owner/repo.git#main');
-    expect(normalizeSource('git://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
-      .toBe('git://example.invalid/owner/repo.git#main');
+  });
+
+  test('rejects transport syntax that Git sends to a different remote identity', () => {
+    for (const source of [
+      // Git smart-HTTP sends this query in the captured /info/refs request.
+      'http://127.0.0.1:19420/owner/repo.git?token=synthetic#main',
+      'https://alice:secret@example.invalid/owner/repo.git?token=synthetic#main',
+      // Git passes these query bytes to git-upload-pack for SSH and git://.
+      'ssh://git@example.invalid/owner/repo.git?token=synthetic#main',
+      'git://127.0.0.1:19418/owner/repo.git?token=synthetic#main',
+      'git@example.invalid:owner/repo.git?token=synthetic#main',
+      // Git treats these as SSH destination / git:// host identity, not credentials.
+      'ssh://alice:secret@example.invalid/owner/repo.git#main',
+      'git://alice@example.invalid:9418/owner/repo.git#main',
+      'git://alice:secret@example.invalid:9418/owner/repo.git#main',
+    ]) expectThrow(() => normalizeSource(source), 'credential-free canonical git locator');
   });
 
   test('never produces a remote Source projection rejected by canonical scope identity', () => {

@@ -77,6 +77,7 @@ describe('deployment scope identity', () => {
       'http://alice:secret@example.invalid/owner/repo.git',
       'https://alice:secret@example.invalid/owner/repo.git',
       'ssh://alice:secret@example.invalid/owner/repo.git',
+      'git://alice@example.invalid/owner/repo.git',
       'git://alice:secret@example.invalid/owner/repo.git',
       ...['http', 'https', 'ssh', 'git'].flatMap(scheme => [
         `${scheme}://example.invalid/owner/repo.git?token=synthetic`,
@@ -145,6 +146,14 @@ describe('deployment scope identity', () => {
       'bad*ref',
       'bad\\ref',
       'bad[ref',
+      '.bad',
+      'bad.',
+      'bad.lock',
+      'a//b',
+      '/bad',
+      'bad/',
+      'a/.bad',
+      'a/b.lock',
     ]) {
       expectThrow(
         () => createDeploymentScopeIdentity(
