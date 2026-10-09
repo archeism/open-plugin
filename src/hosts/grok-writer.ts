@@ -25,6 +25,7 @@ function canonicalJson(value: unknown): string | undefined {
 export const grokWriter: HostWriter = {
   ...grok,
   supportsAdoption: true,
+  plannedNativeId: stableId,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const nativeFingerprint = validateGrokSource(plugin.dir);
     if (!registryIsReadable()) throw new Error('Grok native registry is unreadable or unsupported; refusing mutation');

@@ -16,6 +16,10 @@ type Registry = { version: number; plugins: Record<string, unknown> };
 export const claudeCodeWriter: HostWriter = {
   ...claudeCode,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace || 'local'}`,
+  legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [plugin.name] : [],
+  persistedNativeIdMayAlias: (persisted, requested) =>
+    !persisted.includes('@') && (requested === persisted || requested === `${persisted}@local`),
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const marketplace = plugin.marketplace || 'local';
     const id = `${plugin.name}@${marketplace}`;

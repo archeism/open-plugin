@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoRoot, writeFiles } from './util';
+import { parseLifecycleReport } from '../src/lifecycle-report';
 
 test('public dcode local add returns the removable native id and leaves foreign state intact', () => {
   const root = mkdtempSync(join(tmpdir(), 'plgnz-dcode-public-local-'));
@@ -22,13 +23,27 @@ test('public dcode local add returns the removable native id and leaves foreign 
     writeFileSync(enablement, JSON.stringify({ version: 1, enabledPlugins: { 'foreign@local': true } }));
     const env = { ...process.env, HOME: home, OPEN_PLUGIN_HOME: home, OPEN_PLUGIN_DCODE_ROOT: native };
     const cli = (...args: string[]) => {
-      const result = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), ...args, '--json'], { cwd: empty, env, encoding: 'utf8' });
+      const outputFlag = args[0] === 'list' ? '--json' : '--legacy-json';
+      const result = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), ...args, outputFlag], { cwd: empty, env, encoding: 'utf8' });
       return { code: result.status, data: JSON.parse(result.stdout) as any, stderr: result.stderr };
     };
-    const added = cli('add', source, '--target', 'dcode');
-    expect(added.code).toBe(0);
-    const nativeId = added.data[0]?.nativeId as string;
+    const addResult = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), 'add', source, '--target', 'dcode', '--json'], { cwd: empty, env, encoding: 'utf8' });
+    const added = parseLifecycleReport(JSON.parse(addResult.stdout));
+    expect(addResult.status).toBe(0);
+    const nativeId = added.outcomes[0]?.nativeId as string;
     expect(nativeId).toBe('release-smoke@local');
+    const ledger = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')) as { installs: Array<{ id: string }> };
+    expect({
+      planned: added.plan[0]?.nativeId,
+      reported: added.outcomes[0]?.nativeId,
+      recorded: ledger.installs[0]?.id,
+      nativeRecorded: Object.hasOwn(JSON.parse(readFileSync(registry, 'utf8')).plugins, nativeId),
+    }).toEqual({
+      planned: nativeId,
+      reported: nativeId,
+      recorded: nativeId,
+      nativeRecorded: true,
+    });
     const listed = cli('list', '--target', 'dcode');
     expect(listed.code).toBe(0);
     expect(listed.data[0]?.plugins.some((plugin: { id: string }) => plugin.id === nativeId)).toBe(true);

@@ -19,6 +19,7 @@ type Change = { commit(): void; rollback(): void };
 export const hermesWriter: HostWriter = {
   ...hermes,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
     const ownershipId = plugin.marketplace === undefined ? id : `${id}@${plugin.marketplace}`;

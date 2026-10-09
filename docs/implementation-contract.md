@@ -10,22 +10,13 @@ Discovery returns one or more `PluginSource` values with `dir`, `name`, optional
 
 ## Outcome and CLI
 
-```ts
-type InstallStatus = 'installed' | 'unchanged' | 'unsupported' | 'unverified' | 'failed';
-type InstallOutcome = {
-  plugin: string;
-  target: string;
-  status: InstallStatus;
-  dryRun: boolean;
-  diagnostic?: string;
-  nativeId?: string;
-  action?: 'install' | 'update' | 'remove';
-};
-```
+Mutation `--json` writes only the schema-v1 `LifecycleReport` envelope to stdout; progress and human logs use stderr. The public types, enum values, stable reason codes, and validator live in `src/lifecycle-report.ts`. The envelope contains command/dry-run/source-snapshot context, an ordered frozen plan, an ordered outcome for every planned operation, and an aggregate summary. Plan action, operation result, resource state, activation state, route, changed flag, and coverage (`desired-pair` or `retirement`) remain separate fields.
 
-`--json` writes only `InstallOutcome[]` to stdout; human logs use stderr. A valid dry run returns the planned terminal status with `dryRun: true` and changes no active store or record. Invalid inputs are `failed`, never a dry-run success. Multi-target runs may mix outcomes and exit nonzero if any required target fails. `doctor` stays reader-only.
+Operation result answers whether the Desired operation converged, not whether a protective containment step ran. `retain-prior` and `disable-nonconforming` therefore remain failed pair outcomes with their exact structured reason; resource, activation, and changed fields separately show the retained prior activation or successful reversible disablement. This preserves pair-local diagnostics and prevents containment from serializing as a successful install.
 
-Mutation verbs (`add`, `update`, `remove`) emit outcomes; removal uses `action: 'remove'`. Read verbs (`list`, `doctor`) retain their existing host-native JSON shapes and accept repeated `--target` filters. A profile gates only the semantics it cannot evidence: it must not label an entire requested host `unverified` when the requested operation is supported.
+Every pair plan and outcome row carries the canonical nested `DeploymentScopeIdentity` (Source binding plus target kind and instance), along with source-snapshot, package, and native identity. Command-global failures that occur before a pair can be identified live only in the summary; the report never invents a wildcard or nullable pair scope. The validator rejects missing, duplicate, unexpected, out-of-plan, or identity-contradicting outcomes. Structured reasons keep category, stable code, diagnostic, and nullable capability/evidence identifiers; unknown exceptions are internal defects rather than capability gaps. Exit `0` means converged, exit `1` means a valid request did not converge, and exit `2` means usage or selection error.
+
+A valid dry run returns the planned terminal state with `command.dryRun: true`, `changed: false`, and no mutation. Multi-target runs may mix outcomes and exit nonzero if any required target fails. `--legacy-json` explicitly serializes the former `InstallOutcome[]` shape for one transition release only; legacy types stay in `src/legacy-install-outcome.ts` and are not an execution model. Read verbs (`list`, `doctor`) retain their existing host-native JSON shapes and accept repeated `--target` filters. `doctor` stays reader-only. A profile gates only the semantics it cannot evidence: it must not label an entire requested host `unverified` when the requested operation is supported.
 
 `plgnz --version --json` emits `{ "name": "plgnz", "version": <package version> }` so callers can verify the pinned CLI before mutation.
 

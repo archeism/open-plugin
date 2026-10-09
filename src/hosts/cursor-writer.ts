@@ -15,6 +15,12 @@ type Ownership = { source: string; pluginId: string; fingerprint: string };
 export const cursorWriter: HostWriter = {
   ...cursor,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => plugin.name,
+  legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [] : [`${plugin.name}@${plugin.marketplace}`],
+  persistedNativeIdMayAlias: (persisted, requested) => {
+    const name = persisted.split('@', 1)[0] ?? persisted;
+    return requested !== persisted && (requested === name || requested.startsWith(`${name}@`));
+  },
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
     const ownershipId = plugin.marketplace === undefined ? id : `${id}@${plugin.marketplace}`;

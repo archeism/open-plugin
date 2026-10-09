@@ -59,26 +59,26 @@ nativeTest('OMP loads projected commands and skills through its native npm/link 
     });
     writeFiles(collection, { 'marketplace.json': '{"name":"audit","plugins":[{"name":"demo","source":"./plugins/demo"}]}' });
 
-    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--json'], env, cwd))[0].status).toBe('installed');
+    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--legacy-json'], env, cwd))[0].status).toBe('installed');
     let found = discover(env, cwd);
     expect(found.skills).toContain('ordinary'); expect(found.skills.includes('manual')).toBe(false); expect(found.skills.includes('sidecar')).toBe(false);
     expect(found.commands).toContain('demo:manual'); expect(found.commands).toContain('demo:sidecar'); expect(found.commands).toContain('demo:run');
     expect(found.expanded).toContain('manual first=alpha all=alpha beta');
     expect(found.expanded).toContain(join(installed, '.plgnz/source/skills/manual'));
-    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--json'], env, cwd))[0].status).toBe('unchanged');
+    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--legacy-json'], env, cwd))[0].status).toBe('unchanged');
 
     writeFileSync(join(plugin, 'skills/manual/resources/value.txt'), 'manual two\n');
-    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--json'], env, cwd))[0].status).toBe('installed');
+    expect(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--legacy-json'], env, cwd))[0].status).toBe('installed');
     expect(readFileSync(join(installed, '.plgnz/source/skills/manual/resources/value.txt'), 'utf8')).toBe('manual two\n');
     writeFileSync(join(plugin, '.claude/commands/run.md'), '---\ndescription: bad\nuser-invocable: false\n---\nbad\n');
-    const failed = spawnSync('bun', [plgnz, 'add', collection, '--target', 'omp', '--json'], { cwd, encoding: 'utf8', env });
+    const failed = spawnSync('bun', [plgnz, 'add', collection, '--target', 'omp', '--legacy-json'], { cwd, encoding: 'utf8', env });
     expect(failed.status).toBe(1);
     found = discover(env, cwd); expect(found.commands).toContain('demo:manual'); expect(found.commands).toContain('demo:run');
 
     writeFileSync(join(plugin, '.claude/commands/run.md'), '---\ndescription: run\n---\nrun first=$1 all=$ARGUMENTS\n');
-    expect(['installed', 'unchanged']).toContain(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--json'], env, cwd))[0].status);
+    expect(['installed', 'unchanged']).toContain(JSON.parse(run('bun', [plgnz, 'add', collection, '--target', 'omp', '--legacy-json'], env, cwd))[0].status);
 
-    expect(JSON.parse(run('bun', [plgnz, 'remove', 'demo@audit', '--target', 'omp', '--json'], env, cwd))[0].status).toBe('installed');
+    expect(JSON.parse(run('bun', [plgnz, 'remove', 'demo@audit', '--target', 'omp', '--legacy-json'], env, cwd))[0].status).toBe('installed');
     expect(existsSync(installed)).toBe(false);
     found = discover(env, cwd); expect(found.skills.includes('ordinary')).toBe(false); expect(found.commands.includes('demo:manual')).toBe(false); expect(found.commands.includes('demo:run')).toBe(false);
   } finally { rmSync(root, { recursive: true, force: true }); }
