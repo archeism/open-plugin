@@ -197,7 +197,15 @@ export function inventoryPackageSemantics(plugin: PluginSource): PackageSemantic
   };
 }
 
-/** Requirements which every operation must prove in addition to Source semantics. */
+/** Project complete Source requirements for activation, or lifecycle-only requirements for retirement. */
+export function requiredSemanticsForOperation(
+  inventory: PackageSemanticInventory,
+  operation: 'install' | 'update',
+): PackageSemantic[];
+export function requiredSemanticsForOperation(
+  inventory: PackageSemanticInventory | undefined,
+  operation: 'retire',
+): PackageSemantic[];
 export function requiredSemanticsForOperation(
   inventory: PackageSemanticInventory | undefined,
   operation: CapabilityOperation,

@@ -276,6 +276,8 @@ describe('source package semantic inventory', () => {
       source('claude-command-invalid-yaml', { '.claude/commands/run.md': '---\ndescription: [unterminated\n---\nbody\n' }),
       source('toml-command-no-prompt', { 'commands/run.toml': 'description = "Run"\n' }),
       source('toml-command-invalid', { 'commands/run.toml': 'description = [unterminated\n' }),
+      source('command-policy-malformed', { 'commands/run.md': '---\ndescription: Run\nuser-invocable: sometimes\n---\nbody\n' }),
+      source('command-policy-conflict', { 'commands/run.toml': 'description = "Run"\nprompt = "body"\ndisable-model-invocation = true\ndisable_model_invocation = false\n' }),
       source('agent-no-name', { 'agents/reviewer.md': '---\ndescription: Review\n---\nbody\n' }),
       source('agent-invalid-yaml', { 'agents/reviewer.md': '---\nname: [unterminated\n---\nbody\n' }),
       source('claude-agent-invalid-yaml', { '.claude/agents/reviewer.md': '---\nname: [unterminated\n---\nbody\n' }),

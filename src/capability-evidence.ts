@@ -112,7 +112,9 @@ export const capabilityEvidenceProfiles: readonly CapabilityEvidenceProfile[] = 
  * this function never admits a supported subset of a refused package.
  */
 export function admitPackageSemantics(request: PackageAdmissionRequest): PackageAdmission {
-  const requirements = requiredSemanticsForOperation(request.inventory, request.operation);
+  const requirements = request.operation === 'retire'
+    ? requiredSemanticsForOperation(request.inventory, 'retire')
+    : requiredSemanticsForOperation(request.inventory, request.operation);
   const version = normalizedDetectedVersion(request.detectedVersion);
   const profile = version === undefined ? undefined : capabilityEvidenceProfiles.find((candidate) =>
     candidate.host === request.host
