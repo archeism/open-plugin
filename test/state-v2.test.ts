@@ -247,10 +247,12 @@ describe('state v2 public reader and writer', () => {
     expect(loaded.state.scopes[0]?.authority).toBe('legacy-import');
     expect(loaded.state.scopes[0]?.desired).toBeUndefined();
     expect(loaded.state.scopes[0]?.lastConverged).toBeUndefined();
+    expect(loaded.state.scopes[0]?.createdAt).toBeUndefined();
     expect(loaded.state.activations[0]?.ownership).toEqual({ kind: 'legacy-claim' });
     expect(loaded.state.activations[0]?.sourceRevision).toBe('abc123');
     expect(loaded.state.activations[0]?.pending?.operation).toBe('retire');
     expect(loaded.state.attempts[0]?.command).toBe('legacy-recovery');
+    expect(loaded.state.attempts[0]?.journal[0]?.action).toBe('remove');
     expect(hasRetirementAuthority(loaded.state.activations[0]!)).toBe(false);
 
     writeLifecycleState({ ...loaded.state, stateGeneration: 1 }, { globalPreflight: 'succeeded' }, file);

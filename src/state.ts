@@ -108,7 +108,7 @@ export interface ActivationRecord {
   updatedAt?: string;
 }
 
-export type JournalAction = 'install' | 'update' | 'unchanged' | 'route-migrate' | 'retain-prior' | 'retire-orphan';
+export type JournalAction = 'install' | 'update' | 'unchanged' | 'route-migrate' | 'retain-prior' | 'retire-orphan' | 'remove';
 export type JournalState = 'pending' | 'applying' | 'applied' | 'readback-verified' | 'rollback' | 'rolled-back' | 'cleanup-pending' | 'completed' | 'failed' | 'not-attempted';
 
 export interface JournalEntryRecord {
@@ -328,7 +328,6 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
         authority: 'legacy-import',
         lifecycle: 'active',
         selectorMode: 'legacy-unknown',
-        ...(validTimestamp(record.installedAt) ? { createdAt: record.installedAt, updatedAt: record.installedAt } : {}),
       };
       scopes.set(scopeId, scope);
     }
@@ -360,7 +359,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
       ...(validTimestamp(record.installedAt) ? { activatedAt: record.installedAt, createdAt: record.installedAt, updatedAt: record.installedAt } : {}),
     });
     if (attemptId !== undefined) {
-      const action = record.pending === 'remove' ? 'retire-orphan' : 'install';
+      const action = record.pending === 'remove' ? 'remove' : 'install';
       state.attempts.push({
         id: attemptId,
         command: 'legacy-recovery',
@@ -580,7 +579,7 @@ function validateJournal(value: unknown, label: string): JournalEntryRecord {
   requiredString(rec['scopeId'], `${label}.scopeId`);
   optionalString(rec['packageId'], `${label}.packageId`);
   optionalString(rec['nativeId'], `${label}.nativeId`);
-  oneOf(rec['action'], ['install', 'update', 'unchanged', 'route-migrate', 'retain-prior', 'retire-orphan'], `${label}.action`);
+  oneOf(rec['action'], ['install', 'update', 'unchanged', 'route-migrate', 'retain-prior', 'retire-orphan', 'remove'], `${label}.action`);
   oneOf(rec['state'], ['pending', 'applying', 'applied', 'readback-verified', 'rollback', 'rolled-back', 'cleanup-pending', 'completed', 'failed', 'not-attempted'], `${label}.state`);
   if (rec['route'] !== undefined) validateRoute(rec['route'], `${label}.route`);
   optionalTimestamp(rec['startedAt'], `${label}.startedAt`);
