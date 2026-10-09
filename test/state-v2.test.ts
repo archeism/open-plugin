@@ -18,6 +18,8 @@ const earlier = '2026-10-09T01:00:00.000Z';
 const fixtureSource: SourceBinding = { kind: 'git', locator: 'https://github.com/acme/plugins.git', ref: 'main' };
 const fixtureTarget = { kind: 'dcode', instance: 'default' };
 const fixtureScopeId = createDeploymentScopeIdentity(fixtureSource, fixtureTarget).id;
+const evidenceAddress = `sha256:${'a'.repeat(64)}`;
+const proofAddress = `sha256:${'b'.repeat(64)}`;
 
 function stateFixture(): LifecycleStateV2 {
   return {
@@ -66,8 +68,8 @@ function stateFixture(): LifecycleStateV2 {
       nativeId: 'addy@personal',
       sourceRelativeDir: 'plugins/addy',
       sourceRevision: '2222222222222222222222222222222222222222',
-      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/update' } },
-      ownership: { kind: 'created', proofKey: { kind: 'managed-marker', key: 'addy' }, verifiedAt: earlier },
+      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: evidenceAddress } },
+      ownership: { kind: 'created', proofKey: { kind: 'managed-marker', key: proofAddress }, verifiedAt: earlier },
       fingerprints: { source: 'source-v2', projected: 'projected-v2', installed: 'installed-v2' },
       activationState: 'active',
       readbackState: 'verified',
@@ -90,7 +92,7 @@ function stateFixture(): LifecycleStateV2 {
         nativeId: 'addy@personal',
         action: 'update',
         state: 'completed',
-        route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/update' } },
+        route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: evidenceAddress } },
         startedAt: earlier,
         updatedAt: now,
       }],
@@ -105,8 +107,8 @@ function stateFixture(): LifecycleStateV2 {
       nativeId: 'toolbox@personal',
       sourceRelativeDir: 'plugins/toolbox',
       sourceRevision: '1111111111111111111111111111111111111111',
-      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: 'dcode/0.1.83/managed/retire' } },
-      ownership: { kind: 'adopted', proofKey: { kind: 'native-record', key: 'toolbox' }, verifiedAt: earlier, adoptedAt: earlier },
+      route: { kind: 'managed', evidenceKey: { kind: 'capability-profile', key: evidenceAddress } },
+      ownership: { kind: 'adopted', proofKey: { kind: 'native-record', key: proofAddress }, verifiedAt: earlier, adoptedAt: earlier },
       fingerprints: { source: 'toolbox-source', projected: 'toolbox-projected', installed: 'toolbox-installed' },
       pins: [],
       retentionState: 'plugin-state-retained',
@@ -134,6 +136,38 @@ function addOtherScope(state: LifecycleStateV2): string {
     selectorMode: 'legacy-unknown',
   });
   return id;
+}
+
+function setPendingTuple(
+  state: LifecycleStateV2,
+  tuple: {
+    operation: string;
+    pendingPhase: string;
+    attemptPhase: string;
+    journalState: string;
+    mutationStarted: boolean;
+  },
+): void {
+  const activation = state.activations[0]! as unknown as Record<string, unknown>;
+  activation['pending'] = { operation: tuple.operation, phase: tuple.pendingPhase, attemptId: 'attempt-7' };
+  const attempt = state.attempts[0]! as unknown as Record<string, unknown>;
+  attempt['phase'] = tuple.attemptPhase;
+  attempt['mutationStarted'] = tuple.mutationStarted;
+  if (tuple.attemptPhase === 'completed') attempt['completedAt'] = now;
+  else delete attempt['completedAt'];
+  const journal = state.attempts[0]!.journal[0]! as unknown as Record<string, unknown>;
+  journal['action'] = tuple.operation;
+  journal['state'] = tuple.journalState;
+}
+
+function useContentAddresses(state: LifecycleStateV2): void {
+  const activation = state.activations[0]!;
+  if (activation.route.kind !== 'legacy-unverified') activation.route.evidenceKey.key = evidenceAddress;
+  if (activation.ownership.kind !== 'legacy-claim') activation.ownership.proofKey.key = proofAddress;
+  const journalRoute = state.attempts[0]!.journal[0]!.route;
+  if (journalRoute !== undefined && journalRoute.kind !== 'legacy-unverified') journalRoute.evidenceKey.key = evidenceAddress;
+  state.tombstones[0]!.route.evidenceKey.key = evidenceAddress;
+  state.tombstones[0]!.ownership.proofKey.key = proofAddress;
 }
 
 function expectThrow(fn: () => void, message: string): void {
@@ -268,6 +302,128 @@ describe('state v2 public reader and writer', () => {
     }
   });
 
+  test('accepts only exact pending operation, journal state, and attempt phase tuples', () => {
+    const { file } = tempStateFile();
+    const tuples = [
+      { operation: 'install', pendingPhase: 'accepted', attemptPhase: 'accepted', journalState: 'pending', mutationStarted: false },
+      { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
+      { operation: 'retire-orphan', pendingPhase: 'applying', attemptPhase: 'pruning', journalState: 'applying', mutationStarted: true },
+      { operation: 'route-migrate', pendingPhase: 'readback', attemptPhase: 'readback', journalState: 'applied', mutationStarted: true },
+      { operation: 'remove', pendingPhase: 'cleanup', attemptPhase: 'finalizing', journalState: 'cleanup-pending', mutationStarted: true },
+      { operation: 'update', pendingPhase: 'rollback', attemptPhase: 'recovery-required', journalState: 'rollback', mutationStarted: true },
+    ];
+
+    for (const tuple of tuples) {
+      const value = stateFixture();
+      setPendingTuple(value, tuple);
+      writeFileSync(file, JSON.stringify(value));
+      expect(readLifecycleState(file).state.activations[0]?.pending?.operation).toBe(tuple.operation);
+    }
+  });
+
+  test('rejects contradictory or terminal pending recovery semantics', () => {
+    const { file } = tempStateFile();
+    const cases = [
+      {
+        tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'applying', mutationStarted: true },
+        mutate: (value: LifecycleStateV2): void => { value.attempts[0]!.journal[0]!.action = 'install'; },
+        message: 'pending operation must match journal action',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'completed', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase applying requires journal applying',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'failed', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase applying requires journal applying',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'not-attempted', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase applying requires journal applying',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'applying', attemptPhase: 'applying', journalState: 'readback-verified', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase applying requires journal applying',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'accepted', attemptPhase: 'accepted', journalState: 'pending', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'accepted pending work requires mutationStarted false',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'readback', attemptPhase: 'completed', journalState: 'applied', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase readback requires attempt readback',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'readback', attemptPhase: 'failed', journalState: 'applied', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase readback requires attempt readback',
+      },
+      {
+        tuple: { operation: 'update', pendingPhase: 'rollback', attemptPhase: 'recovery-required', journalState: 'rolled-back', mutationStarted: true },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'pending phase rollback requires journal rollback',
+      },
+      {
+        tuple: { operation: 'remove', pendingPhase: 'cleanup', attemptPhase: 'finalizing', journalState: 'cleanup-pending', mutationStarted: false },
+        mutate: (_value: LifecycleStateV2): void => {},
+        message: 'cleanup pending work requires mutationStarted true',
+      },
+    ];
+
+    for (const item of cases) {
+      const value = stateFixture();
+      setPendingTuple(value, item.tuple);
+      item.mutate(value);
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), item.message);
+    }
+  });
+
+  test('rejects ambiguous or non-mutating actions as pending operations', () => {
+    const { file } = tempStateFile();
+    for (const operation of ['retire', 'disable', 'cleanup', 'adopt', 'unchanged', 'retain-prior']) {
+      const value = stateFixture();
+      setPendingTuple(value, {
+        operation,
+        pendingPhase: 'applying',
+        attemptPhase: 'applying',
+        journalState: 'applying',
+        mutationStarted: true,
+      });
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'pending.operation must be one of: install, update, route-migrate, retire-orphan, remove');
+    }
+  });
+
+  test('round-trips only content-addressed evidence and proof references', () => {
+    const { file } = tempStateFile();
+    const valid = stateFixture();
+    useContentAddresses(valid);
+    writeFileSync(file, JSON.stringify(valid));
+    expect(readLifecycleState(file).state).toEqual(valid);
+
+    for (const raw of [
+      'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      'sk-proj-abcdefghijklmnopqrstuvwxyz',
+      'AKIAIOSFODNN7EXAMPLE',
+      'https://token@example.invalid/proof',
+      `sha256:${'A'.repeat(64)}`,
+      `sha256:${'a'.repeat(63)}`,
+    ]) {
+      const value = stateFixture();
+      useContentAddresses(value);
+      value.tombstones[0]!.ownership.proofKey.key = raw;
+      writeFileSync(file, JSON.stringify(value));
+      expectThrow(() => readLifecycleState(file), 'must be sha256 followed by 64 lowercase hexadecimal characters');
+    }
+  });
+
   test('rejects credential-bearing route evidence and ownership proof in retained history', () => {
     const { file } = tempStateFile();
     const cases: Array<(value: LifecycleStateV2) => void> = [
@@ -305,7 +461,7 @@ describe('state v2 public reader and writer', () => {
       const value = JSON.parse(JSON.stringify(stateFixture())) as LifecycleStateV2;
       mutate(value);
       writeFileSync(file, JSON.stringify(value));
-      expectThrow(() => readLifecycleState(file), 'credential-free bounded reference');
+      expectThrow(() => readLifecycleState(file), 'must be sha256 followed by 64 lowercase hexadecimal characters');
     }
   });
 
@@ -421,9 +577,13 @@ describe('state v2 public reader and writer', () => {
     expect(loaded.state.activations[0]?.activatedAt).toBe(earlier);
     expect(loaded.state.activations[0]?.createdAt).toBe(earlier);
     expect(loaded.state.activations[0]?.updatedAt).toBe(earlier);
-    expect(loaded.state.activations[0]?.pending?.operation).toBe('retire');
+    expect(loaded.state.activations[0]?.pending?.operation).toBe('remove');
+    expect(loaded.state.activations[0]?.pending?.phase).toBe('applying');
     expect(loaded.state.attempts[0]?.command).toBe('legacy-recovery');
+    expect(loaded.state.attempts[0]?.phase).toBe('applying');
+    expect(loaded.state.attempts[0]?.mutationStarted).toBe(true);
     expect(loaded.state.attempts[0]?.journal[0]?.action).toBe('remove');
+    expect(loaded.state.attempts[0]?.journal[0]?.state).toBe('applying');
     expect(loaded.state.attempts[0]?.startedAt).toBe(earlier);
     expect(hasRetirementAuthority(loaded.state.activations[0]!)).toBe(false);
 

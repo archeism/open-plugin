@@ -85,7 +85,7 @@ export interface FingerprintRecord {
   installed?: string;
 }
 
-export type PendingOperation = 'install' | 'update' | 'route-migrate' | 'retire' | 'disable' | 'cleanup' | 'adopt';
+export type PendingOperation = 'install' | 'update' | 'route-migrate' | 'retire-orphan' | 'remove';
 export type PendingPhase = 'accepted' | 'applying' | 'readback' | 'cleanup' | 'rollback';
 
 export interface PendingOperationRecord {
@@ -269,6 +269,7 @@ function validateLifecycleStateDocument(value: unknown, minimumStateGeneration: 
       && entry.nativeId === activation.nativeId
     );
     if (matchingEntries.length !== 1) invalid(`activation '${activationKey(activation)}' pending attempt must contain exactly one matching package/native journal entry`);
+    validatePendingSemantics(activation, attempt, matchingEntries[0]!);
   }
   for (const attempt of attempts) {
     for (const scopeId of attempt.scopeIds) if (!scopeIds.has(scopeId)) invalid(`attempt '${attempt.id}' references unknown scope '${scopeId}'`);
@@ -372,7 +373,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
       readbackState: 'unverified',
       ...(attemptId === undefined ? {} : {
         pending: {
-          operation: record.pending === 'remove' ? 'retire' : 'install',
+          operation: record.pending === 'remove' ? 'remove' : 'install',
           phase: 'applying',
           attemptId,
           ...(validTimestamp(record.installedAt) ? { startedAt: record.installedAt } : {}),
@@ -386,7 +387,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
       state.attempts.push({
         id: attemptId,
         command: 'legacy-recovery',
-        phase: 'recovery-required',
+        phase: 'applying',
         mutationStarted: true,
         scopeIds: [scopeId],
         journal: [{
@@ -395,7 +396,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
           packageId: record.id,
           nativeId: record.id,
           action,
-          state: 'pending',
+          state: 'applying',
           route: { kind: 'legacy-unverified' },
           ...(validTimestamp(record.installedAt) ? { startedAt: record.installedAt, updatedAt: record.installedAt } : {}),
         }],
@@ -572,7 +573,7 @@ function validateCapabilityEvidenceReference(value: unknown, label: string): Cap
   const rec = asObject(value, label);
   exactFields(rec, ['kind', 'key'], 'capability evidence reference');
   oneOf(rec['kind'], ['capability-profile'], `${label}.kind`);
-  boundedReferenceKey(rec['key'], `${label}.key`);
+  contentAddress(rec['key'], `${label}.key`);
   return value as CapabilityEvidenceReferenceRecord;
 }
 
@@ -580,18 +581,63 @@ function validateOwnershipProofReference(value: unknown, label: string): Ownersh
   const rec = asObject(value, label);
   exactFields(rec, ['kind', 'key'], 'ownership proof reference');
   oneOf(rec['kind'], ['managed-marker', 'native-record'], `${label}.kind`);
-  boundedReferenceKey(rec['key'], `${label}.key`);
+  contentAddress(rec['key'], `${label}.key`);
   return value as OwnershipProofReferenceRecord;
 }
 
 function validatePending(value: unknown, label: string): PendingOperationRecord {
   const rec = asObject(value, label);
   exactFields(rec, ['operation', 'phase', 'attemptId', 'startedAt'], 'pending operation');
-  oneOf(rec['operation'], ['install', 'update', 'route-migrate', 'retire', 'disable', 'cleanup', 'adopt'], `${label}.operation`);
+  oneOf(rec['operation'], ['install', 'update', 'route-migrate', 'retire-orphan', 'remove'], `${label}.operation`);
   oneOf(rec['phase'], ['accepted', 'applying', 'readback', 'cleanup', 'rollback'], `${label}.phase`);
   requiredString(rec['attemptId'], `${label}.attemptId`);
   optionalTimestamp(rec['startedAt'], `${label}.startedAt`);
   return value as PendingOperationRecord;
+}
+
+function validatePendingSemantics(
+  activation: ActivationRecord,
+  attempt: LifecycleAttemptRecord,
+  journal: JournalEntryRecord,
+): void {
+  const pending = activation.pending!;
+  const identity = `activation '${activationKey(activation)}'`;
+  if (pending.operation !== journal.action) invalid(`${identity} pending operation must match journal action`);
+
+  let journalState: JournalState;
+  let attemptPhases: Array<LifecycleAttemptRecord['phase']>;
+  let mutationStarted: boolean;
+  switch (pending.phase) {
+    case 'accepted':
+      journalState = 'pending';
+      attemptPhases = ['accepted'];
+      mutationStarted = false;
+      break;
+    case 'applying':
+      journalState = 'applying';
+      attemptPhases = ['applying', 'pruning'];
+      mutationStarted = true;
+      break;
+    case 'readback':
+      journalState = 'applied';
+      attemptPhases = ['readback'];
+      mutationStarted = true;
+      break;
+    case 'cleanup':
+      journalState = 'cleanup-pending';
+      attemptPhases = ['finalizing'];
+      mutationStarted = true;
+      break;
+    case 'rollback':
+      journalState = 'rollback';
+      attemptPhases = ['recovery-required'];
+      mutationStarted = true;
+      break;
+  }
+
+  if (journal.state !== journalState) invalid(`${identity} pending phase ${pending.phase} requires journal ${journalState}`);
+  if (!attemptPhases.includes(attempt.phase)) invalid(`${identity} pending phase ${pending.phase} requires attempt ${attemptPhases.join(' or ')}`);
+  if (attempt.mutationStarted !== mutationStarted) invalid(`${identity} ${pending.phase} pending work requires mutationStarted ${String(mutationStarted)}`);
 }
 
 function validateAttempt(value: unknown, label: string): LifecycleAttemptRecord {
@@ -702,7 +748,7 @@ function activationKey(activation: Pick<ActivationRecord, 'scopeId' | 'packageId
 }
 
 function pendingV1(operation: PendingOperation): 'install' | 'remove' {
-  return operation === 'retire' || operation === 'disable' ? 'remove' : 'install';
+  return operation === 'retire-orphan' || operation === 'remove' ? 'remove' : 'install';
 }
 
 function asObject(value: unknown, label: string): Record<string, unknown> {
@@ -791,16 +837,9 @@ function relativePath(value: unknown, label: string): string {
   return path;
 }
 
-function boundedReferenceKey(value: unknown, label: string): string {
+function contentAddress(value: unknown, label: string): string {
   const key = requiredString(value, label);
-  const segments = key.split('/');
-  if (
-    key.length > 256
-    || key.trim() !== key
-    || !/^[a-z0-9][a-z0-9._/+~-]*$/iu.test(key)
-    || SECRET_CONTEXT_KEY.test(key)
-    || segments.some(segment => segment === '' || segment === '.' || segment === '..')
-  ) invalid(`${label} must be a credential-free bounded reference key`);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(key)) invalid(`${label} must be sha256 followed by 64 lowercase hexadecimal characters`);
   return key;
 }
 

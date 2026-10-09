@@ -42,7 +42,9 @@ history. Its top level is:
 - An Attempt contains command/phase/mutation state and a recovery journal with
   stable operation IDs. A scope's last Attempt must include that scope. A
   pending Activation's Attempt must include its scope and exactly one journal
-  entry for the same package and native identity.
+  entry for the same package and native identity. Pending operations use the
+  same mutating action vocabulary as the journal: `install`, `update`,
+  `route-migrate`, `retire-orphan`, or `remove`.
 - A tombstone retains only lifecycle proof and history: identities, route and
   evidence, verified ownership/adoption proof, fingerprints, pins, retention
   state, and timestamps. The schema has no field for credentials,
@@ -72,9 +74,29 @@ Ownership proof is a closed union:
 
 Verified routes use a closed `capability-profile` evidence reference. Verified
 ownership uses a closed `managed-marker` or `native-record` proof reference.
-Each reference contains only a canonical key of at most 256 characters; URI,
-credential, traversal, and arbitrary metadata shapes are rejected. The same
-constraint applies to active records, journals, and tombstones.
+Each reference key is exactly `sha256:` plus 64 lowercase hexadecimal
+characters. Producers hash credential-free canonical evidence or proof
+material before constructing state; raw host values, credentials, URLs, and
+arbitrary metadata are never persisted. The same constraint applies to active
+records, journals, and tombstones.
+
+Pending recovery is also closed across all three records:
+
+- `accepted` uses journal `pending`, Attempt `accepted`, and
+  `mutationStarted: false`;
+- `applying` uses journal `applying`, Attempt `applying` or `pruning`, and
+  `mutationStarted: true`;
+- `readback` uses journal `applied`, Attempt `readback`, and
+  `mutationStarted: true`;
+- `cleanup` uses journal `cleanup-pending`, Attempt `finalizing`, and
+  `mutationStarted: true`;
+- `rollback` uses journal `rollback`, Attempt `recovery-required`, and
+  `mutationStarted: true`.
+
+The pending operation must equal the matching journal action. Terminal and
+non-mutating journal states cannot remain pending. Cleanup is a phase, explicit
+adoption is ownership proof within `route-migrate`, and reversible disablement
+does not create a separate pending action.
 
 Only `created` and `adopted` pass `hasRetirementAuthority()`. The planner must
 also require an authoritative scope and successful Desired convergence before
@@ -111,7 +133,10 @@ without changing the file:
   readback, while preserving its Source revision, safe relative directory,
   fingerprints, pins, and known timestamps;
 - legacy `pending: install|remove` becomes an explicit recovery Attempt,
-  journal entry, and pending Activation operation.
+  journal entry, and matching pending Activation operation. The imported tuple
+  is conservatively `applying` with `mutationStarted: true`, because v1 proves
+  intent was persisted before a mutation but cannot prove where interruption
+  occurred.
 
 Dry-run and read-only commands never persist that import. After command-global
 preflight succeeds, the caller may advance generation 0 to 1 and atomically
