@@ -1,4 +1,4 @@
-/** Stable raw-byte tree fingerprint shared by source capture and read-only verification. */
+/** Stable tree fingerprint shared by source capture and read-only verification. */
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { InstalledPlugin } from './host';
@@ -38,6 +38,10 @@ function fingerprint(root: string, ignoreGitMetadata: boolean): string {
         walk(path, relative);
       } else if (stat.isFile()) {
         hash.update(`f\0${relative}\0`);
+        // Git and host loaders distinguish regular files from executables.
+        // Normalize to that portable semantic instead of hashing platform-
+        // specific read/write permission bits.
+        hash.update(stat.mode & 0o111 ? 'x\0' : '-\0');
         const content = new Bun.CryptoHasher('sha256');
         content.update(readBytes(path));
         hash.update(content.digest('hex'));

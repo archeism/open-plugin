@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -77,6 +77,34 @@ describe('resolveSource', () => {
     expect(resolved.snapshot.fingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  test('freezes a mode-only local Source change as a distinct executable snapshot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-local-mode-'));
+    plugin(root, 'local-mode-fixture');
+    const executable = join(root, 'run.sh');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+    chmodSync(executable, 0o644);
+
+    const first = resolveSource(root);
+    chmodSync(executable, 0o755);
+    const second = resolveSource(root);
+
+    expect({
+      sameFingerprint: first.snapshot.fingerprint === second.snapshot.fingerprint,
+      sameSnapshot: first.snapshotDir === second.snapshotDir,
+      firstExecutable: executableBits(join(first.snapshotDir, 'run.sh')),
+      secondExecutable: executableBits(join(second.snapshotDir, 'run.sh')),
+      sameBytes: readFileSync(join(first.snapshotDir, 'run.sh'), 'utf8') === readFileSync(join(second.snapshotDir, 'run.sh'), 'utf8'),
+    }).toEqual({
+      sameFingerprint: false,
+      sameSnapshot: false,
+      firstExecutable: 0,
+      secondExecutable: 0o111,
+      sameBytes: true,
+    });
+    chmodSync(join(second.snapshotDir, 'run.sh'), 0o644);
+    expectThrow(() => resolveSource(root), 'Cached Source snapshot is corrupt');
+  });
+
   test('binds a credentialed remote ref to one immutable revision', async () => {
     const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-remote-'));
     const checkout = join(root, 'checkout');
@@ -134,6 +162,59 @@ exec "$real_git" "\${args[@]}"
         serializedLeaksCredential: false,
       });
       expect(resolved.snapshot.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      if (previousGit === undefined) delete process.env['OPEN_PLUGIN_GIT_BIN'];
+      else process.env['OPEN_PLUGIN_GIT_BIN'] = previousGit;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('materializes executable mode from distinct exact remote revisions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-frozen-remote-mode-'));
+    const checkout = join(root, 'checkout');
+    const remote = join(root, 'remote.git');
+    const fakeBin = join(root, 'bin');
+    const executable = join(checkout, 'run.sh');
+    const first = initGitRepo(checkout, {
+      'plugin.json': '{"name":"fixture","version":"1.0.0"}',
+      'run.sh': '#!/bin/sh\nexit 0\n',
+    });
+    chmodSync(executable, 0o755);
+    const second = commitAll(checkout, 'make script executable');
+    expect(spawnSync('git', ['clone', '--quiet', '--bare', checkout, remote], { encoding: 'utf8' }).status).toBe(0);
+    mkdirSync(fakeBin, { recursive: true });
+    const git = join(fakeBin, 'git');
+    writeFileSync(git, `#!/bin/bash
+set -euo pipefail
+real_git=/usr/bin/git
+remote=${JSON.stringify(remote)}
+requested='https://example.test/mode.git'
+args=("$@")
+for i in "\${!args[@]}"; do
+  if [[ "\${args[$i]}" == "$requested" ]]; then args[$i]="$remote"; fi
+done
+exec "$real_git" "\${args[@]}"
+`);
+    chmodSync(git, 0o755);
+    const previousGit = process.env['OPEN_PLUGIN_GIT_BIN'];
+    process.env['OPEN_PLUGIN_GIT_BIN'] = git;
+
+    try {
+      const before = resolveSource(`https://example.test/mode.git#${first}`);
+      const after = resolveSource(`https://example.test/mode.git#${second}`);
+      expect({
+        revisions: [before.snapshot.revision, after.snapshot.revision],
+        sameFingerprint: before.snapshot.fingerprint === after.snapshot.fingerprint,
+        sameSnapshot: before.snapshotDir === after.snapshotDir,
+        beforeExecutable: executableBits(join(before.snapshotDir, 'run.sh')),
+        afterExecutable: executableBits(join(after.snapshotDir, 'run.sh')),
+      }).toEqual({
+        revisions: [first, second],
+        sameFingerprint: false,
+        sameSnapshot: false,
+        beforeExecutable: 0,
+        afterExecutable: 0o111,
+      });
     } finally {
       if (previousGit === undefined) delete process.env['OPEN_PLUGIN_GIT_BIN'];
       else process.env['OPEN_PLUGIN_GIT_BIN'] = previousGit;
@@ -276,4 +357,8 @@ function expectThrow(fn: () => void, message: string): void {
 function writeBytes(path: string, bytes: number[]): void {
   const write = writeFileSync as unknown as (target: string, data: Uint8Array) => void;
   write(path, new Uint8Array(bytes));
+}
+
+function executableBits(path: string): number {
+  return statSync(path).mode & 0o111;
 }
