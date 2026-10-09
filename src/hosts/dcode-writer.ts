@@ -5,10 +5,9 @@ import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
 import { dcode, dcodeEnablementFile, dcodeRegistryFile, dcodeRoot, dcodeStateDir } from './dcode';
-import { requireCompatible } from '../compatibility';
 import { findConsumerProfile } from '../consumer-profiles';
-
-declare const Bun: any;
+import { requirePackageSemantics } from '../capability-evidence';
+import { inventoryPackageSemantics } from '../semantic-inventory';
 
 const MARKER = '.plgnz-install.json';
 type Ownership = { source: string; pluginId: string; fingerprint: string };
@@ -34,6 +33,16 @@ export const dcodeWriter: HostWriter = {
     const stage = mkdtempSync(join(tmpdir(), '.plgnz-dcode-stage-'));
     try {
       const manifestVersion = stagePlugin(plugin.dir, stage, plugin.name);
+      const profile = findConsumerProfile('dcode');
+      if (profile === undefined) throw new Error('dcode consumer profile is missing');
+      requirePackageSemantics({
+        host: 'dcode',
+        detectedVersion: profile.version === 'unverified' ? undefined : profile.version,
+        sourceType: resolved.isGit ? 'git' : 'local',
+        operation: rowsFor(plugins[id]).length === 0 ? 'install' : 'update',
+        route: 'managed',
+        inventory: inventoryPackageSemantics({ ...plugin, dir: stage, version: manifestVersion ?? plugin.version }),
+      });
       assertPriorRows(plugins[id], id, cache, resolved.sourceUri, opts?.adoptExisting === true, plugin.name, manifestVersion);
       writeFileSync(join(stage, MARKER), JSON.stringify({ source: resolved.sourceUri, pluginId: id, fingerprint: plugin.contentFingerprint ?? '' } satisfies Ownership));
       const marker = ownership(target);
@@ -78,42 +87,8 @@ function stagePlugin(source: string, stage: string, name: string): string | unde
   if (!manifest) throw new Error('dcode stage has no supported plugin manifest');
   const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as Doc;
   if (parsed.name !== name) throw new Error(`dcode manifest identity does not match ${name}`);
-  if (existsSync(join(stage, 'commands')) || existsSync(join(stage, '.claude', 'commands'))) requireDcodeCapability('commandProjection');
-  if (existsSync(join(stage, 'agents')) || existsSync(join(stage, '.claude', 'agents'))) throw new Error('dcode plugin agents are unsupported; refusing to activate');
-  for (const skill of skillFiles(stage)) {
-    const frontmatter = openingFrontmatter(readFileSync(skill, 'utf8'), skill);
-    if (frontmatter !== undefined) {
-      for (const key of ['disable-model-invocation', 'disable_model_invocation', 'user-invocable', 'user_invocable']) {
-        if (!Object.hasOwn(frontmatter, key)) continue;
-        const value = frontmatter[key];
-        if (typeof value !== 'boolean') throw new Error(`dcode skill invocation flag ${key} must be boolean: ${skill}`);
-        if (key.startsWith('disable') ? value : !value) requireDcodeCapability('userOnlySkills');
-      }
-    }
-    const sidecar = join(dirname(skill), 'agents', 'openai.yaml');
-    if (existsSync(sidecar)) {
-      let parsed: unknown;
-      try { parsed = Bun.YAML.parse(readFileSync(sidecar, 'utf8')); }
-      catch { throw new Error(`dcode skill invocation sidecar has invalid YAML: ${sidecar}`); }
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error(`dcode skill invocation sidecar must be an object: ${sidecar}`);
-      const policy = (parsed as Doc).policy;
-      if (typeof policy === 'object' && policy !== null && !Array.isArray(policy) && Object.hasOwn(policy, 'allow_implicit_invocation')) {
-        const value = (policy as Doc).allow_implicit_invocation;
-        if (typeof value !== 'boolean') throw new Error(`dcode skill invocation sidecar policy must be boolean: ${sidecar}`);
-        if (!value) requireDcodeCapability('userOnlySkills');
-      }
-    }
-  }
   return typeof parsed.version === 'string' && parsed.version.length > 0 ? parsed.version : undefined;
 }
-function requireDcodeCapability(capability: 'commandProjection' | 'userOnlySkills'): void {
-  // TODO(2026-09-23): support user-only skills when native non-experimental semantics exist; DEEPAGENTS_CODE_EXPERIMENTAL middleware is intentionally deferred.
-  const profile = findConsumerProfile('dcode');
-  if (profile === undefined) throw new Error('dcode consumer profile is missing');
-  requireCompatible(profile, capability);
-}
-function skillFiles(root: string): string[] { const out: string[] = []; const walk = (dir: string): void => { for (const entry of readdirSync(dir)) { const path = join(dir, entry); const st = lstatSync(path); if (st.isDirectory()) walk(path); else if (entry === 'SKILL.md') out.push(path); } }; walk(root); return out; }
-function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) return undefined; let parsed: unknown; try { parsed = Bun.YAML.parse(match[1] ?? ''); } catch { throw new Error(`dcode skill frontmatter has invalid YAML: ${path}`); } if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error(`dcode skill frontmatter must be an object: ${path}`); return parsed as Record<string, unknown>; }
 function readDoc(file: string, fallback: Doc, label: string): Doc { if (!existsSync(file)) return fallback; try { const value: unknown = JSON.parse(readFileSync(file, 'utf8')); if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('not an object'); return value as Doc; } catch (error) { throw new Error(`invalid dcode ${label}: ${file} (${(error as Error).message})`); } }
 function readRegistry(file: string): Doc { const registry = readDoc(file, { version: 2, plugins: {} }, 'registry'); if (registry.version !== 1 && registry.version !== 2) throw new Error(`invalid dcode registry version: ${file}`); const plugins = object(registry.plugins, 'registry plugins'); for (const [id, value] of Object.entries(plugins)) { if (!id || !Array.isArray(value) || value.length === 0) throw new Error(`invalid dcode registry record: ${id}`); for (const row of value) { if (typeof row !== 'object' || row === null || Array.isArray(row) || (typeof (row as Doc).installPath !== 'string' && typeof (row as Doc).install_path !== 'string')) throw new Error(`invalid dcode registry record: ${id}`); } } return registry; }
 function readEnablement(file: string): Doc { const enablement = readDoc(file, { version: 1, enabledPlugins: {} }, 'enablement'); if (enablement.version !== undefined && (!Number.isInteger(enablement.version) || (enablement.version as number) > 1)) throw new Error(`invalid dcode enablement version: ${file}`); boolObject(enablement.enabledPlugins, 'enabledPlugins'); return enablement; }
