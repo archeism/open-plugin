@@ -1,48 +1,28 @@
-import { isAbsolute, resolve } from 'node:path';
 import { createDeploymentScopeIdentity, type DeploymentScopeIdentity } from './deployment-scope';
+import type { TargetIdentity } from './deployment-scope';
+import { targetProfiles } from './hosts';
 import { createLifecycleReason, type LifecycleReason } from './lifecycle-report';
-import { validateSourceBinding, validateStableIdentityString, type SourceBinding } from './source-reference';
+import { validateSourceBinding, type SourceBinding } from './source-reference';
+import {
+  canonicalTargetContextBytes,
+  TargetIdentityValidationError,
+  type PersistedTargetIdentity,
+} from './target-identity';
+import { TargetProfileValidationError, type TargetProfile } from './target-profile';
 
 export const SYNC_MANIFEST_SCHEMA_VERSION = 1 as const;
 
-const SINGLE_INSTANCE_TARGET_KINDS = [
-  'claude-code',
-  'codex',
-  'kimi',
-  'cursor',
-  'omp',
-  'dcode',
-  'grok',
-  'zcode-cli',
-] as const;
+export const SYNC_MANIFEST_TARGET_KINDS = Object.freeze(targetProfiles.map(profile => profile.kind));
 
-export const SYNC_MANIFEST_TARGET_KINDS = [...SINGLE_INSTANCE_TARGET_KINDS, 'hermes'] as const;
-
-export type SyncManifestTargetKind = (typeof SYNC_MANIFEST_TARGET_KINDS)[number];
+export type SyncManifestTargetKind = (typeof targetProfiles)[number]['kind'];
 
 export interface SyncManifestPackageSelector {
   package: string;
   adoptExisting: boolean;
 }
 
-export interface HermesManifestTarget {
-  kind: 'hermes';
-  instance: string;
-  context: {
-    root: string;
-    configPath: string;
-  };
-}
-
-export interface SingleInstanceManifestTarget {
-  kind: (typeof SINGLE_INSTANCE_TARGET_KINDS)[number];
-  instance: 'default';
-}
-
-export type SyncManifestTarget = HermesManifestTarget | SingleInstanceManifestTarget;
-export type SyncManifestTargetIdentity =
-  | Pick<HermesManifestTarget, 'kind' | 'instance'>
-  | SingleInstanceManifestTarget;
+export type SyncManifestTarget = PersistedTargetIdentity;
+export type SyncManifestTargetIdentity = TargetIdentity;
 
 export interface SyncManifestSyncEntry {
   operation: 'sync';
@@ -153,21 +133,18 @@ function parseEntry(value: unknown, index: number): SyncManifestEntry {
 }
 
 function parseRetirementTarget(value: unknown, label: string): SyncManifestTargetIdentity {
-  const target = object(value, label);
-  exactFields(target, ['kind', 'instance'], label);
-  if (target['kind'] === 'hermes') {
-    stableString(target['instance'], `${label} instance`);
-    return { kind: 'hermes', instance: target['instance'] };
-  }
-  if (typeof target['kind'] !== 'string' || !(SINGLE_INSTANCE_TARGET_KINDS as readonly string[]).includes(target['kind'])) {
-    invalidSelection(`${label} kind is not a supported lifecycle target`);
-  }
-  if (target['instance'] !== 'default') invalidSelection(`${label} ${target['kind']} instance must be 'default'`);
-  return { kind: target['kind'] as SingleInstanceManifestTarget['kind'], instance: 'default' };
+  const profile = targetProfile(value, label);
+  return invokeTargetProfile(() => profile.parseRetirementTarget(value, label));
 }
 
 function assertUniqueScopes(entries: readonly SyncManifestEntry[]): void {
   const scopes = new Map<string, { entry: SyncManifestEntry; index: number }>();
+  const contexts = new Map<string, { bytes: string; index: number }>();
+  const physicalTargets = new Map<string, Array<{
+    target: PersistedTargetIdentity;
+    physicalKey: string;
+    index: number;
+  }>>();
   for (const [index, entry] of entries.entries()) {
     const scopeId = entry.operation === 'sync'
       ? deploymentScopeForSyncManifestEntry(entry).id
@@ -175,10 +152,33 @@ function assertUniqueScopes(entries: readonly SyncManifestEntry[]): void {
     const previous = scopes.get(scopeId);
     if (previous === undefined) {
       scopes.set(scopeId, { entry, index });
-      continue;
+    } else {
+      const relation = JSON.stringify(previous.entry) === JSON.stringify(entry) ? 'duplicate' : 'overlapping or contradictory';
+      invalidSelection(`sync manifest entries ${previous.index} and ${index} are ${relation} requests for scope '${scopeId}'`);
     }
-    const relation = JSON.stringify(previous.entry) === JSON.stringify(entry) ? 'duplicate' : 'overlapping or contradictory';
-    invalidSelection(`sync manifest entries ${previous.index} and ${index} are ${relation} requests for scope '${scopeId}'`);
+    if (entry.operation !== 'sync') continue;
+
+    const profile = targetProfileForKind(entry.target.kind, `sync manifest entry ${index} target`);
+    const identityKey = JSON.stringify([entry.target.kind, entry.target.instance]);
+    const context = invokeTargetProfile(() => profile.canonicalContext(entry.target));
+    const contextBytes = canonicalTargetContextBytes(context);
+    const priorContext = contexts.get(identityKey);
+    if (priorContext !== undefined && priorContext.bytes !== contextBytes) {
+      invalidSelection(`sync manifest entries ${priorContext.index} and ${index} bind contradictory contexts to target '${entry.target.kind}/${entry.target.instance}'`);
+    }
+    if (priorContext === undefined) contexts.set(identityKey, { bytes: contextBytes, index });
+
+    const physicalKey = invokeTargetProfile(() => profile.physicalKey(entry.target));
+    const priorPhysicalTargets = physicalTargets.get(profile.kind) ?? [];
+    for (const prior of priorPhysicalTargets) {
+      if (prior.target.instance === entry.target.instance) continue;
+      const overlaps = invokeTargetProfile(() => profile.overlaps(prior.target, entry.target));
+      if (prior.physicalKey === physicalKey || overlaps) {
+        invalidSelection(`sync manifest entries ${prior.index} and ${index} assign overlapping physical target '${profile.kind}' to instances '${prior.target.instance}' and '${entry.target.instance}'`);
+      }
+    }
+    priorPhysicalTargets.push({ target: entry.target, physicalKey, index });
+    physicalTargets.set(profile.kind, priorPhysicalTargets);
   }
 }
 
@@ -204,22 +204,8 @@ function parseSourceBinding(value: unknown, label: string): SourceBinding {
 }
 
 function parseTarget(value: unknown, label: string): SyncManifestTarget {
-  const target = object(value, label);
-  if (target['kind'] === 'hermes') {
-    exactFields(target, ['kind', 'instance', 'context'], label);
-    stableString(target['instance'], `${label} instance`);
-    const context = object(target['context'], `${label} context`);
-    exactFields(context, ['root', 'configPath'], `${label} context`);
-    const root = canonicalAbsolutePath(context['root'], `${label} context root`);
-    const configPath = canonicalAbsolutePath(context['configPath'], `${label} context configPath`);
-    return { kind: 'hermes', instance: target['instance'] as string, context: { root, configPath } };
-  }
-  if (typeof target['kind'] !== 'string' || !(SINGLE_INSTANCE_TARGET_KINDS as readonly string[]).includes(target['kind'])) {
-    invalidSelection(`${label} kind is not a supported lifecycle target`);
-  }
-  exactFields(target, ['kind', 'instance'], label);
-  if (target['instance'] !== 'default') invalidSelection(`${label} ${target['kind']} instance must be 'default'`);
-  return { kind: target['kind'] as SingleInstanceManifestTarget['kind'], instance: 'default' };
+  const profile = targetProfile(value, label);
+  return invokeTargetProfile(() => profile.parseSyncTarget(value, label));
 }
 
 function parseSelector(value: unknown, entryIndex: number, selectorIndex: number): SyncManifestPackageSelector {
@@ -243,18 +229,28 @@ function validateBinding(source: SourceBinding, label: string): void {
   }
 }
 
-function canonicalAbsolutePath(value: unknown, label: string): string {
-  stableString(value, label);
-  if (!isAbsolute(value as string) || resolve(value as string) !== value) invalidArgument(`${label} must be a canonical absolute path`);
-  return value as string;
+function targetProfile(value: unknown, label: string): TargetProfile {
+  const target = object(value, label);
+  if (typeof target['kind'] !== 'string') invalidArgument(`${label} kind must be a string`);
+  return targetProfileForKind(target['kind'], label);
 }
 
-function stableString(value: unknown, label: string): asserts value is string {
-  if (typeof value !== 'string') invalidArgument(`${label} must be a string`);
+function targetProfileForKind(kind: string, label: string): TargetProfile {
+  const profile = targetProfiles.find(candidate => candidate.kind === kind);
+  if (profile === undefined) invalidSelection(`${label} kind is not a supported lifecycle target`);
+  return profile;
+}
+
+function invokeTargetProfile<T>(operation: () => T): T {
   try {
-    validateStableIdentityString(value, label);
+    return operation();
   } catch (error) {
-    invalidArgument(error instanceof Error ? error.message : String(error));
+    if (error instanceof TargetProfileValidationError) {
+      if (error.kind === 'invalid-selection') invalidSelection(error.message);
+      invalidArgument(error.message);
+    }
+    if (error instanceof TargetIdentityValidationError) invalidArgument(error.message);
+    throw error;
   }
 }
 

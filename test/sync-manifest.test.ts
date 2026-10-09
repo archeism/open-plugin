@@ -198,6 +198,34 @@ describe('sync manifest public parser', () => {
       {
         value: {
           schemaVersion: 1,
+          entries: [{
+            ...baseEntry,
+            target: {
+              kind: 'hermes',
+              instance: 'work',
+              context: { root: '/profiles/work-\uD800', configPath: '/profiles/work/config.yaml' },
+            },
+          }],
+        },
+        code: 'usage.invalid-argument',
+      },
+      {
+        value: {
+          schemaVersion: 1,
+          entries: [{
+            ...baseEntry,
+            target: {
+              kind: 'hermes',
+              instance: 'work',
+              context: { root: '/profiles/work?token=synthetic', configPath: '/profiles/work/config.yaml' },
+            },
+          }],
+        },
+        code: 'usage.invalid-argument',
+      },
+      {
+        value: {
+          schemaVersion: 1,
           entries: [{ operation: 'retire-source', scopeId: retiredScope, target: { kind: 'dcode', instance: 'default' }, source: baseEntry.source }],
         },
         code: 'usage.invalid-argument',
@@ -248,6 +276,66 @@ describe('sync manifest public parser', () => {
     });
     expect(firstScope.id).toBe(secondScope.id);
     expect(firstScope.id).toMatch(/^scope-v1-[0-9a-f]{64}$/);
+  });
+
+  test('binds one canonical context to each target instance across Sources', () => {
+    const entry = (source: string, instance: string, root: string, reverseContext = false) => ({
+      operation: 'sync',
+      source: { kind: 'local', locator: source },
+      target: {
+        kind: 'hermes',
+        instance,
+        context: reverseContext
+          ? { configPath: `${root}/config.yaml`, root }
+          : { root, configPath: `${root}/config.yaml` },
+      },
+    });
+
+    const sameContext = parseSyncManifest({
+      schemaVersion: 1,
+      entries: [
+        entry('/sources/one', 'work', '/profiles/work/.hermes'),
+        entry('/sources/two', 'work', '/profiles/work/.hermes', true),
+      ],
+    });
+    expect(sameContext.entries.map(item => item.operation === 'sync' ? item.source.locator : '')).toEqual([
+      '/sources/one',
+      '/sources/two',
+    ]);
+    expect(validationCode(() => parseSyncManifest({
+      schemaVersion: 1,
+      entries: [
+        entry('/sources/one', 'work', '/profiles/one/.hermes'),
+        entry('/sources/two', 'work', '/profiles/two/.hermes'),
+      ],
+    }))).toBe('usage.invalid-selection');
+  });
+
+  test('rejects two instance identities that overlap one adapter-owned physical target', () => {
+    const entry = (source: string, instance: string, root: string) => ({
+      operation: 'sync',
+      source: { kind: 'local', locator: source },
+      target: {
+        kind: 'hermes',
+        instance,
+        context: { root, configPath: `${root}/config.yaml` },
+      },
+    });
+
+    expect(validationCode(() => parseSyncManifest({
+      schemaVersion: 1,
+      entries: [
+        entry('/sources/one', 'work', '/profiles/shared/.hermes'),
+        entry('/sources/two', 'personal', '/profiles/shared/.hermes'),
+      ],
+    }))).toBe('usage.invalid-selection');
+    expect(parseSyncManifest({
+      schemaVersion: 1,
+      entries: [
+        entry('/sources/one', 'work', '/profiles/work/.hermes'),
+        entry('/sources/two', 'personal', '/profiles/personal/.hermes'),
+      ],
+    }).entries).toHaveLength(2);
   });
 });
 

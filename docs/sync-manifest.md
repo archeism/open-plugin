@@ -49,11 +49,13 @@ For `sync`, omitted `selectors` means every package in the frozen Source snapsho
 
 `retire-source` is the only empty-Desired representation. It carries a recorded `scope-v1` identifier plus target kind and instance. It cannot carry a Source, selectors, adoption, or adapter context. Execution must load the bounded context already recorded for that scope, so a retirement request cannot retarget it.
 
-Current target context is deliberately closed:
+Current target context is deliberately closed and uses the same credential-free, stable scalar validator as lifecycle state v2:
 
 | Target | Instance | Sync context |
 | --- | --- | --- |
 | `claude-code`, `codex`, `kimi`, `cursor`, `omp`, `dcode`, `grok`, `zcode-cli` | exactly `default` | none |
 | `hermes` | any nonempty stable identity | canonical absolute `root` and `configPath` |
 
-Adapter context is not part of the canonical Deployment-scope identifier, which remains Source binding × target kind × target instance. Repeating that identifier anywhere in one manifest—including `sync` plus `retire-source`, or two entries with different selectors/context—is a usage/selection failure before Source or host work.
+Adapter context is not part of the canonical Deployment-scope identifier, which remains Source binding × target kind × target instance. Repeating that scope identifier anywhere in one manifest—including `sync` plus `retire-source`, or two entries with different selectors—is a usage/selection failure before Source or host work.
+
+Across different Sources, every repeated target kind/instance must carry byte-equivalent canonical context. A target instance cannot drift between adapter contexts. Each adapter also owns its physical-overlap rule: Hermes uses the exact canonical `root`/`configPath` pair, so two different Hermes instance IDs cannot name that same physical target. These consistency checks do not fold context into the Deployment-scope ID.

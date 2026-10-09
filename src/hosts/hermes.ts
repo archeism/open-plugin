@@ -7,17 +7,76 @@
  * `plugins.disabled`.
  */
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { hermesRoot } from '../paths';
 import { collectPluginServers } from '../mcp';
 import { hermesCommandCompanionId } from '../hermes-identity';
+import { parsePersistedTargetIdentity, type PersistedTargetIdentity } from '../target-identity';
+import {
+  canonicalProfileContext,
+  invalidTargetArgument,
+  invalidTargetSelection,
+  type TargetProfile,
+} from '../target-profile';
 
 declare const Bun: { YAML: { parse(input: string): unknown } };
+
+export const hermesTargetProfile: TargetProfile<'hermes'> = {
+  kind: 'hermes',
+  parseSyncTarget(value, label) {
+    const target = parseHermesIdentity(value, label);
+    if (target.context === undefined) invalidTargetArgument(`${label} hermes requires target context`);
+    const unknown = Object.keys(target.context).find(key => key !== 'root' && key !== 'configPath');
+    if (unknown !== undefined) invalidTargetArgument(`${label} hermes context has unsupported field '${unknown}'`);
+    const root = canonicalAbsolutePath(target.context['root'], `${label} context root`);
+    const configPath = canonicalAbsolutePath(target.context['configPath'], `${label} context configPath`);
+    return { kind: 'hermes', instance: target.instance, context: { configPath, root } };
+  },
+  parseRetirementTarget(value, label) {
+    const target = parseHermesIdentity(value, label);
+    if (target.context !== undefined) invalidTargetArgument(`${label} hermes retirement target must not contain context`);
+    return { kind: 'hermes', instance: target.instance };
+  },
+  canonicalContext: canonicalProfileContext,
+  physicalKey(target) {
+    return hermesPhysicalKey(target);
+  },
+  overlaps(left, right) {
+    return hermesPhysicalKey(left) === hermesPhysicalKey(right);
+  },
+};
 
 export function hermesPluginsDir(): string { return join(hermesRoot(), 'plugins'); }
 
 type Manifest = { name: string; version?: string };
+
+function parseHermesIdentity(value: unknown, label: string): PersistedTargetIdentity {
+  const target = parsePersistedTargetIdentity(value, label);
+  if (target.kind !== 'hermes') invalidTargetSelection(`${label} kind must be 'hermes'`);
+  return target;
+}
+
+function canonicalAbsolutePath(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value) {
+    invalidTargetArgument(`${label} must be a canonical absolute path`);
+  }
+  return value;
+}
+
+function hermesContext(target: PersistedTargetIdentity): { root: string; configPath: string } {
+  const root = target.context?.['root'];
+  const configPath = target.context?.['configPath'];
+  if (typeof root !== 'string' || typeof configPath !== 'string') {
+    invalidTargetArgument('canonical hermes target is missing root/configPath context');
+  }
+  return { root, configPath };
+}
+
+function hermesPhysicalKey(target: PersistedTargetIdentity): string {
+  const context = hermesContext(target);
+  return JSON.stringify([context.root, context.configPath]);
+}
 
 function ownedId(dir: string, fallback: string): string {
   const file = join(dir, '.plgnz-install.json');

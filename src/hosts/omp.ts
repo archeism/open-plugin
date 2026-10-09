@@ -28,6 +28,9 @@ import { existsSync, lstatSync, readdirSync, readlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { ompRoot } from '../paths';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const ompTargetProfile = singleInstanceTargetProfile('omp');
 import { collectPluginServers, readJson, type PluginMcpCandidate } from '../mcp';
 
 export function pluginsDir(): string {

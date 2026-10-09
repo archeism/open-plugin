@@ -26,6 +26,9 @@ import { parse as parseToml } from 'smol-toml';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { codexHome } from '../paths';
 import { collectPluginServers, type PluginMcpCandidate, type RawServerDef } from '../mcp';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const codexTargetProfile = singleInstanceTargetProfile('codex');
 
 export function configFile(): string {
   return join(codexHome(), 'config.toml');
