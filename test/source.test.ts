@@ -104,8 +104,29 @@ describe('resolveSource', () => {
       .toBe('http://example.invalid/owner/repo.git#main');
     expect(normalizeSource('https://alice:secret@example.invalid:8443/owner/repo.git#main'))
       .toBe('https://example.invalid:8443/owner/repo.git#main');
+    expect(normalizeSource('https://alice:sec%40ret@example.invalid/owner/repo.git#main'))
+      .toBe('https://example.invalid/owner/repo.git#main');
     expect(normalizeSource('ssh://alice@example.invalid/owner/repo.git#main'))
       .toBe('ssh://alice@example.invalid/owner/repo.git#main');
+  });
+
+  test('rejects unsafe raw HTTP(S) text before removing userinfo', () => {
+    for (const source of [
+      'https://user:synthetic@example.invalid\\@evil.invalid/owner/repo.git#main',
+      'https://user:synthetic\u0001@example.invalid/owner/repo.git#main',
+      'https://user:synthetic\u0085@example.invalid/owner/repo.git#main',
+      'https://user:synthetic\uD800@example.invalid/owner/repo.git#main',
+      'https:// user:synthetic@example.invalid/owner/repo.git#main',
+      'https://user:synthetic @example.invalid/owner/repo.git#main',
+      'https://us er:synthetic@example.invalid/owner/repo.git#main',
+      'https://user :synthetic@example.invalid/owner/repo.git#main',
+      'https://user:synt hetic@example.invalid/owner/repo.git#main',
+      'https://user: synthetic@example.invalid/owner/repo.git#main',
+      'https://\u00A0user:synthetic@example.invalid/owner/repo.git#main',
+      'https://user:synthetic\uFEFF@example.invalid/owner/repo.git#main',
+      'https://a@b@127.0.0.1:9/owner/repo.git#main',
+      'https://user:pa@ss@127.0.0.1:9/owner/repo.git#main',
+    ]) expectThrow(() => normalizeSource(source), 'Source locator');
   });
 
   test('rejects transport syntax that Git sends to a different remote identity', () => {

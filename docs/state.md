@@ -66,8 +66,9 @@ and Git protocol locators contain no userinfo; SSH may retain a username
 because it identifies the transport account, but never a password. SCP-style
 locators are control- and whitespace-free, use the literal `git` username, and
 keep query/fragment-like suffixes out of the locator because the ref is a
-separate field. Public Source parsing may remove HTTP(S) userinfo into the
-ephemeral fetch locator; it preserves every other transport byte for canonical
+separate field. Public Source parsing first rejects unstable text and
+backslashes in raw HTTP(S) locators, then may remove userinfo into the ephemeral
+fetch locator; it preserves every other transport byte for canonical
 validation, and rejects queries for every transport rather than erasing them.
 Git refs use the same canonical grammar at public Source parsing and
 durable-state boundaries; `HEAD` is the explicit sentinel, components obey

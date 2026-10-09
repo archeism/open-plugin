@@ -809,6 +809,20 @@ describe('state v2 public reader and writer', () => {
     expect(existsSync(file)).toBe(false);
   });
 
+  test('cannot derive or persist a Source binding from raw HTTP authority smuggling', () => {
+    const rawLocator = 'https://user:synthetic@example.invalid\\@evil.invalid/owner/repo.git';
+    expectThrow(() => normalizeSource(rawLocator + '#main'), 'Source locator');
+
+    const { file } = tempStateFile();
+    const value = stateFixture();
+    value.scopes[0]!.source = { kind: 'git', locator: rawLocator, ref: 'main' };
+    expectThrow(
+      () => writeLifecycleState(value, { globalPreflight: 'succeeded' }, file),
+      'credential-free canonical git locator',
+    );
+    expect(existsSync(file)).toBe(false);
+  });
+
   test('never persists an unpaired UTF-16 surrogate in any scope identity field', () => {
     const replacement = '\uFFFD';
     const remote: SourceBinding = { kind: 'git', locator: 'git@example.invalid:owner/repo.git', ref: 'main' };

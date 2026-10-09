@@ -121,6 +121,7 @@ describe('state ledger failures', () => {
       'ssh://alice:secret@example.invalid/owner/repo.git#main',
       'git://alice@example.invalid:9418/owner/repo.git#main',
       'git://alice:secret@example.invalid:9418/owner/repo.git#main',
+      'https://user:synthetic@example.invalid\\@evil.invalid/owner/repo.git#main',
     ]) {
       const root = mkdtempSync(join(tmpdir(), 'plgnz-state-transport-'));
       const file = join(root, 'state.json');

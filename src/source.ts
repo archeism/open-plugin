@@ -4,7 +4,7 @@ import { join, basename, isAbsolute, relative, resolve } from 'node:path';
 import { cacheRoot } from './paths';
 import { isGitUrl } from './exec';
 import { fingerprintTree } from './fingerprint';
-import { validateGitRef, validateSourceBinding, type SourceBinding, type SourceSnapshotReference } from './source-reference';
+import { validateGitRef, validateSourceBinding, validateStableIdentityString, type SourceBinding, type SourceSnapshotReference } from './source-reference';
 
 export type { SourceBinding, SourceSnapshotReference } from './source-reference';
 
@@ -241,11 +241,18 @@ function formatSourceBinding(binding: SourceBinding): string {
 }
 
 function credentialFreeHttpLocator(locator: string): string {
+  if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
+  validateStableIdentityString(locator, 'Raw HTTP(S) Source locator');
+  if (locator.includes('\\')) throw new Error('Raw HTTP(S) Source locator must not contain backslashes');
   const match = /^(https?:\/\/)([^/?#]*)([\s\S]*)$/u.exec(locator);
   if (match === null) return locator;
   const authority = match[2]!;
   const at = authority.lastIndexOf('@');
   if (at === -1) return locator;
+  if (authority.indexOf('@') !== at) throw new Error('Raw HTTP(S) Source locator must not contain multiple literal @ characters');
+  const userinfo = authority.slice(0, at);
+  validateStableIdentityString(userinfo, 'Raw HTTP(S) Source locator userinfo');
+  if (userinfo.includes(' ')) throw new Error('Raw HTTP(S) Source locator userinfo must not contain spaces');
   return `${match[1]!}${authority.slice(at + 1)}${match[3]!}`;
 }
 
