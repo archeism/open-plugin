@@ -25,6 +25,12 @@ jobs:
           node-version: '24'
           package-manager-cache: false
           registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+      - name: Install and build the runtime-agnostic bundle
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          node dist/plugnz.mjs --version --json
       - name: Verify release
         env:
           RELEASE_VERSION: ${{ inputs.version }}
