@@ -10,8 +10,138 @@ import {
 } from './lifecycle-cli-harness';
 import { initGitRepo } from './util';
 import { parseLifecycleReport } from '../src/lifecycle-report';
+import { createDeploymentScopeIdentity } from '../src/deployment-scope';
+import type { LifecycleStateV2 } from '../src/state';
+
+const lifecycleTime = '2026-10-09T00:00:00.000Z';
+
+function scopedV2State(entries: ReadonlyArray<{ source: string; instance: string }>): LifecycleStateV2 {
+  const rows = entries.map(({ source: locator, instance }) => {
+    const source = { kind: 'local', locator } as const;
+    const identity = createDeploymentScopeIdentity(source, { kind: 'cursor', instance });
+    return {
+      scope: {
+        ...identity,
+        authority: 'authoritative' as const,
+        lifecycle: 'active' as const,
+        selectorMode: 'explicit' as const,
+        desired: {
+          generation: 1,
+          revision: 'revision-1',
+          sourceFingerprint: 'source-fingerprint',
+          packages: [{
+            packageId: 'demo',
+            nativeId: 'demo',
+            sourceRelativeDir: 'demo',
+            requiredCapabilities: [],
+            adoptionRequested: false,
+          }],
+          validatedAt: lifecycleTime,
+        },
+      },
+      activation: {
+        scopeId: identity.id,
+        packageId: 'demo',
+        nativeId: 'demo',
+        sourceRevision: 'revision-1',
+        route: { kind: 'managed' as const, evidenceKey: { kind: 'capability-profile' as const, key: `sha256:${'a'.repeat(64)}` } },
+        ownership: { kind: 'created' as const, proofKey: { kind: 'managed-marker' as const, key: `sha256:${'b'.repeat(64)}` }, verifiedAt: lifecycleTime },
+        fingerprints: { source: 'source', projected: 'projected', installed: 'installed' },
+        activationState: 'active' as const,
+        readbackState: 'verified' as const,
+        pins: [],
+      },
+    };
+  });
+  return {
+    version: 2,
+    stateGeneration: 1,
+    scopes: rows.map(({ scope }) => scope),
+    activations: rows.map(({ activation }) => activation),
+    attempts: [],
+    tombstones: [],
+  };
+}
 
 describe('isolated lifecycle CLI harness', () => {
+  test('legacy update and remove reject an ambiguous v2 target instance before adapter work', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const first = harness.source('ambiguous-first', { 'plugin.json': '{"name":"demo","version":"1.0.0"}\n' });
+      const second = harness.source('ambiguous-second', { 'plugin.json': '{"name":"demo","version":"1.0.0"}\n' });
+      const state = JSON.stringify(scopedV2State([
+        { source: first, instance: 'default' },
+        { source: second, instance: 'default' },
+      ]));
+      harness.writeHome({ 'state.json': state });
+
+      for (const args of [
+        ['update', 'demo', '--target', 'cursor', '--dry-run', '--json'],
+        ['remove', 'demo', '--target', 'cursor', '--dry-run', '--json'],
+      ]) {
+        const result = harness.run(args);
+        const report = parseLifecycleReport(JSON.parse(result.stdout));
+        expect({
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          plan: report.plan,
+          outcomes: report.outcomes,
+          reason: report.summary.reason,
+          phase: report.summary.terminalPhase,
+          mutationStarted: report.summary.mutationStarted,
+          stateUnchanged: bytesToText(result.state.before!) === bytesToText(result.state.after!),
+        }).toEqual({
+          exitCode: 1,
+          stderr: '',
+          plan: [],
+          outcomes: [],
+          reason: {
+            category: 'internal',
+            code: 'internal.ambiguous-ownership',
+            diagnostic: "multiple cursor/default deployment scopes own native package 'demo'",
+            capabilityId: null,
+            evidenceId: null,
+          },
+          phase: 'preflight',
+          mutationStarted: false,
+          stateUnchanged: true,
+        });
+      }
+    });
+  });
+
+  test('legacy update and remove carry the exact default v2 instance instead of the first same-kind scope', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const work = harness.source('instance-work', { 'plugin.json': '{"name":"demo","version":"1.0.0"}\n' });
+      const defaultSource = harness.source('instance-default', { 'plugin.json': '{"name":"demo","version":"1.0.0"}\n' });
+      harness.writeHome({
+        'state.json': JSON.stringify(scopedV2State([
+          { source: work, instance: 'work' },
+          { source: defaultSource, instance: 'default' },
+        ])),
+      });
+
+      for (const command of ['update', 'remove'] as const) {
+        const result = harness.run([command, 'demo', '--target', 'cursor', '--dry-run', '--json']);
+        const report = parseLifecycleReport(JSON.parse(result.stdout));
+        expect({
+          exitCode: result.exitCode,
+          planLength: report.plan.length,
+          planInstance: report.plan[0]?.scope.target.instance,
+          planSource: report.plan[0]?.scope.source,
+          outcomeInstance: report.outcomes[0]?.scope.target.instance,
+        }).toEqual({
+          exitCode: 0,
+          planLength: 1,
+          planInstance: 'default',
+          planSource: { kind: 'local', locator: defaultSource },
+          outcomeInstance: 'default',
+        });
+      }
+    });
+  });
+
   test('runs the real CLI across host stores without touching the ambient home', async () => {
     let fixtureRoot = '';
 
@@ -42,8 +172,9 @@ describe('isolated lifecycle CLI harness', () => {
         operationIds: report.plan.map(({ operationId }) => operationId),
         operationIdsMatchOutcomes: report.plan.map(({ operationId }) => operationId).join('\n') === report.outcomes.map(({ operationId }) => operationId).join('\n'),
         sourceSnapshots: report.command.sourceSnapshots.map(({ id, reference }) => ({ id, binding: reference.binding, fingerprintIsSha256: /^[a-f0-9]{64}$/u.test(reference.fingerprint) })),
-        outcomes: report.outcomes.map(({ package: packageName, scope, result, resourceState, activationState, route, changed }) => ({
+        outcomes: report.outcomes.map(({ package: packageName, nativeId, scope, result, resourceState, activationState, route, changed }) => ({
           package: packageName,
+          nativeId,
           target: scope.target,
           scopeId: scope.id,
           scopeIdIsStableHash: /^scope-v1-[a-f0-9]{64}$/u.test(scope.id),
@@ -69,8 +200,8 @@ describe('isolated lifecycle CLI harness', () => {
         operationIdsMatchOutcomes: true,
         sourceSnapshots: [{ id: 'source-0', binding: { kind: 'local', locator: source }, fingerprintIsSha256: true }],
         outcomes: [
-          { package: 'demo', target: { kind: 'claude-code', instance: 'default' }, scopeId: report.outcomes[0]!.scope.id, scopeIdIsStableHash: true, result: 'succeeded', resourceState: 'present', activationState: 'active-conforming', route: 'managed', changed: true },
-          { package: 'demo', target: { kind: 'cursor', instance: 'default' }, scopeId: report.outcomes[1]!.scope.id, scopeIdIsStableHash: true, result: 'succeeded', resourceState: 'present', activationState: 'active-conforming', route: 'managed', changed: true },
+          { package: 'demo', nativeId: 'demo@local', target: { kind: 'claude-code', instance: 'default' }, scopeId: report.outcomes[0]!.scope.id, scopeIdIsStableHash: true, result: 'succeeded', resourceState: 'present', activationState: 'active-conforming', route: 'managed', changed: true },
+          { package: 'demo', nativeId: 'demo', target: { kind: 'cursor', instance: 'default' }, scopeId: report.outcomes[1]!.scope.id, scopeIdIsStableHash: true, result: 'succeeded', resourceState: 'present', activationState: 'active-conforming', route: 'managed', changed: true },
         ],
         summary: {
           result: 'converged',
@@ -202,7 +333,7 @@ describe('isolated lifecycle CLI harness', () => {
     });
   });
 
-  test('an add that cannot persist intent remains not attempted', async () => {
+  test('an add that cannot persist intent fails without mutating its frozen managed route', async () => {
     await withLifecycleCliHarness(async (harness) => {
       harness.writeHome({
         '.cursor/.keep': '',
@@ -242,8 +373,8 @@ describe('isolated lifecycle CLI harness', () => {
         stderr: '',
         outcome: [{
           action: 'install',
-          result: 'not-attempted',
-          route: 'none',
+          result: 'failed',
+          route: 'managed',
           resourceState: 'unknown',
           activationState: 'unknown',
           changed: false,
@@ -312,7 +443,7 @@ describe('isolated lifecycle CLI harness', () => {
     });
   });
 
-  test('reports a non-finalized update as not attempted instead of converged unchanged', async () => {
+  test('reports a non-finalized update as failed instead of converged unchanged', async () => {
     await withLifecycleCliHarness(async (harness) => {
       const source = harness.source('update-warning-source', {
         'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
@@ -359,8 +490,8 @@ describe('isolated lifecycle CLI harness', () => {
         stderr: '',
         outcome: [{
           action: 'update',
-          result: 'not-attempted',
-          route: 'none',
+            result: 'failed',
+          route: 'managed',
           resourceState: 'unknown',
           activationState: 'unknown',
           changed: false,
@@ -398,7 +529,7 @@ describe('isolated lifecycle CLI harness', () => {
     });
   });
 
-  test('an update that cannot persist intent remains not attempted', async () => {
+  test('an update that cannot persist intent fails without mutating its frozen managed route', async () => {
     await withLifecycleCliHarness(async (harness) => {
       const source = harness.source('update-intent-source', {
         'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
@@ -447,8 +578,8 @@ describe('isolated lifecycle CLI harness', () => {
         stderr: '',
         outcome: [{
           action: 'update',
-          result: 'not-attempted',
-          route: 'none',
+          result: 'failed',
+          route: 'managed',
           resourceState: 'unknown',
           activationState: 'unknown',
           changed: false,
@@ -515,7 +646,7 @@ describe('isolated lifecycle CLI harness', () => {
         exitCode: 0,
         stderr: '',
         outcome: [{
-          action: 'unchanged',
+          action: 'update',
           result: 'succeeded',
           route: 'managed',
           resourceState: 'present',
@@ -765,7 +896,7 @@ exec "$real_git" "\${args[@]}"
     });
   });
 
-  test('a remove that cannot persist intent remains not attempted', async () => {
+  test('a remove that cannot persist intent fails without mutating its frozen managed route', async () => {
     await withLifecycleCliHarness(async (harness) => {
       const source = harness.source('remove-intent-source', {
         'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
@@ -813,8 +944,8 @@ exec "$real_git" "\${args[@]}"
         stderr: '',
         outcome: [{
           action: 'retire-orphan',
-          result: 'not-attempted',
-          route: 'none',
+          result: 'failed',
+          route: 'managed',
           resourceState: 'unknown',
           activationState: 'unknown',
           changed: false,

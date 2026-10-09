@@ -104,6 +104,8 @@ import type { PluginSource, ResolvedSource } from './source';
 export interface HostWriter extends HostReader {
   /** Whether this writer implements explicit legacy adoption. */
   readonly supportsAdoption?: boolean;
+  /** Host-native identity known before apply, when it differs from the portable package identity. */
+  readonly plannedNativeId?: (plugin: PluginSource) => string;
   add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'>;
   remove(id: string): Promise<void>;
   /**

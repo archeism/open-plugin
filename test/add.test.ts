@@ -17,7 +17,7 @@ import { writers } from '../src/hosts/writers';
 import type { HostWriter } from '../src/host';
 import { CompatibilityError } from '../src/compatibility';
 import { kimiNativeEnv, withKimiNative } from './kimi-fixture';
-import { parseLifecycleReport } from '../src/lifecycle-report';
+import { LifecycleReportValidationError, parseLifecycleReport } from '../src/lifecycle-report';
 
 const pluginsMap = {
   'plugin.json': JSON.stringify({ name: "new-plugin", mcpServers: { demo: { command: "demo" } } }, null, 2),
@@ -424,7 +424,7 @@ describe('add', () => {
         expect(await main(['add', sourceDir, '--target', 'claude-code', '--adopt-existing', '--dry-run', '--legacy-json'])).toBe(0);
       } finally { console.log = originalLog; }
       const outcomes = JSON.parse(output.join('')) as Array<{ plugin: string; target: string; status: string; dryRun: boolean }>;
-      expect(outcomes).toEqual([{ plugin: 'new-plugin', target: 'claude-code', status: 'installed', action: 'install', dryRun: true, nativeId: 'new-plugin' }]);
+      expect(outcomes).toEqual([{ plugin: 'new-plugin', target: 'claude-code', status: 'installed', action: 'install', dryRun: true, nativeId: 'new-plugin@local' }]);
       expect(readState()).toEqual([]);
     });
   });
@@ -541,7 +541,7 @@ describe('add', () => {
     });
   });
 
-  test('preserves a writer compatibility refusal in the add outcome', async () => {
+  test('reclassifies a post-intent writer refusal and stops later adds', async () => {
     for (const scenario of [
       { evidence: 'test evidence', expectedEvidenceId: 'test evidence' },
       { evidence: '', expectedEvidenceId: null },
@@ -555,32 +555,71 @@ describe('add', () => {
           add: async () => { throw new CompatibilityError('codex', 'install', 'unsupported', scenario.evidence); },
           remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
         };
+        let laterAddCalls = 0;
+        const later: HostWriter = {
+          id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+          add: async () => { laterAddCalls += 1; },
+          remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
+        };
         const output: string[] = [];
         const originalLog = console.log;
-        writers.splice(0, writers.length, refusing);
+        writers.splice(0, writers.length, refusing, later);
         console.log = (value: string) => output.push(value);
         try {
-          expect(await main(['add', sourceDir, '--target', 'codex', '--json'])).toBe(1);
+          expect(await main(['add', sourceDir, '--target', 'codex', '--target', 'cursor', '--json'])).toBe(1);
         } finally {
           writers.splice(0, writers.length, ...originalWriters);
           console.log = originalLog;
         }
         const report = parseLifecycleReport(JSON.parse(output.join('')));
-        expect(report.outcomes[0]?.reason).toEqual({
-          category: 'capability',
-          code: 'capability.unsupported',
-          diagnostic: `target 'codex' is unsupported for install; evidence: ${scenario.evidence}`,
-          capabilityId: 'install',
-          evidenceId: scenario.expectedEvidenceId,
-        });
         expect({
-          terminalPhase: report.summary.terminalPhase,
-          mutationStarted: report.summary.mutationStarted,
-          reason: report.summary.reason,
+          laterAddCalls,
+          plan: report.plan.map(({ action, route }) => ({ action, route })),
+          outcomes: report.outcomes.map(({ result, action, route, resourceState, reason }) => ({ result, action, route, resourceState, reason })),
+          summary: report.summary,
+          pending: readState().map(({ host, pending }) => ({ host, pending })),
         }).toEqual({
-          terminalPhase: 'apply',
-          mutationStarted: true,
-          reason: report.outcomes[0]?.reason,
+          laterAddCalls: 0,
+          plan: [
+            { action: 'install', route: 'managed' },
+            { action: 'install', route: 'managed' },
+          ],
+          outcomes: [{
+            result: 'pending',
+            action: 'install',
+            route: 'managed',
+            resourceState: 'potentially-changed',
+            reason: {
+              category: 'recovery',
+              code: 'recovery.required',
+              diagnostic: `target 'codex' refused install after pending intent was persisted — target 'codex' is unsupported for install; evidence: ${scenario.evidence}`,
+              capabilityId: null,
+              evidenceId: null,
+            },
+          }, {
+            result: 'not-attempted',
+            action: 'install',
+            route: 'managed',
+            resourceState: 'unknown',
+            reason: {
+              category: 'runtime',
+              code: 'runtime.operation-failed',
+              diagnostic: 'not attempted after an earlier install failure',
+              capabilityId: null,
+              evidenceId: null,
+            },
+          }],
+          summary: {
+            result: 'incomplete',
+            terminalPhase: 'apply',
+            mutationStarted: true,
+            changed: false,
+            failureCategory: 'recovery',
+            reason: report.outcomes[0]!.reason,
+            recoveryId: report.plan[0]!.operationId,
+            readbackId: null,
+          },
+          pending: [{ host: 'codex', pending: 'install' }],
         });
       });
     }
@@ -646,7 +685,7 @@ describe('add', () => {
     }
   });
 
-  test('classifies a post-readback ledger failure as runtime finalization', async () => {
+  test('classifies a post-readback ledger failure as recovery-required finalization', async () => {
     await withHostEnvAsync('codex', async (home) => {
       const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-add-finalize-'));
       initGitRepo(sourceDir, pluginsMap);
@@ -688,10 +727,10 @@ describe('add', () => {
         mutationStarted: report.summary.mutationStarted,
       }).toEqual({
         code: 1,
-        result: 'failed',
+        result: 'pending',
         changed: true,
         resourceState: 'potentially-changed',
-        reasonCode: 'runtime.operation-failed',
+        reasonCode: 'recovery.required',
         terminalPhase: 'finalize',
         mutationStarted: true,
       });
@@ -729,19 +768,44 @@ describe('add', () => {
     });
   });
 
-  test('actual CLI reports every selected target after a later matrix failure', () => {
+  test('actual CLI keeps every selected pair in the frozen plan after a later matrix failure', () => {
     const { home, env } = materialize('codex');
     materializeInto(home, 'cursor');
     const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-invalid-codex-source-'));
     writeFileSync(join(sourceDir, 'plugin.json'), JSON.stringify({ name: 'new-plugin', version: 'unsafe/version' }));
-    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plgnz.mjs'), 'add', sourceDir, '--target', 'codex', '--target', 'cursor', '--legacy-json'], {
+    const result = spawnSync('bun', [join(repoRoot, 'bin', 'plgnz.mjs'), 'add', sourceDir, '--target', 'codex', '--target', 'cursor', '--json'], {
       cwd: repoRoot, env: { ...process.env, ...env }, encoding: 'utf8',
     });
     expect(result.status).toBe(1);
-    const outcomes = JSON.parse(result.stdout) as Array<{ plugin: string; target: string; status: string; diagnostic?: string }>;
-    expect(outcomes).toHaveLength(2);
-    expect(outcomes.find((outcome) => outcome.target === 'codex')?.diagnostic).toContain('unsafe Codex plugin version');
-    expect(outcomes.find((outcome) => outcome.target === 'cursor')?.diagnostic).toContain('not attempted');
+    const report = parseLifecycleReport(JSON.parse(result.stdout));
+    expect(report.plan.map(({ action, route }) => ({ action, route }))).toEqual([
+      { action: 'install', route: 'managed' },
+      { action: 'install', route: 'managed' },
+    ]);
+    expect(report.outcomes.map(({ operationId, result, action, route, reason }) => ({ operationId, result, action, route, diagnostic: reason?.diagnostic }))).toEqual([
+      {
+        operationId: report.plan[0]!.operationId,
+        result: 'pending',
+        action: 'install',
+        route: 'managed',
+        diagnostic: report.outcomes[0]!.reason?.diagnostic,
+      },
+      {
+        operationId: report.plan[1]!.operationId,
+        result: 'not-attempted',
+        action: 'install',
+        route: 'managed',
+        diagnostic: 'not attempted after an earlier install failure',
+      },
+    ]);
+    expect(report.outcomes[0]!.reason?.diagnostic).toContain('unsafe Codex plugin version');
+
+    const missingOutcome = JSON.parse(JSON.stringify(report)) as typeof report;
+    missingOutcome.outcomes.pop();
+    let missingCode = 'accepted';
+    try { parseLifecycleReport(missingOutcome); }
+    catch (error) { missingCode = (error as LifecycleReportValidationError).reason.code; }
+    expect(missingCode).toBe('protocol.missing-outcome');
   });
 
   test('actual CLI ignores absent unverified adapters and fails cleanly when no writer target is detected', () => {

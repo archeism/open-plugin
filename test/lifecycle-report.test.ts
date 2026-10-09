@@ -87,7 +87,7 @@ describe('lifecycle report contract', () => {
       parsed: parseLifecycleReport(validReport()),
     }).toEqual({
       schemaVersion: 1,
-      actions: ['install', 'update', 'unchanged', 'route-migrate', 'disable-nonconforming', 'retain-prior', 'retire-orphan'],
+      actions: ['install', 'update', 'unchanged', 'route-migrate', 'disable-nonconforming', 'retain-prior', 'retire-orphan', 'not-attempted'],
       results: ['succeeded', 'failed', 'pending', 'not-attempted'],
       resourceStates: ['present', 'absent', 'retained', 'unknown', 'potentially-changed'],
       activationStates: ['active-conforming', 'active-nonconforming', 'inactive', 'retained-prior', 'unknown'],
@@ -259,6 +259,7 @@ describe('lifecycle report contract', () => {
       result: 'incomplete',
       failureCategory: 'readback',
       reason: null,
+      readbackId: 'op-1',
     };
 
     const convergedRetained = {
@@ -315,7 +316,7 @@ describe('lifecycle report contract', () => {
       operationId: 'op-2',
       scope: secondScope,
     });
-    multiPair.summary = { ...multiPair.summary, mutationStarted: true, changed: true };
+    multiPair.summary = { ...multiPair.summary, mutationStarted: true, changed: true, readbackId: 'op-2' };
     expect(serializeLegacyInstallOutcomes(parseLifecycleReport(multiPair))).toEqual([
       {
         plugin: 'addy',
@@ -375,6 +376,231 @@ describe('lifecycle report contract', () => {
         return (error as LifecycleReportValidationError).reason.code;
       }
     })).toEqual(['protocol.contradictory-outcome', 'protocol.contradictory-outcome']);
+  });
+
+  test('keeps preflight refusal actions distinct from later runtime-skipped results', () => {
+    const preflight = validReport();
+    const capabilityReason = {
+      category: 'capability',
+      code: 'capability.unsupported',
+      diagnostic: 'target cannot deliver the required package semantics',
+      capabilityId: 'install',
+      evidenceId: null,
+    } as const;
+    preflight.plan[0] = { ...preflight.plan[0]!, action: 'not-attempted', route: 'none' };
+    preflight.outcomes[0] = {
+      ...preflight.outcomes[0]!,
+      action: 'not-attempted',
+      route: 'none',
+      result: 'failed',
+      resourceState: 'unknown',
+      activationState: 'unknown',
+      changed: false,
+      reason: capabilityReason,
+    };
+    preflight.summary = {
+      ...preflight.summary,
+      result: 'incomplete',
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      changed: false,
+      failureCategory: 'capability',
+      reason: null,
+    };
+
+    const stopped = validReport();
+    const runtimeReason = {
+      category: 'runtime',
+      code: 'runtime.operation-failed',
+      diagnostic: 'not attempted after an earlier operation failed',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    stopped.plan[0] = { ...stopped.plan[0]!, action: 'update' };
+    stopped.outcomes[0] = {
+      ...stopped.outcomes[0]!,
+      action: 'update',
+      result: 'not-attempted',
+      resourceState: 'unknown',
+      activationState: 'unknown',
+      changed: false,
+      reason: runtimeReason,
+    };
+    stopped.summary = {
+      ...stopped.summary,
+      result: 'incomplete',
+      terminalPhase: 'apply',
+      mutationStarted: true,
+      changed: false,
+      failureCategory: 'runtime',
+      reason: runtimeReason,
+    };
+
+    expect(parseLifecycleReport(preflight)).toEqual(preflight);
+    expect(parseLifecycleReport(stopped)).toEqual(stopped);
+
+    const retirementPreflight: LifecycleReport = {
+      ...preflight,
+      command: { ...preflight.command, name: 'remove' },
+      plan: [{ ...preflight.plan[0]!, coverage: 'retirement' }],
+      outcomes: [{ ...preflight.outcomes[0]!, coverage: 'retirement' }],
+    };
+    expect(parseLifecycleReport(retirementPreflight)).toEqual(retirementPreflight);
+  });
+
+  test('rejects cross-field reports that lie about mutation, recovery, or readback', () => {
+    const runtimeReason = {
+      category: 'runtime',
+      code: 'runtime.operation-failed',
+      diagnostic: 'native operation failed',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    const recoveryReason = {
+      category: 'recovery',
+      code: 'recovery.required',
+      diagnostic: 'durable pending intent requires recovery',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    const readbackReason = {
+      category: 'readback',
+      code: 'readback.failed',
+      diagnostic: 'native readback failed',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+
+    const routeNoneSuccess = validReport();
+    routeNoneSuccess.plan[0] = { ...routeNoneSuccess.plan[0]!, route: 'none' };
+    routeNoneSuccess.outcomes[0] = { ...routeNoneSuccess.outcomes[0]!, route: 'none', changed: false };
+    routeNoneSuccess.summary = { ...routeNoneSuccess.summary, mutationStarted: false, changed: false };
+
+    const disableWithoutMutation = validReport();
+    disableWithoutMutation.plan[0] = { ...disableWithoutMutation.plan[0]!, action: 'disable-nonconforming' };
+    disableWithoutMutation.outcomes[0] = {
+      ...disableWithoutMutation.outcomes[0]!,
+      action: 'disable-nonconforming',
+      result: 'failed',
+      resourceState: 'retained',
+      activationState: 'inactive',
+      changed: false,
+      reason: runtimeReason,
+    };
+    disableWithoutMutation.summary = {
+      ...disableWithoutMutation.summary,
+      result: 'incomplete',
+      terminalPhase: 'apply',
+      mutationStarted: false,
+      changed: false,
+      failureCategory: 'runtime',
+      reason: null,
+    };
+
+    const pendingWithoutRecovery = validReport();
+    pendingWithoutRecovery.outcomes[0] = {
+      ...pendingWithoutRecovery.outcomes[0]!,
+      result: 'pending',
+      resourceState: 'potentially-changed',
+      activationState: 'unknown',
+      changed: false,
+      reason: recoveryReason,
+    };
+    pendingWithoutRecovery.summary = {
+      ...pendingWithoutRecovery.summary,
+      result: 'incomplete',
+      terminalPhase: 'apply',
+      changed: false,
+      failureCategory: 'recovery',
+      reason: recoveryReason,
+      recoveryId: null,
+    };
+    const pendingWithWrongRecovery: LifecycleReport = {
+      ...pendingWithoutRecovery,
+      summary: { ...pendingWithoutRecovery.summary, recoveryId: 'not-the-pending-operation' },
+    };
+    const pendingPreflightRefusal: LifecycleReport = {
+      ...pendingWithoutRecovery,
+      plan: [{ ...pendingWithoutRecovery.plan[0]!, action: 'not-attempted', route: 'none' }],
+      outcomes: [{
+        ...pendingWithoutRecovery.outcomes[0]!,
+        action: 'not-attempted',
+        route: 'none',
+        resourceState: 'unknown',
+      }],
+      summary: {
+        ...pendingWithoutRecovery.summary,
+        terminalPhase: 'preflight',
+        mutationStarted: false,
+        recoveryId: 'op-1',
+      },
+    };
+
+    const readbackWithoutIdentity = validReport();
+    readbackWithoutIdentity.outcomes[0] = {
+      ...readbackWithoutIdentity.outcomes[0]!,
+      result: 'failed',
+      resourceState: 'potentially-changed',
+      activationState: 'unknown',
+      changed: false,
+      reason: readbackReason,
+    };
+    readbackWithoutIdentity.summary = {
+      ...readbackWithoutIdentity.summary,
+      result: 'incomplete',
+      terminalPhase: 'readback',
+      changed: false,
+      failureCategory: 'readback',
+      reason: readbackReason,
+      readbackId: null,
+    };
+    const readbackWithWrongIdentity: LifecycleReport = {
+      ...readbackWithoutIdentity,
+      summary: { ...readbackWithoutIdentity.summary, readbackId: 'not-the-readback-operation' },
+    };
+    const ghostRecovery = validReport();
+    ghostRecovery.summary.recoveryId = 'op-1';
+    const ghostReadback = validReport();
+    ghostReadback.summary.readbackId = 'op-1';
+
+    const earlyMutationReports = (['parse', 'resolve', 'freeze', 'preflight'] as const).map((terminalPhase) => {
+      const report = validReport();
+      report.outcomes[0] = {
+        ...report.outcomes[0]!,
+        result: 'failed',
+        resourceState: 'potentially-changed',
+        activationState: 'unknown',
+        reason: runtimeReason,
+      };
+      report.summary = {
+        ...report.summary,
+        result: 'incomplete',
+        terminalPhase,
+        failureCategory: 'runtime',
+        reason: runtimeReason,
+      };
+      return report;
+    });
+
+    expect([
+      routeNoneSuccess,
+      disableWithoutMutation,
+      pendingWithoutRecovery,
+      pendingWithWrongRecovery,
+      pendingPreflightRefusal,
+      readbackWithoutIdentity,
+      readbackWithWrongIdentity,
+      ghostRecovery,
+      ghostReadback,
+      ...earlyMutationReports,
+    ].map((report) => {
+      try {
+        parseLifecycleReport(report);
+        return 'accepted';
+      } catch (error) {
+        return (error as LifecycleReportValidationError).reason.code;
+      }
+    })).toEqual(Array(13).fill('protocol.contradictory-outcome'));
   });
 
   test('rejects an aggregate failure category unrelated to every failed pair', () => {

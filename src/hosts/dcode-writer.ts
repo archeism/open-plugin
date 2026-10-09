@@ -17,6 +17,7 @@ type Doc = Record<string, unknown>;
 export const dcodeWriter: HostWriter = {
   ...dcode,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace || 'local'}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const market = plugin.marketplace || 'local'; const id = `${plugin.name}@${market}`;
     assertIdentity(plugin.name, 'plugin'); assertIdentity(market, 'marketplace'); assertIdentity(resolved.sha, 'version');

@@ -42,7 +42,7 @@ export interface UpdateFinding {
   /** Terminal action reported only by a successfully read-back update. */
   action?: 'update' | 'unchanged';
   /** Stable lifecycle reason when the finding needs more than the runtime default. */
-  reasonCode?: 'internal.ambiguous-ownership' | 'readback.failed' | 'readback.mismatch';
+  reasonCode?: 'internal.ambiguous-ownership' | 'readback.failed' | 'readback.mismatch' | 'recovery.required';
   /** Exact phase in which this finding prevented convergence. */
   terminalPhase?: LifecycleTerminalPhase;
   /** Present only after this package's durable mutation boundary was crossed. */
@@ -66,6 +66,8 @@ export interface UpdateOptions {
   writers?: readonly HostWriter[];
   /** Test seam for ledger persistence failure regressions. */
   writeState?: (records: InstallRecord[]) => void;
+  /** Exact preflight-selected records. The full `state` is still preserved on writes. */
+  records?: readonly InstallRecord[];
 }
 
 /** The plugin name part of a host-native id (`name@marketplace` or bare name). */
@@ -105,7 +107,9 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
   let mutationStarted = false;
 
   const selectedHosts = new Set(hosts.map((host) => host.id));
-  const records = state.filter((record) => selectedHosts.has(record.host)).filter((record) => name === undefined || record.id === name || idName(record.id) === name);
+  const records = options.records === undefined
+    ? state.filter((record) => selectedHosts.has(record.host)).filter((record) => name === undefined || record.id === name || idName(record.id) === name)
+    : [...options.records];
   if (name !== undefined && records.length === 0) {
     findings.push({
       host: 'plgnz',
@@ -125,7 +129,9 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
   }
 
   for (const initialRecord of records) {
-    const found = state.find((candidate) => candidate.host === initialRecord.host && candidate.id === initialRecord.id);
+    const found = options.records === undefined
+      ? state.find((candidate) => candidate.host === initialRecord.host && candidate.id === initialRecord.id)
+      : state.find((candidate) => candidate === initialRecord);
     if (found === undefined) continue;
     let record: InstallRecord = found;
     let recordMutationStarted = false;
@@ -199,16 +205,24 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       writerResult = await host.add(plugin, resolved, { dryRun: options.dryRun });
       nativeChanged = options.dryRun !== true && writerResult !== 'unchanged';
     } catch (e) {
-      findings.push(findingFor(record, e instanceof CompatibilityError
+      findings.push(findingFor(record, e instanceof CompatibilityError && !recordMutationStarted
         ? {
             mark: e.status === 'unverified' ? '!' : '✗',
             status: e.status,
             capabilityId: e.capability,
             evidenceId: compatibilityEvidenceId(e.evidence),
-            terminalPhase: recordMutationStarted ? 'apply' : 'preflight',
+            terminalPhase: 'preflight',
             message: `re-add of '${record.id}' refused — ${e.message}`,
           }
-        : { mark: '✗', terminalPhase: 'apply', message: `re-add of '${record.id}' failed — ${unknownErrorDiagnostic(e)}` }, recordMutationStarted));
+        : {
+            mark: '✗',
+            terminalPhase: 'apply',
+            ...(recordMutationStarted ? { reasonCode: 'recovery.required' as const } : {}),
+            message: recordMutationStarted
+              ? `re-add of '${record.id}' refused after pending intent was persisted — ${unknownErrorDiagnostic(e)}`
+              : `re-add of '${record.id}' failed — ${unknownErrorDiagnostic(e)}`,
+          }, recordMutationStarted));
+      if (recordMutationStarted) break;
       continue;
     }
     let pins: { ok: boolean; changePlanned: boolean };
@@ -221,9 +235,13 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
         ...(nativeChanged ? { changed: true as const } : {}),
         message: `updated '${record.id}' but pin finalization failed — ${unknownErrorDiagnostic(error)}`,
       }, recordMutationStarted));
+      if (recordMutationStarted) break;
       continue;
     }
-    if (!pins.ok) continue;
+    if (!pins.ok) {
+      if (recordMutationStarted) break;
+      continue;
+    }
 
     const action = writerResult === 'unchanged' && !pins.changePlanned ? 'unchanged' : 'update';
     const changed = nativeChanged || (options.dryRun !== true && pins.changePlanned);
@@ -243,7 +261,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
           ...(changed ? { changed: true as const } : {}),
           message: `updated native representation for '${record.id}' is not enabled or has no readable path`,
         }, recordMutationStarted));
-        continue;
+        break;
       }
       installedFingerprint = fingerprintInstallation(installed);
     } catch (error) {
@@ -254,7 +272,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
         ...(changed ? { changed: true as const } : {}),
         message: `updated native representation for '${record.id}' could not be inspected — ${unknownErrorDiagnostic(error)}`,
       }, recordMutationStarted));
-      continue;
+      break;
     }
     const finalized: InstallRecord = {
       ...record,
@@ -276,7 +294,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
         ...(changed ? { changed: true as const } : {}),
         message: `updated '${record.id}' but could not finalize its ledger record — ${unknownErrorDiagnostic(error)}`,
       }, recordMutationStarted));
-      continue;
+      break;
     }
     state = next;
     findings.push(findingFor(record, {

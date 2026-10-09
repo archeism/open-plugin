@@ -18,6 +18,7 @@ declare const TextEncoder: { new (): { encode(input?: string): Uint8Array } };
 export const ompWriter: HostWriter = {
   ...omp,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace ?? 'local'}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const market = plugin.marketplace ?? 'local'; const id = `${plugin.name}@${market}`;
     assertIdentity(market, 'marketplace'); assertIdentity(plugin.name, 'plugin');

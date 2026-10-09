@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
 import { join } from 'node:path';
-import { chmodSync, existsSync, mkdtempSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { withHostEnvAsync, initGitRepo, writeFiles, writeLedger } from './util';
 import { main } from '../src/cli';
@@ -17,13 +17,198 @@ import { withKimiNative } from './kimi-fixture';
 import { cleanupWriters } from '../src/hosts/writers';
 import type { HostWriter } from '../src/host';
 import { parseLifecycleReport } from '../src/lifecycle-report';
+import { createDeploymentScopeIdentity } from '../src/deployment-scope';
+import type { LifecycleStateV2 } from '../src/state';
 
 const pluginsMap = {
   'plugin.json': JSON.stringify({ name: "demo-plugin", mcpServers: { demo: { command: "demo" } } }, null, 2),
   'mcp.json': JSON.stringify({ mcpServers: { demo: { command: "demo" } } }, null, 2)
 };
 
+function scopedRemoveState(entries: ReadonlyArray<{ target: string; source: string }>): LifecycleStateV2 {
+  const timestamp = '2026-10-09T00:00:00.000Z';
+  const rows = entries.map(({ target, source: locator }) => {
+    const source = { kind: 'local', locator } as const;
+    const identity = createDeploymentScopeIdentity(source, { kind: target, instance: 'default' });
+    return {
+      scope: {
+        ...identity,
+        authority: 'authoritative' as const,
+        lifecycle: 'active' as const,
+        selectorMode: 'explicit' as const,
+        desired: {
+          generation: 1,
+          revision: 'revision-1',
+          sourceFingerprint: 'source-fingerprint',
+          packages: [{ packageId: 'demo-plugin', nativeId: 'demo-plugin', sourceRelativeDir: 'demo-plugin', requiredCapabilities: [], adoptionRequested: false }],
+          validatedAt: timestamp,
+        },
+      },
+      activation: {
+        scopeId: identity.id,
+        packageId: 'demo-plugin',
+        nativeId: 'demo-plugin',
+        sourceRevision: 'revision-1',
+        route: { kind: 'managed' as const, evidenceKey: { kind: 'capability-profile' as const, key: `sha256:${'a'.repeat(64)}` } },
+        ownership: { kind: 'created' as const, proofKey: { kind: 'managed-marker' as const, key: `sha256:${'b'.repeat(64)}` }, verifiedAt: timestamp },
+        fingerprints: { source: 'source', projected: 'projected', installed: 'installed' },
+        activationState: 'active' as const,
+        readbackState: 'verified' as const,
+        pins: [],
+      },
+    };
+  });
+  return {
+    version: 2,
+    stateGeneration: 1,
+    scopes: rows.map(({ scope }) => scope),
+    activations: rows.map(({ activation }) => activation),
+    attempts: [],
+    tombstones: [],
+  };
+}
+
 describe('remove', () => {
+  test('rejects ambiguity across all selected scopes before removing an earlier valid pair', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      writeFileSync(join(home, 'state.json'), JSON.stringify(scopedRemoveState([
+        { target: 'codex', source: '/codex-source' },
+        { target: 'cursor', source: '/cursor-source-one' },
+        { target: 'cursor', source: '/cursor-source-two' },
+      ])));
+      let removeCalls = 0;
+      const writer = (id: 'codex' | 'cursor'): HostWriter => ({
+        id, gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        add: async () => {}, remove: async () => { removeCalls += 1; },
+        pin: async () => ({ changes: [], refusals: [] }),
+      });
+      const original = [...cleanupWriters];
+      const output: string[] = [];
+      const originalLog = console.log;
+      const before = readState();
+      cleanupWriters.splice(0, cleanupWriters.length, writer('codex'), writer('cursor'));
+      console.log = (value: string) => output.push(value);
+      try {
+        expect(await main(['remove', 'demo-plugin', '--target', 'codex', '--target', 'cursor', '--json'])).toBe(1);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...original);
+        console.log = originalLog;
+      }
+
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({ removeCalls, state: readState(), plan: report.plan, outcomes: report.outcomes, summary: report.summary }).toEqual({
+        removeCalls: 0,
+        state: before,
+        plan: [],
+        outcomes: [],
+        summary: {
+          result: 'incomplete',
+          terminalPhase: 'preflight',
+          mutationStarted: false,
+          changed: false,
+          failureCategory: 'internal',
+          reason: {
+            category: 'internal',
+            code: 'internal.ambiguous-ownership',
+            diagnostic: "multiple cursor/default deployment scopes own native package 'demo-plugin'",
+            capabilityId: null,
+            evidenceId: null,
+          },
+          recoveryId: null,
+          readbackId: null,
+        },
+      });
+    });
+  });
+
+  test('reclassifies a post-intent adapter refusal and stops later removals', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-remove-refusal-'));
+      const sha = initGitRepo(sourceDir, pluginsMap);
+      writeLedger(home, [
+        { host: 'codex', id: 'demo-plugin', source: sourceDir, sourceSha: sha, ownership: 'plgnz' },
+        { host: 'cursor', id: 'demo-plugin', source: sourceDir, sourceSha: sha, ownership: 'plgnz' },
+      ]);
+      let laterRemoveCalls = 0;
+      const refusing: HostWriter = {
+        id: 'codex', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        add: async () => {},
+        remove: async () => { throw new Error('late remove refusal'); },
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const later: HostWriter = {
+        id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        add: async () => {}, remove: async () => { laterRemoveCalls += 1; },
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const original = [...cleanupWriters];
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, refusing, later);
+      console.log = (value: string) => output.push(value);
+      try {
+        expect(await main(['remove', 'demo-plugin', '--target', 'codex', '--target', 'cursor', '--json'])).toBe(1);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...original);
+        console.log = originalLog;
+      }
+
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({
+        laterRemoveCalls,
+        plan: report.plan.map(({ action, route }) => ({ action, route })),
+        outcomes: report.outcomes.map(({ result, action, route, resourceState, reason }) => ({ result, action, route, resourceState, reason })),
+        summary: report.summary,
+        pending: readState().map(({ host, pending }) => ({ host, pending })),
+      }).toEqual({
+        laterRemoveCalls: 0,
+        plan: [
+          { action: 'retire-orphan', route: 'managed' },
+          { action: 'retire-orphan', route: 'managed' },
+        ],
+        outcomes: [{
+          result: 'pending',
+          action: 'retire-orphan',
+          route: 'managed',
+          resourceState: 'potentially-changed',
+          reason: {
+            category: 'recovery',
+            code: 'recovery.required',
+            diagnostic: "removal of 'demo-plugin' requires recovery after pending intent was persisted — late remove refusal",
+            capabilityId: null,
+            evidenceId: null,
+          },
+        }, {
+          result: 'not-attempted',
+          action: 'retire-orphan',
+          route: 'managed',
+          resourceState: 'unknown',
+          reason: {
+            category: 'runtime',
+            code: 'runtime.operation-failed',
+            diagnostic: 'not attempted after an earlier remove failure',
+            capabilityId: null,
+            evidenceId: null,
+          },
+        }],
+        summary: {
+          result: 'incomplete',
+          terminalPhase: 'apply',
+          mutationStarted: true,
+          changed: false,
+          failureCategory: 'recovery',
+          reason: report.outcomes[0]!.reason,
+          recoveryId: report.plan[0]!.operationId,
+          readbackId: null,
+        },
+        pending: [
+          { host: 'codex', pending: 'remove' },
+          { host: 'cursor', pending: undefined },
+        ],
+      });
+    });
+  });
+
   test('reports a target detection exception as a preflight defect', async () => {
     await withHostEnvAsync('codex', async () => {
       const originalWriters = [...cleanupWriters];
@@ -185,10 +370,10 @@ describe('remove', () => {
         mutationStarted: report.summary.mutationStarted,
       }).toEqual({
         code: 1,
-        result: 'failed',
+        result: 'pending',
         changed: true,
         resourceState: 'potentially-changed',
-        reasonCode: 'runtime.operation-failed',
+        reasonCode: 'recovery.required',
         terminalPhase: 'finalize',
         mutationStarted: true,
       });

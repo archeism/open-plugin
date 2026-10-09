@@ -19,7 +19,7 @@ export function serializeLegacyInstallOutcomes(report: LifecycleReport): LegacyI
   const rows = report.outcomes.map((outcome) => ({
     plugin: outcome.package,
     target: outcome.scope.target.kind,
-    status: legacyStatus(outcome),
+    status: legacyStatus(outcome, report.command.dryRun),
     dryRun: report.command.dryRun,
     ...(outcome.reason === null ? {} : { diagnostic: outcome.reason.diagnostic }),
     ...(outcome.nativeId === null ? {} : { nativeId: outcome.nativeId }),
@@ -43,8 +43,10 @@ function sameReason(left: LifecycleOperationOutcome['reason'], right: LifecycleO
     left.diagnostic === right.diagnostic && left.capabilityId === right.capabilityId && left.evidenceId === right.evidenceId;
 }
 
-function legacyStatus(outcome: LifecycleOperationOutcome): LegacyInstallStatus {
-  if (outcome.result === 'succeeded') return outcome.action === 'unchanged' ? 'unchanged' : 'installed';
+function legacyStatus(outcome: LifecycleOperationOutcome, dryRun: boolean): LegacyInstallStatus {
+  if (outcome.result === 'succeeded') {
+    return outcome.action === 'unchanged' || (!dryRun && !outcome.changed) ? 'unchanged' : 'installed';
+  }
   return legacyFailureStatus(outcome.reason?.code);
 }
 

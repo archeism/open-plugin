@@ -188,7 +188,7 @@ describe('update · re-add from the recorded source', () => {
     });
   });
 
-  test('preserves a writer compatibility refusal as a nonzero typed update finding', async () => {
+  test('reclassifies a post-intent writer refusal as recovery-required', async () => {
     await withHostEnvAsync('kimi', async (home) => {
       const repo = join(home, 'src-repo');
       const sha = sourceRepo(repo, 'demo-plugin', { tool: { type: 'stdio', command: '/bin/echo' } });
@@ -205,62 +205,117 @@ describe('update · re-add from the recorded source', () => {
       expect({
         exitCode: result.exitCode,
         mutationStarted: result.mutationStarted,
-        status: result.findings[0]?.status,
-        capabilityId: result.findings[0]?.capabilityId,
-        evidenceId: result.findings[0]?.evidenceId,
+        reasonCode: result.findings[0]?.reasonCode,
         terminalPhase: result.findings[0]?.terminalPhase,
         findingMutationStarted: result.findings[0]?.mutationStarted,
         message: result.findings[0]?.message,
       }).toEqual({
         exitCode: 1,
         mutationStarted: true,
-        status: 'unverified',
-        capabilityId: 'update',
-        evidenceId: 'test evidence',
+        reasonCode: 'recovery.required',
         terminalPhase: 'apply',
         findingMutationStarted: true,
-        message: "re-add of 'demo-plugin' refused — target 'compat-host' is unverified for update; evidence: test evidence",
+        message: "re-add of 'demo-plugin' refused after pending intent was persisted — target 'compat-host' is unverified for update; evidence: test evidence",
       });
     });
   });
 
-  test('preserves an exact post-intent compatibility reason in the public report', async () => {
+  test('stops later updates and preserves their frozen plan rows after a post-intent refusal', async () => {
     await withHostEnvAsync('cursor', async (home) => {
       const repo = join(home, 'src-public-compatibility-refusal');
       const sha = sourceRepo(repo, 'demo-plugin', { tool: { type: 'stdio', command: '/bin/echo' } });
-      writeLedger(home, [{ host: 'cursor', id: 'demo-plugin', source: repo, sourceSha: sha }]);
+      writeLedger(home, [
+        { host: 'cursor', id: 'demo-plugin', source: repo, sourceSha: sha },
+        { host: 'kimi', id: 'demo-plugin', source: repo, sourceSha: sha },
+      ]);
+      let laterAddCalls = 0;
       const refusing: HostWriter = {
         id: 'cursor', gui: false, detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
         add: async () => { throw new CompatibilityError('cursor', 'update', 'unverified', 'test evidence'); },
         remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
       };
+      const later: HostWriter = {
+        id: 'kimi', gui: false, detect: () => true, stores: () => [],
+        listInstalled: () => [{ id: 'demo-plugin', name: 'demo-plugin', enabled: true, path: join(repo, 'demo-plugin') }],
+        mcpEntries: () => [],
+        add: async () => { laterAddCalls += 1; },
+        remove: async () => {}, pin: async () => ({ changes: [], refusals: [] }),
+      };
       const originalWriters = [...writers];
       const output: string[] = [];
       const originalLog = console.log;
-      writers.splice(0, writers.length, refusing);
+      writers.splice(0, writers.length, refusing, later);
       console.log = (value: string) => output.push(value);
       try {
-        expect(await main(['update', 'demo-plugin', '--target', 'cursor', '--json'])).toBe(1);
+        expect(await main(['update', 'demo-plugin', '--target', 'cursor', '--target', 'kimi', '--json'])).toBe(1);
       } finally {
         writers.splice(0, writers.length, ...originalWriters);
         console.log = originalLog;
       }
       const report = parseLifecycleReport(JSON.parse(output.join('')));
-      expect(report.outcomes[0]?.reason).toEqual({
-        category: 'capability',
-        code: 'capability.unverified',
-        diagnostic: "re-add of 'demo-plugin' refused — target 'cursor' is unverified for update; evidence: test evidence",
-        capabilityId: 'update',
-        evidenceId: 'test evidence',
-      });
       expect({
-        terminalPhase: report.summary.terminalPhase,
-        mutationStarted: report.summary.mutationStarted,
-        reason: report.summary.reason,
+        laterAddCalls,
+        plan: report.plan.map(({ action, route }) => ({ action, route })),
+        outcomes: report.outcomes.map(({ result, action, route, resourceState, reason }) => ({
+          result,
+          action,
+          route,
+          resourceState,
+          reason,
+        })),
+        summary: report.summary,
+        pending: readState().map(({ host, pending }) => ({ host, pending })),
       }).toEqual({
-        terminalPhase: 'apply',
-        mutationStarted: true,
-        reason: report.outcomes[0]?.reason,
+        laterAddCalls: 0,
+        plan: [
+          { action: 'update', route: 'managed' },
+          { action: 'update', route: 'managed' },
+        ],
+        outcomes: [{
+          result: 'pending',
+          action: 'update',
+          route: 'managed',
+          resourceState: 'potentially-changed',
+          reason: {
+            category: 'recovery',
+            code: 'recovery.required',
+            diagnostic: "re-add of 'demo-plugin' refused after pending intent was persisted — target 'cursor' is unverified for update; evidence: test evidence",
+            capabilityId: null,
+            evidenceId: null,
+          },
+        }, {
+          result: 'not-attempted',
+          action: 'update',
+          route: 'managed',
+          resourceState: 'unknown',
+          reason: {
+            category: 'runtime',
+            code: 'runtime.operation-failed',
+            diagnostic: 'not attempted after an earlier update failure',
+            capabilityId: null,
+            evidenceId: null,
+          },
+        }],
+        summary: {
+          result: 'incomplete',
+          terminalPhase: 'apply',
+          mutationStarted: true,
+          changed: false,
+          failureCategory: 'recovery',
+          reason: {
+            category: 'recovery',
+            code: 'recovery.required',
+            diagnostic: "re-add of 'demo-plugin' refused after pending intent was persisted — target 'cursor' is unverified for update; evidence: test evidence",
+            capabilityId: null,
+            evidenceId: null,
+          },
+          recoveryId: report.plan[0]!.operationId,
+          readbackId: null,
+        },
+        pending: [
+          { host: 'cursor', pending: 'install' },
+          { host: 'kimi', pending: undefined },
+        ],
       });
     });
   });
@@ -447,11 +502,11 @@ describe('update · re-add from the recorded source', () => {
         code: 1,
         outcomes: [
           { package: 'first', result: 'succeeded', changed: true, resourceState: 'present' },
-          { package: 'second', result: 'not-attempted', changed: false, resourceState: 'unknown' },
+          { package: 'second', result: 'failed', changed: false, resourceState: 'unknown' },
         ],
         summary: {
           result: 'incomplete',
-          terminalPhase: 'preflight',
+          terminalPhase: 'apply',
           mutationStarted: true,
           changed: true,
           failureCategory: 'runtime',
@@ -462,6 +517,64 @@ describe('update · re-add from the recorded source', () => {
             capabilityId: null,
             evidenceId: null,
           },
+          recoveryId: null,
+          readbackId: null,
+        },
+      });
+    });
+  });
+
+  test('preserves a later completed outcome when an earlier source cannot resolve', async () => {
+    await withHostEnvAsync('cursor', async (home) => {
+      const repo = join(home, 'src-after-resolve-failure');
+      const sha = initGitRepo(repo, {
+        'plugin.json': JSON.stringify({ name: 'second', version: '1.0.0' }),
+      });
+      writeLedger(home, [
+        { host: 'cursor', id: 'first', source: join(home, 'missing-source'), sourceSha: 'missing' },
+        { host: 'kimi', id: 'second', source: repo, sourceSha: sha },
+      ]);
+      const originalWriters = [...writers];
+      const writer = (id: 'cursor' | 'kimi', plugin: 'first' | 'second'): HostWriter => ({
+        id,
+        gui: false,
+        detect: () => true,
+        stores: () => [],
+        listInstalled: () => [{ id: plugin, name: plugin, enabled: true, path: repo }],
+        mcpEntries: () => [],
+        add: async () => {},
+        remove: async () => {},
+        pin: async () => ({ changes: [], refusals: [] }),
+      });
+      const output: string[] = [];
+      const originalLog = console.log;
+      writers.splice(0, writers.length, writer('cursor', 'first'), writer('kimi', 'second'));
+      console.log = (value: string) => output.push(value);
+      let code: number;
+      try {
+        code = await main(['update', '--target', 'cursor', '--target', 'kimi', '--json']);
+      } finally {
+        writers.splice(0, writers.length, ...originalWriters);
+        console.log = originalLog;
+      }
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({
+        code,
+        outcomes: report.outcomes.map(({ package: packageName, result, changed, reason }) => ({ package: packageName, result, changed, reasonCode: reason?.code })),
+        summary: report.summary,
+      }).toEqual({
+        code: 1,
+        outcomes: [
+          { package: 'first', result: 'failed', changed: false, reasonCode: 'runtime.operation-failed' },
+          { package: 'second', result: 'succeeded', changed: true, reasonCode: undefined },
+        ],
+        summary: {
+          result: 'incomplete',
+          terminalPhase: 'apply',
+          mutationStarted: true,
+          changed: true,
+          failureCategory: 'runtime',
+          reason: report.outcomes[0]!.reason,
           recoveryId: null,
           readbackId: null,
         },

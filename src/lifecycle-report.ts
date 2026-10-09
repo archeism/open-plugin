@@ -16,6 +16,7 @@ export const LIFECYCLE_PLAN_ACTIONS = [
   'disable-nonconforming',
   'retain-prior',
   'retire-orphan',
+  'not-attempted',
 ] as const;
 
 export const LIFECYCLE_OPERATION_RESULTS = ['succeeded', 'failed', 'pending', 'not-attempted'] as const;
@@ -312,7 +313,7 @@ function assertPlanOperation(
   if (snapshot !== undefined && !sameSourceBinding(snapshot.reference.binding, (operation['scope'] as unknown as DeploymentScopeIdentity).source)) {
     throw invalid(`planned operation '${operation['operationId']}' scope contradicts its source snapshot`);
   }
-  if (operation['coverage'] === 'retirement' && operation['action'] !== 'retire-orphan') {
+  if (operation['coverage'] === 'retirement' && operation['action'] !== 'retire-orphan' && operation['action'] !== 'not-attempted') {
     throw invalid(`orphan retirement '${operation['operationId']}' has a non-retirement action`);
   }
   if (operation['coverage'] === 'desired-pair' && operation['action'] === 'retire-orphan') {
@@ -323,6 +324,9 @@ function assertPlanOperation(
   }
   if ((command === 'remove' || command === 'retire-source') && operation['coverage'] !== 'retirement') {
     throw invalid(`${command} cannot contain desired-pair coverage`);
+  }
+  if ((operation['action'] === 'not-attempted') !== (operation['route'] === 'none')) {
+    throw contradiction(`planned operation '${operation['operationId']}' must pair action not-attempted with route none`);
   }
 }
 
@@ -345,6 +349,13 @@ function assertOutcome(
   }
   if (outcome['result'] === 'succeeded' && reason !== null) throw contradiction(`successful outcome '${outcome['operationId']}' cannot have a failure reason`);
   if (outcome['result'] !== 'succeeded' && reason === null) throw contradiction(`non-success outcome '${outcome['operationId']}' needs a reason`);
+  if (outcome['route'] === 'none' && outcome['result'] === 'succeeded') {
+    throw contradiction(`successful outcome '${outcome['operationId']}' needs a native or managed route`);
+  }
+  if (outcome['action'] === 'not-attempted' &&
+      (outcome['route'] !== 'none' || outcome['changed'] !== false || outcome['result'] === 'succeeded' || outcome['result'] === 'pending')) {
+    throw contradiction(`preflight refusal '${outcome['operationId']}' must be a non-successful, non-mutating no-route action`);
+  }
   const containment = outcome['action'] === 'retain-prior' || outcome['action'] === 'disable-nonconforming';
   if (containment) {
     const expectedResourceState = 'retained';
@@ -352,6 +363,9 @@ function assertOutcome(
     if (outcome['result'] !== 'failed' || outcome['resourceState'] !== expectedResourceState || outcome['activationState'] !== expectedActivationState) {
       throw contradiction(`containment outcome '${outcome['operationId']}' must fail the desired operation while reporting its retained terminal state`);
     }
+  }
+  if (outcome['action'] === 'disable-nonconforming' && outcome['changed'] !== !dryRun) {
+    throw contradiction(`disable-nonconforming outcome '${outcome['operationId']}' must truthfully report its containment mutation`);
   }
   if (outcome['result'] === 'succeeded') {
     const terminalStateMatches = outcome['coverage'] === 'retirement'
@@ -383,6 +397,14 @@ function assertSummary(summary: Record<string, unknown>, outcomes: readonly Reco
   const nonSuccess = outcomes.some((outcome) => outcome['result'] !== 'succeeded');
   const anyChanged = outcomes.some((outcome) => outcome['changed'] === true);
   const potentiallyChanged = outcomes.some((outcome) => outcome['resourceState'] === 'potentially-changed');
+  const earlyPhase = summary['terminalPhase'] === 'parse' || summary['terminalPhase'] === 'resolve' ||
+    summary['terminalPhase'] === 'freeze' || summary['terminalPhase'] === 'preflight';
+  const pendingOutcomes = outcomes.filter((outcome) => outcome['result'] === 'pending');
+  const recoveryOutcomes = outcomes.filter((outcome) =>
+    isObject(outcome['reason']) && outcome['reason']['category'] === 'recovery');
+  const readbackOutcomes = outcomes.filter((outcome) =>
+    isObject(outcome['reason']) && outcome['reason']['category'] === 'readback');
+  const appliedDisablements = dryRun ? [] : outcomes.filter((outcome) => outcome['action'] === 'disable-nonconforming');
   const pairFailureCategories = new Set(outcomes
     .filter((outcome) => outcome['result'] !== 'succeeded')
     .map((outcome) => (outcome['reason'] as Record<string, unknown>)['category']));
@@ -390,6 +412,40 @@ function assertSummary(summary: Record<string, unknown>, outcomes: readonly Reco
   if ((dryRun || summary['mutationStarted'] === false) && summary['changed'] === true) throw contradiction('summary cannot report changed=true before mutation');
   if (potentiallyChanged && summary['mutationStarted'] === false) throw contradiction('potentially changed work requires mutationStarted=true');
   if (dryRun && summary['mutationStarted'] === true) throw contradiction('dry-run summary cannot report mutationStarted=true');
+  if (earlyPhase && (summary['mutationStarted'] === true || summary['changed'] === true || potentiallyChanged)) {
+    throw contradiction(`${String(summary['terminalPhase'])} summary cannot report mutation or potentially changed work`);
+  }
+  if (appliedDisablements.length > 0 && (summary['mutationStarted'] !== true || summary['changed'] !== true)) {
+    throw contradiction('applied disable-nonconforming containment requires a recorded mutation');
+  }
+  if (pendingOutcomes.some((outcome) => !isObject(outcome['reason']) || outcome['reason']['code'] !== 'recovery.required')) {
+    throw contradiction('pending outcomes require a recovery.required reason');
+  }
+  if (pendingOutcomes.length > 0 && summary['mutationStarted'] !== true) {
+    throw contradiction('pending outcomes require mutationStarted=true');
+  }
+  const recoveryRequired = pendingOutcomes.length > 0 || recoveryOutcomes.length > 0 ||
+    (isObject(reason) && reason['category'] === 'recovery');
+  if (recoveryRequired && summary['recoveryId'] === null) {
+    throw contradiction('pending or recovery-required work needs a recoveryId');
+  }
+  if (typeof summary['recoveryId'] === 'string' && !recoveryRequired) {
+    throw contradiction('summary recoveryId requires pending or recovery-required work');
+  }
+  if (recoveryRequired && ![...recoveryOutcomes, ...pendingOutcomes].some((outcome) => outcome['operationId'] === summary['recoveryId'])) {
+    throw contradiction('summary recoveryId does not identify pending or recovery-required work');
+  }
+  const readbackRequired = summary['terminalPhase'] === 'readback' || readbackOutcomes.length > 0 ||
+    appliedDisablements.length > 0 || (isObject(reason) && reason['category'] === 'readback');
+  if (readbackRequired && summary['readbackId'] === null) {
+    throw contradiction('readback work needs a readbackId');
+  }
+  if (typeof summary['readbackId'] === 'string' && !readbackRequired) {
+    throw contradiction('summary readbackId requires readback work');
+  }
+  if (readbackRequired && ![...readbackOutcomes, ...appliedDisablements].some((outcome) => outcome['operationId'] === summary['readbackId'])) {
+    throw contradiction('summary readbackId does not identify readback work');
+  }
   if (summary['result'] === 'converged' && (nonSuccess || summary['failureCategory'] !== null || reason !== null)) {
     throw contradiction('converged summary contradicts a failure outcome or reason');
   }
