@@ -439,16 +439,18 @@ describe('update · re-add from the recorded source', () => {
           terminalPhase: report.summary.terminalPhase,
           mutationStarted: report.summary.mutationStarted,
           recoveryId: report.summary.recoveryId,
+          readbackId: report.summary.readbackId,
         }).toEqual({
           code: 1,
-          result: scenario === 'readback' ? 'failed' : 'pending',
+          result: 'pending',
           changed: true,
           resourceState: scenario === 'readback' ? 'potentially-changed' : 'present',
           activationState: scenario === 'readback' ? 'unknown' : 'active-conforming',
           reasonCode: scenario === 'readback' ? 'readback.failed' : 'recovery.required',
           terminalPhase: scenario,
           mutationStarted: true,
-          recoveryId: scenario === 'readback' ? null : report.plan[0]!.operationId,
+          recoveryId: report.plan[0]!.operationId,
+          readbackId: scenario === 'readback' ? report.plan[0]!.operationId : null,
         });
       });
     }
@@ -757,6 +759,50 @@ describe('update · re-add from the recorded source', () => {
     expect(report.outcomes).toEqual([]);
     expect(report.summary.reason?.code).toBe('internal.corrupt-state');
     expect(report.summary.reason?.diagnostic).toContain('Invalid state.json');
+  });
+
+  test('public update canonicalizes a Kimi marketplace ledger and historical bare marker', async () => {
+    await withHostEnvAsync('kimi', async (home) => {
+      await withKimiNative(home, async () => {
+        const repo = join(home, 'kimi-marketplace-source');
+        const sha = initGitRepo(repo, {
+          '.claude-plugin/marketplace.json': JSON.stringify({
+            name: 'personal',
+            plugins: [{ name: 'demo', source: './plugins/demo' }],
+          }),
+          'plugins/demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+        });
+        expect(await main(['add', repo, '--target', 'kimi'])).toBe(0);
+        const marker = join(home, '.kimi-code', 'plugins', 'managed', 'demo', '.plgnz-install.json');
+        const ownership = JSON.parse(readFileSync(marker, 'utf8')) as Record<string, unknown>;
+        writeFileSync(marker, JSON.stringify({ ...ownership, pluginId: 'demo' }));
+        writeLedger(home, [{ host: 'kimi', id: 'demo', source: repo, sourceSha: sha }]);
+
+        const output: string[] = [];
+        const originalLog = console.log;
+        console.log = (value: string) => output.push(value);
+        let exitCode: number;
+        try {
+          exitCode = await main(['update', 'demo', '--target', 'kimi', '--json']);
+        } finally {
+          console.log = originalLog;
+        }
+        const report = parseLifecycleReport(JSON.parse(output.join('')));
+        expect({
+          exitCode,
+          plan: report.plan.map(({ nativeId }) => nativeId),
+          outcomes: report.outcomes.map(({ nativeId, result }) => ({ nativeId, result })),
+          records: readState().map(({ id, pending }) => ({ id, pending })),
+          markerId: (JSON.parse(readFileSync(marker, 'utf8')) as Record<string, unknown>).pluginId,
+        }).toEqual({
+          exitCode: 0,
+          plan: ['demo@personal'],
+          outcomes: [{ nativeId: 'demo@personal', result: 'succeeded' }],
+          records: [{ id: 'demo@personal', pending: undefined }],
+          markerId: 'demo@personal',
+        });
+      });
+    });
   });
 
   test('kimi: re-materializes the copy and advances the recorded sha', async () => {

@@ -243,16 +243,14 @@ interface ResolvedActivationScope {
   scope: DeploymentScopeIdentity;
 }
 
-function reportScopesForActivation(
+function reportScopesForTarget(
   state: LifecycleStateV2,
   target: string,
   instance: string,
-  nativeId: string,
 ): ResolvedActivationScope[] {
   const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
   const matches: ResolvedActivationScope[] = [];
   state.activations.forEach((activation, activationIndex) => {
-    if (activation.nativeId !== nativeId) return;
     const stored = scopes.get(activation.scopeId);
     if (stored === undefined || stored.target.kind !== target || stored.target.instance !== instance) return;
     matches.push({
@@ -274,7 +272,8 @@ function reportFor(
   const failure = options.reason ?? outcomes.find((candidate) => candidate.result !== 'succeeded')?.reason ?? null;
   const result = options.result ?? (failure === null && outcomes.every((candidate) => candidate.result === 'succeeded') ? 'converged' : 'incomplete');
   const recoveryOutcome = outcomes.find((candidate) => candidate.result === 'pending' || candidate.reason?.category === 'recovery');
-  const readbackOutcome = outcomes.find((candidate) => candidate.reason?.category === 'readback' || candidate.action === 'disable-nonconforming');
+  const readbackOutcome = outcomes.find((candidate) =>
+    candidate.reason?.category === 'readback' || (!dryRun && candidate.action === 'disable-nonconforming'));
   return parseLifecycleReport({
     schemaVersion: 1,
     command: { name: command, dryRun, sourceSnapshots: [...(options.sourceSnapshots ?? [])] },
@@ -300,6 +299,42 @@ function plannedNativeIdFor(writer: HostWriter, plugin: PluginSource): string {
 
 function stateNativeIdsFor(writer: HostWriter, plugin: PluginSource): ReadonlySet<string> {
   return new Set([plannedNativeIdFor(writer, plugin), ...(writer.legacyNativeIds?.(plugin) ?? [])]);
+}
+
+interface PreparedNativeIdentity {
+  package: string;
+  nativeId: string;
+  equivalentNativeIds: ReadonlySet<string>;
+  adapterResolved: boolean;
+}
+
+/** Resolve one persisted row through the owning adapter without guessing ID syntax. */
+function preparedNativeIdentity(writer: HostWriter, record: InstallRecord, packageHint: string): PreparedNativeIdentity {
+  const exact = { package: packageHint, nativeId: record.id, equivalentNativeIds: new Set([record.id]), adapterResolved: false };
+  try {
+    const resolved = resolveSource(record.source);
+    const matches = resolved.plugins.filter((plugin) => stateNativeIdsFor(writer, plugin).has(record.id));
+    if (matches.length !== 1) return exact;
+    const plugin = matches[0]!;
+    return {
+      package: plugin.name,
+      nativeId: plannedNativeIdFor(writer, plugin),
+      equivalentNativeIds: stateNativeIdsFor(writer, plugin),
+      adapterResolved: true,
+    };
+  } catch {
+    return exact;
+  }
+}
+
+function logicalNativeName(nativeId: string): string {
+  return nativeId.includes('@') ? nativeId.slice(0, nativeId.indexOf('@')) : nativeId;
+}
+
+function requestedIdentityMatches(identity: PreparedNativeIdentity, persistedId: string, requested: string | undefined): boolean {
+  const logicalPersistedId = logicalNativeName(persistedId);
+  return requested === undefined || requested === identity.package || requested === identity.nativeId ||
+    requested === persistedId || requested === logicalPersistedId || identity.equivalentNativeIds.has(requested);
 }
 
 function usageReport(command: LifecycleCommandName, dryRun: boolean, diagnostic: string, code: Extract<LifecycleReasonCode, `usage.${string}`> = 'usage.invalid-argument'): LifecycleReport {
@@ -516,23 +551,52 @@ export async function main(argv: string[]): Promise<number> {
     const pairs: Array<{
       writer: (typeof cleanupWriters)[number];
       record: InstallRecord;
+      nativeId: string;
+      legacyNativeIds: readonly string[];
       operation: LifecyclePlanOperation;
     }> = [];
     let preflightFailure: LifecycleReason | null = null;
     for (const writer of selection.selected) {
-      const resolved = reportScopesForActivation(lifecycleState, writer.id, 'default', target);
-      if (resolved.length > 1) {
+      const candidates = reportScopesForTarget(lifecycleState, writer.id, 'default').flatMap((match) => {
+        const record = state[match.activationIndex];
+        if (record === undefined || record.host !== writer.id || record.id !== match.activation.nativeId) {
+          preflightFailure = reason('internal', 'internal.invariant', `install record '${match.activation.nativeId}' on ${writer.id} has no exact deployment scope identity`);
+          return [];
+        }
+        const identity = preparedNativeIdentity(writer, record, match.activation.packageId);
+        return [{
+          match,
+          record,
+          identity,
+        }];
+      });
+      if (preflightFailure !== null) break;
+      if (candidates.some(({ record, identity }) =>
+        !identity.adapterResolved && writer.unresolvedLegacyNativeIdConflicts?.(record.id, target) === true)) {
+        preflightFailure = reason(
+          'internal',
+          'internal.ambiguous-ownership',
+          `cannot prove the canonical ${writer.id} identity for historical ledger package '${target}' without its Source`,
+        );
+        break;
+      }
+      const matches = candidates.filter(({ identity, record }) => requestedIdentityMatches(identity, record.id, target));
+      if (matches.length > 1) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', `multiple ${writer.id}/default deployment scopes own native package '${target}'`);
         break;
       }
-      if (resolved.length === 0) {
+      if (matches.length === 0) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', `no owned install record for '${target}' on ${writer.id}; refusing removal`);
         break;
       }
-      const match = resolved[0]!;
-      const record = state[match.activationIndex];
-      if (record === undefined || record.host !== writer.id || record.id !== target) {
-        preflightFailure = reason('internal', 'internal.invariant', `install record '${target}' on ${writer.id} has no exact deployment scope identity`);
+      const { match, record, identity } = matches[0]!;
+      const equivalentMatches = candidates.filter((candidate) => identity.equivalentNativeIds.has(candidate.record.id));
+      if (equivalentMatches.length > 1) {
+        preflightFailure = reason(
+          'internal',
+          'internal.ambiguous-ownership',
+          `multiple ${writer.id} ledger records match native identity '${identity.nativeId}'`,
+        );
         break;
       }
       if (record.ownership !== 'plgnz' && record.ownership !== undefined) {
@@ -543,14 +607,17 @@ export async function main(argv: string[]): Promise<number> {
         preflightFailure = reason('internal', 'internal.invariant', 'install is pending; refusing removal');
         break;
       }
+      const legacyNativeIds = [...identity.equivalentNativeIds].filter((candidate) => candidate !== identity.nativeId);
       pairs.push({
         writer,
         record,
+        nativeId: identity.nativeId,
+        legacyNativeIds,
         operation: planOperation({
           command: 'remove',
           scope: match.scope,
-          package: match.activation.packageId,
-          nativeId: match.activation.nativeId,
+          package: identity.package,
+          nativeId: identity.nativeId,
           action: 'retire-orphan',
           route: 'managed',
         }),
@@ -584,15 +651,26 @@ export async function main(argv: string[]): Promise<number> {
       try {
         const current = state.find((candidate) => candidate.host === pair.record.host && candidate.id === pair.record.id);
         if (current === undefined) throw new Error(`install record '${pair.record.id}' disappeared before apply`);
-        const pending = { ...current, pending: 'remove' as const };
+        const pending = { ...current, id: pair.nativeId, pending: 'remove' as const };
         const pendingState = state.map((candidate) => candidate === current ? pending : candidate);
         writeState(pendingState);
         pairMutationStarted = true;
         mutationStarted = true;
         state = pendingState;
-        if (json) await withLogsOnStderr(() => pair.writer.remove(target));
-        else await pair.writer.remove(target);
+        const removeOptions = { source: pair.record.source, legacyNativeIds: pair.legacyNativeIds };
+        if (json) await withLogsOnStderr(() => pair.writer.remove(pair.nativeId, removeOptions));
+        else await pair.writer.remove(pair.nativeId, removeOptions);
         pairChanged = true;
+        pairTerminalPhase = 'readback';
+        try {
+          const installed = pair.writer.listInstalled();
+          if (installed.some((candidate) => candidate.id === pair.nativeId && candidate.enabled !== false)) {
+            throw new LifecycleCommandError(reason('readback', 'readback.mismatch', `native removal readback still contains ${pair.nativeId}`));
+          }
+        } catch (error) {
+          if (error instanceof LifecycleCommandError) throw error;
+          throw new LifecycleCommandError(reason('readback', 'readback.failed', unknownErrorDiagnostic(error)));
+        }
         const finalized = state.filter((candidate) => candidate !== pending);
         pairTerminalPhase = 'finalize';
         writeState(finalized);
@@ -600,15 +678,19 @@ export async function main(argv: string[]): Promise<number> {
         outcomes.push(outcomeFor(operation, { result: 'succeeded', changed: true }));
       } catch (error) {
         commandTerminalPhase = pairTerminalPhase;
-        const failure = pairMutationStarted
-          ? reason('recovery', 'recovery.required', `removal of '${target}' requires recovery after pending intent was persisted — ${unknownErrorDiagnostic(error)}`)
-          : reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error));
+        const failure = error instanceof LifecycleCommandError
+          ? error.lifecycleReason
+          : pairMutationStarted
+            ? reason('recovery', 'recovery.required', `removal of '${target}' requires recovery after pending intent was persisted — ${unknownErrorDiagnostic(error)}`)
+            : reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error));
         commandFailure = failure;
         outcomes.push(outcomeFor(operation, {
           result: pairMutationStarted ? 'pending' : 'failed',
           changed: pairChanged,
-          resourceState: pairChanged ? 'absent' : pairMutationStarted ? 'potentially-changed' : 'unknown',
-          activationState: pairChanged ? 'inactive' : 'unknown',
+          resourceState: failure.category === 'readback'
+            ? 'potentially-changed'
+            : pairChanged ? 'absent' : pairMutationStarted ? 'potentially-changed' : 'unknown',
+          activationState: failure.category === 'readback' ? 'unknown' : pairChanged ? 'inactive' : 'unknown',
           reason: failure,
         }));
         const skipped = reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier remove failure');
@@ -772,33 +854,74 @@ export async function main(argv: string[]): Promise<number> {
         return exitCodeForLifecycleReport(report);
       }
 
+      for (const writer of selection.selected) {
+        for (const plugin of pluginSelection.selected) {
+          const nativeId = plannedNativeIdFor(writer, plugin);
+          const stateIds = stateNativeIdsFor(writer, plugin);
+          if (state.filter((record) => record.host === writer.id && stateIds.has(record.id)).length > 1) {
+            const failure = reason(
+              'internal',
+              'internal.ambiguous-ownership',
+              `multiple ${writer.id} ledger records match native identity '${nativeId}'`,
+            );
+            const report = reportFor('add', flags.dryRun, [], [], {
+              terminalPhase: 'preflight',
+              mutationStarted: false,
+              reason: failure,
+              sourceSnapshots,
+            });
+            printReport(report, mutationOutput);
+            return exitCodeForLifecycleReport(report);
+          }
+        }
+      }
+
       if (flags.dryRun) {
+        const dryRunPairs = Object.freeze(selection.selected.flatMap((writer) => {
+          const scope = createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' });
+          return pluginSelection.selected.map((plugin) => ({
+            writer,
+            plugin,
+            scope,
+            nativeId: plannedNativeIdFor(writer, plugin),
+          }));
+        }));
         const rows: Array<{ operation: LifecyclePlanOperation; outcome: LifecycleOperationOutcome }> = [];
-        for (const writer of selection.selected) {
-          const writerScope = createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' });
-          for (const plugin of pluginSelection.selected) {
-            const nativeId = plannedNativeIdFor(writer, plugin);
-            try {
-              const writerResult = json
-                ? await withLogsOnStderr(() => writer.add(plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting }))
-                : await writer.add(plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting });
-              const operation = planOperation({
-                command: 'add', scope: writerScope, sourceSnapshotId, package: plugin.name, nativeId,
-                action: writerResult === 'unchanged' ? 'unchanged' : 'install', route: 'managed',
-              });
-              rows.push({ operation, outcome: outcomeFor(operation, { result: 'succeeded', changed: false }) });
-            } catch (error) {
-              if (!(error instanceof CompatibilityError)) throw error;
-              const operation = planOperation({
-                command: 'add', scope: writerScope, sourceSnapshotId, package: plugin.name, nativeId,
-                action: 'not-attempted', route: 'none',
-              });
-              rows.push({ operation, outcome: outcomeFor(operation, {
-                result: 'failed',
-                changed: false,
-                reason: reasonForError(error),
-              }) });
-            }
+        let stopped = false;
+        for (const pair of dryRunPairs) {
+          if (stopped) {
+            const operation = planOperation({
+              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.nativeId,
+              action: 'install', route: 'managed',
+            });
+            rows.push({ operation, outcome: outcomeFor(operation, {
+              result: 'not-attempted',
+              changed: false,
+              reason: reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier install preflight failure'),
+            }) });
+            continue;
+          }
+          try {
+            const writerResult = json
+              ? await withLogsOnStderr(() => pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting }))
+              : await pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting });
+            const operation = planOperation({
+              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.nativeId,
+              action: writerResult === 'unchanged' ? 'unchanged' : 'install', route: 'managed',
+            });
+            rows.push({ operation, outcome: outcomeFor(operation, { result: 'succeeded', changed: false }) });
+          } catch (error) {
+            const capability = error instanceof CompatibilityError;
+            const operation = planOperation({
+              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.nativeId,
+              action: capability ? 'not-attempted' : 'install', route: capability ? 'none' : 'managed',
+            });
+            rows.push({ operation, outcome: outcomeFor(operation, {
+              result: 'failed',
+              changed: false,
+              reason: reasonForError(error),
+            }) });
+            stopped = !capability;
           }
         }
         plan = freezePlan(rows.map(({ operation }) => operation));
@@ -811,12 +934,9 @@ export async function main(argv: string[]): Promise<number> {
         return exitCodeForLifecycleReport(report);
       }
 
+      activeTerminalPhase = 'preflight';
       const executionPairs = selection.selected.flatMap((writer) => pluginSelection.selected.map((plugin) => {
         const nativeId = plannedNativeIdFor(writer, plugin);
-        const priorIds = stateNativeIdsFor(writer, plugin);
-        if (state.filter((record) => record.host === writer.id && priorIds.has(record.id)).length > 1) {
-          throw new Error(`multiple ${writer.id} ledger records match planned native identity '${nativeId}'`);
-        }
         return {
           writer,
           plugin,
@@ -831,6 +951,7 @@ export async function main(argv: string[]): Promise<number> {
           }),
         };
       }));
+      activeTerminalPhase = 'apply';
       plan = freezePlan(executionPairs.map(({ operation }) => operation));
       let operationIndex = 0;
       for (const w of selection.selected) {
@@ -927,7 +1048,10 @@ export async function main(argv: string[]): Promise<number> {
       for (const operation of plan) {
         if (reported.has(operation.operationId)) continue;
         const active = operation.operationId === activeOperationId;
-        const activeResult = failureReason.category === 'recovery' ? 'pending' : 'failed';
+        const activeResult = failureReason.category === 'recovery' ||
+          (activePairMutationStarted && failureReason.category === 'readback')
+          ? 'pending'
+          : 'failed';
         failures.push(outcomeFor(operation, {
           result: active ? activeResult : 'not-attempted',
           changed: active && activePairChanged,
@@ -1035,40 +1159,68 @@ export async function main(argv: string[]): Promise<number> {
     const selectedTargetKinds = new Set(selection.selected.map((writer) => writer.id));
     const scopesById = new Map(lifecycleState.scopes.map((scope) => [scope.id, scope]));
     const requestedName = flags.positionals[0];
-    const selectedPairs: Array<{
+    const candidatePairs: Array<{
       record: InstallRecord;
       scope: DeploymentScopeIdentity;
       package: string;
       nativeId: string;
       host: string;
+      equivalentNativeIds: ReadonlySet<string>;
+      adapterResolved: boolean;
     }> = [];
-    const exactIdentities = new Set<string>();
+    const plannedUpdateNativeIds = new Map<InstallRecord, string>();
     let scopeFailure: LifecycleReason | null = null;
     lifecycleState.activations.forEach((activation, activationIndex) => {
       if (scopeFailure !== null) return;
       const stored = scopesById.get(activation.scopeId);
       if (stored === undefined || stored.target.instance !== 'default' || !selectedTargetKinds.has(stored.target.kind)) return;
-      const logicalName = activation.nativeId.includes('@') ? activation.nativeId.slice(0, activation.nativeId.indexOf('@')) : activation.nativeId;
-      if (requestedName !== undefined && activation.nativeId !== requestedName && logicalName !== requestedName) return;
-      const identity = `${stored.target.kind}\u0000${stored.target.instance}\u0000${activation.nativeId}`;
-      if (exactIdentities.has(identity)) {
-        scopeFailure = reason('internal', 'internal.ambiguous-ownership', `multiple ${stored.target.kind}/${stored.target.instance} deployment scopes own native package '${activation.nativeId}'`);
-        return;
-      }
-      exactIdentities.add(identity);
       const record = updateState[activationIndex];
       if (record === undefined || record.host !== stored.target.kind || record.id !== activation.nativeId) {
         scopeFailure = reason('internal', 'internal.invariant', `install record '${activation.nativeId}' on ${stored.target.kind} has no exact deployment scope identity`);
         return;
       }
-      selectedPairs.push({
+      const writer = selection.selected.find((candidate) => candidate.id === stored.target.kind);
+      if (writer === undefined) {
+        scopeFailure = reason('internal', 'internal.invariant', `selected update target '${stored.target.kind}' has no writer`);
+        return;
+      }
+      const identity = preparedNativeIdentity(writer, record, activation.packageId);
+      candidatePairs.push({
         record,
         scope: createDeploymentScopeIdentity(stored.source, { kind: stored.target.kind, instance: stored.target.instance }),
-        package: activation.packageId,
-        nativeId: activation.nativeId,
+        package: identity.package,
+        nativeId: identity.nativeId,
         host: stored.target.kind,
+        equivalentNativeIds: identity.equivalentNativeIds,
+        adapterResolved: identity.adapterResolved,
       });
     });
+    const selectedPairs = candidatePairs.filter((pair) => requestedIdentityMatches({
+      package: pair.package,
+      nativeId: pair.nativeId,
+      equivalentNativeIds: pair.equivalentNativeIds,
+      adapterResolved: pair.adapterResolved,
+    }, pair.record.id, requestedName));
+    if (scopeFailure === null) {
+      for (const pair of selectedPairs) {
+        const equivalentRecords = candidatePairs.filter((candidate) =>
+          candidate.host === pair.host &&
+          candidate.scope.target.instance === pair.scope.target.instance &&
+          pair.equivalentNativeIds.has(candidate.record.id));
+        if (equivalentRecords.length > 1) {
+          const diagnostic = equivalentRecords.every((candidate) => candidate.record.id === pair.record.id)
+            ? `multiple ${pair.host}/${pair.scope.target.instance} deployment scopes own native package '${pair.record.id}'`
+            : `multiple ${pair.host} ledger records match native identity '${pair.nativeId}'`;
+          scopeFailure = reason(
+            'internal',
+            'internal.ambiguous-ownership',
+            diagnostic,
+          );
+          break;
+        }
+        if (pair.adapterResolved) plannedUpdateNativeIds.set(pair.record, pair.nativeId);
+      }
+    }
     if (scopeFailure !== null || (requestedName !== undefined && selectedPairs.length === 0)) {
       const failure = scopeFailure ?? reason('internal', 'internal.ambiguous-ownership', `no install record for '${requestedName}' in state.json — not installed by plgnz; refusing to modify it`);
       const report = reportFor('update', flags.dryRun, [], [], {
@@ -1097,8 +1249,8 @@ export async function main(argv: string[]): Promise<number> {
     let updateMutationStarted = false;
     try {
       const result = json
-        ? await withLogsOnStderr(() => runUpdate(undefined, { dryRun: flags.dryRun, state: updateState, records: selectedPairs.map(({ record }) => record), writers: selection.selected }))
-        : await runUpdate(undefined, { dryRun: flags.dryRun, state: updateState, records: selectedPairs.map(({ record }) => record), writers: selection.selected });
+        ? await withLogsOnStderr(() => runUpdate(undefined, { dryRun: flags.dryRun, state: updateState, records: selectedPairs.map(({ record }) => record), writers: selection.selected, plannedNativeIds: plannedUpdateNativeIds }))
+        : await runUpdate(undefined, { dryRun: flags.dryRun, state: updateState, records: selectedPairs.map(({ record }) => record), writers: selection.selected, plannedNativeIds: plannedUpdateNativeIds });
       updateMutationStarted = result.mutationStarted;
       const groups = new Map<string, UpdateFinding[]>();
       let commandFailure: LifecycleReason | null = null;
@@ -1173,7 +1325,11 @@ export async function main(argv: string[]): Promise<number> {
             ? reason('readback', failed.reasonCode, failed.message)
             : reason('runtime', 'runtime.operation-failed', failed.message);
         return outcomeFor(operation, {
-          result: succeeded ? 'succeeded' : failure?.category === 'recovery' ? 'pending' : 'failed',
+          result: succeeded
+            ? 'succeeded'
+            : failure?.category === 'recovery' || (pairMutationStarted && failure?.category === 'readback')
+              ? 'pending'
+              : 'failed',
           changed: pairChanged,
           resourceState: !succeeded ? failed.resourceState ?? (pairMutationStarted ? 'potentially-changed' : 'unknown') : undefined,
           activationState: !succeeded ? failed.activationState ?? 'unknown' : undefined,

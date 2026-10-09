@@ -674,14 +674,18 @@ describe('add', () => {
           diagnostic: report.outcomes[0]?.reason?.diagnostic,
           terminalPhase: report.summary.terminalPhase,
           mutationStarted: report.summary.mutationStarted,
+          recoveryId: report.summary.recoveryId,
+          readbackId: report.summary.readbackId,
         }).toEqual({
-          result: 'failed',
+          result: 'pending',
           changed: true,
           resourceState: 'potentially-changed',
           reasonCode: scenario.code,
           diagnostic: scenario.diagnostic,
           terminalPhase: 'readback',
           mutationStarted: true,
+          recoveryId: report.plan[0]!.operationId,
+          readbackId: report.plan[0]!.operationId,
         });
       });
     }
@@ -739,6 +743,77 @@ describe('add', () => {
         terminalPhase: 'finalize',
         mutationStarted: true,
         recoveryId: report.plan[0]!.operationId,
+      });
+    });
+  });
+
+  test('migrates Kimi marketplace ledger and marker identities transactionally', async () => {
+    await withHostEnvAsync('kimi', async (home) => {
+      await withKimiNative(home, async () => {
+        const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-kimi-legacy-'));
+        initGitRepo(sourceDir, {
+          '.claude-plugin/marketplace.json': JSON.stringify({
+            name: 'personal',
+            plugins: [{ name: 'demo', source: './plugins/demo' }],
+          }),
+          'plugins/demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+        });
+        const run = async () => {
+          const output: string[] = [];
+          const originalLog = console.log;
+          console.log = (value: string) => output.push(value);
+          try {
+            const exitCode = await main(['add', sourceDir, '--target', 'kimi', '--json']);
+            return { exitCode, report: parseLifecycleReport(JSON.parse(output.join(''))) };
+          } finally {
+            console.log = originalLog;
+          }
+        };
+
+        expect((await run()).exitCode).toBe(0);
+        const target = join(home, '.kimi-code', 'plugins', 'managed', 'demo');
+        const marker = join(target, '.plgnz-install.json');
+        const legacyMarker = { ...JSON.parse(readFileSync(marker, 'utf8')), pluginId: 'demo' };
+        writeFileSync(marker, JSON.stringify(legacyMarker));
+        writeLedger(home, readState().map((record) => ({ ...record, id: 'demo' })));
+
+        const migrated = await run();
+        expect({
+          exitCode: migrated.exitCode,
+          plan: migrated.report.plan.map(({ nativeId }) => nativeId),
+          outcomes: migrated.report.outcomes.map(({ nativeId, result }) => ({ nativeId, result })),
+          records: readState().map(({ id, pending }) => ({ id, pending })),
+          markerId: JSON.parse(readFileSync(marker, 'utf8')).pluginId,
+        }).toEqual({
+          exitCode: 0,
+          plan: ['demo@personal'],
+          outcomes: [{ nativeId: 'demo@personal', result: 'succeeded' }],
+          records: [{ id: 'demo@personal', pending: undefined }],
+          markerId: 'demo@personal',
+        });
+
+        writeFileSync(marker, JSON.stringify(legacyMarker));
+        writeLedger(home, readState().map((record) => ({ ...record, id: 'demo' })));
+        chmodSync(target, 0o555);
+        let failed: Awaited<ReturnType<typeof run>>;
+        try {
+          failed = await run();
+        } finally {
+          chmodSync(target, 0o755);
+        }
+        expect({
+          exitCode: failed.exitCode,
+          outcome: failed.report.outcomes.map(({ nativeId, result, reason }) => ({ nativeId, result, reasonCode: reason?.code })),
+          recoveryId: failed.report.summary.recoveryId,
+          records: readState().map(({ id, pending }) => ({ id, pending })),
+          markerId: JSON.parse(readFileSync(marker, 'utf8')).pluginId,
+        }).toEqual({
+          exitCode: 1,
+          outcome: [{ nativeId: 'demo@personal', result: 'pending', reasonCode: 'recovery.required' }],
+          recoveryId: failed.report.plan[0]!.operationId,
+          records: [{ id: 'demo@personal', pending: 'install' }],
+          markerId: 'demo',
+        });
       });
     });
   });

@@ -17,6 +17,10 @@ export const cursorWriter: HostWriter = {
   supportsAdoption: true,
   plannedNativeId: (plugin) => plugin.name,
   legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [] : [`${plugin.name}@${plugin.marketplace}`],
+  unresolvedLegacyNativeIdConflicts: (persisted, requested) => {
+    const name = persisted.split('@', 1)[0] ?? persisted;
+    return persisted.includes('@') && (requested === name || requested.startsWith(`${name}@`));
+  },
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
     const ownershipId = plugin.marketplace === undefined ? id : `${id}@${plugin.marketplace}`;

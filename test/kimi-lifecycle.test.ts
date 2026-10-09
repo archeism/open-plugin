@@ -66,13 +66,16 @@ describe('Kimi lifecycle preflight', () => {
         expect(kimi.listInstalled().map(installed => installed.id)).toEqual(['demo@catalog']);
         const marker = join(home, '.kimi-code', 'plugins', 'managed', 'demo', '.plgnz-install.json');
         writeFileSync(marker, JSON.stringify({ source: resolved.sourceUri, pluginId: 'demo', fingerprint: 'one' }));
+        expect(await kimiWriter.add(plugin, resolved)).toBeUndefined();
+        expect(JSON.parse(readFileSync(marker, 'utf8')).pluginId).toBe('demo@catalog');
+        expect(kimi.listInstalled().map(installed => installed.id)).toEqual(['demo@catalog']);
         plugin.contentFingerprint = 'two';
         await kimiWriter.add(plugin, resolved);
         expect(kimi.listInstalled().map(installed => installed.id)).toEqual(['demo@catalog']);
         writeFileSync(marker, JSON.stringify({ source: resolved.sourceUri, pluginId: 'other@catalog', fingerprint: 'two' }));
         expect(kimi.listInstalled().map(installed => installed.id)).toEqual(['demo']);
-        writeFileSync(marker, JSON.stringify({ source: resolved.sourceUri, pluginId: 'demo@catalog', fingerprint: 'two' }));
-        await kimiWriter.remove('demo@catalog');
+        writeFileSync(marker, JSON.stringify({ source: resolved.sourceUri, pluginId: 'demo', fingerprint: 'two' }));
+        await kimiWriter.remove('demo@catalog', { source: resolved.sourceUri, legacyNativeIds: ['demo'] });
         expect(kimi.listInstalled()).toHaveLength(0);
         expect(existsSync(join(home, '.kimi-code', 'plugins', 'managed', 'demo'))).toBe(true);
       });

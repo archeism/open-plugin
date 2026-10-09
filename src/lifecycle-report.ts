@@ -344,6 +344,12 @@ function assertOutcome(
   }
   const reason = outcome['reason'];
   if (reason !== null) assertReason(reason as Record<string, unknown>);
+  if (isObject(reason) && reason['code'] === 'recovery.required' && outcome['result'] !== 'pending') {
+    throw contradiction(`recovery.required outcome '${outcome['operationId']}' must remain pending`);
+  }
+  if (isObject(reason) && reason['code'] === 'recovery.failed' && outcome['result'] !== 'failed') {
+    throw contradiction(`recovery.failed outcome '${outcome['operationId']}' must be terminally failed`);
+  }
   if (reason !== null && (reason as Record<string, unknown>)['category'] === 'usage') {
     throw contradiction(`usage reason cannot belong to pair outcome '${outcome['operationId']}'`);
   }
@@ -363,7 +369,9 @@ function assertOutcome(
   const containment = outcome['action'] === 'retain-prior' || outcome['action'] === 'disable-nonconforming';
   if (containment) {
     const expectedResourceState = 'retained';
-    const expectedActivationState = outcome['action'] === 'retain-prior' ? 'retained-prior' : 'inactive';
+    const expectedActivationState = outcome['action'] === 'retain-prior'
+      ? 'retained-prior'
+      : dryRun ? 'active-nonconforming' : 'inactive';
     if (outcome['result'] !== 'failed' || outcome['resourceState'] !== expectedResourceState || outcome['activationState'] !== expectedActivationState) {
       throw contradiction(`containment outcome '${outcome['operationId']}' must fail the desired operation while reporting its retained terminal state`);
     }
@@ -376,14 +384,17 @@ function assertOutcome(
       throw contradiction(`capability outcome '${outcome['operationId']}' must use an explicit refusal or containment action`);
     }
     if (outcome['action'] === 'disable-nonconforming') {
-      if (dryRun || outcome['changed'] !== true) {
-        throw contradiction(`capability disablement '${outcome['operationId']}' must describe an applied containment mutation`);
+      if (outcome['changed'] !== !dryRun) {
+        throw contradiction(`capability disablement '${outcome['operationId']}' must truthfully describe whether containment was applied`);
       }
     } else if (outcome['changed'] === true || outcome['resourceState'] === 'potentially-changed') {
       throw contradiction(`capability refusal '${outcome['operationId']}' cannot describe work that changed or may have changed`);
     }
   }
   if (outcome['result'] === 'succeeded') {
+    if (outcome['coverage'] === 'desired-pair' && outcome['nativeId'] === null) {
+      throw contradiction(`successful Desired outcome '${outcome['operationId']}' needs an exact native identity`);
+    }
     const terminalStateMatches = outcome['coverage'] === 'retirement'
       ? outcome['resourceState'] === 'absent' && outcome['activationState'] === 'inactive'
       : outcome['resourceState'] === 'present' && outcome['activationState'] === 'active-conforming';
@@ -436,8 +447,9 @@ function assertSummary(summary: Record<string, unknown>, outcomes: readonly Reco
   if (appliedDisablements.length > 0 && (summary['mutationStarted'] !== true || summary['changed'] !== true)) {
     throw contradiction('applied disable-nonconforming containment requires a recorded mutation');
   }
-  if (pendingOutcomes.some((outcome) => !isObject(outcome['reason']) || outcome['reason']['code'] !== 'recovery.required')) {
-    throw contradiction('pending outcomes require a recovery.required reason');
+  if (pendingOutcomes.some((outcome) => !isObject(outcome['reason']) ||
+      (outcome['reason']['code'] !== 'recovery.required' && outcome['reason']['category'] !== 'readback'))) {
+    throw contradiction('pending outcomes require a recovery.required or readback reason');
   }
   if (pendingOutcomes.length > 0 && summary['mutationStarted'] !== true) {
     throw contradiction('pending outcomes require mutationStarted=true');

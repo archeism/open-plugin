@@ -72,6 +72,8 @@ export interface UpdateOptions {
   writeState?: (records: InstallRecord[]) => void;
   /** Exact preflight-selected records. The full `state` is still preserved on writes. */
   records?: readonly InstallRecord[];
+  /** Adapter-owned canonical identity frozen by the public command before apply. */
+  plannedNativeIds?: ReadonlyMap<InstallRecord, string>;
 }
 
 /** The plugin name part of a host-native id (`name@marketplace` or bare name). */
@@ -196,13 +198,33 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
       continue;
     }
 
+    const adapterCanonicalNativeId = host.plannedNativeId(plugin);
+    const adapterNativeIds = new Set([adapterCanonicalNativeId, ...(host.legacyNativeIds?.(plugin) ?? [])]);
+    const plannedNativeId = options.plannedNativeIds?.get(initialRecord);
+    const canonicalNativeId = plannedNativeId ?? (adapterNativeIds.has(record.id) ? adapterCanonicalNativeId : record.id);
+    const equivalentNativeIds = plannedNativeId !== undefined || adapterNativeIds.has(record.id)
+      ? adapterNativeIds
+      : new Set([record.id]);
+    const equivalentRecords = records.filter((candidate) => candidate.host === record.host && equivalentNativeIds.has(candidate.id));
+    if (!equivalentNativeIds.has(record.id) || equivalentRecords.length !== 1 || equivalentRecords[0] !== record) {
+      findings.push(findingFor({ ...record, id: canonicalNativeId }, {
+        mark: '✗',
+        reasonCode: 'internal.ambiguous-ownership',
+        terminalPhase: 'preflight',
+        message: `multiple ${record.host} ledger records match native identity '${canonicalNativeId}'`,
+      }));
+      continue;
+    }
+    const persistedRecord = record;
+    record = { ...persistedRecord, id: canonicalNativeId };
+
     try {
       if (options.dryRun !== true) {
         const pending = { ...record, pending: 'install' as const };
-        const next = state.map((candidate) => candidate === record ? pending : candidate);
+        record = pending;
+        const next = state.map((candidate) => candidate === persistedRecord ? pending : candidate);
         save(next);
         state = next;
-        record = pending;
         recordMutationStarted = true;
         mutationStarted = true;
       }

@@ -386,6 +386,107 @@ describe('remove', () => {
     });
   });
 
+  test('keeps post-remove readback failures pending with both recovery identities', async () => {
+    for (const scenario of [
+      {
+        listInstalled: (): ReturnType<HostWriter['listInstalled']> => [{ id: 'demo-plugin', name: 'demo-plugin', enabled: true }],
+        reasonCode: 'readback.mismatch',
+      },
+      {
+        listInstalled: (): ReturnType<HostWriter['listInstalled']> => { throw new Error('forced remove inventory failure'); },
+        reasonCode: 'readback.failed',
+      },
+    ] as const) {
+      await withHostEnvAsync('codex', async (home) => {
+        writeLedger(home, [{ host: 'codex', id: 'demo-plugin', source: '/source', sourceSha: 'fixture' }]);
+        const originalWriters = [...cleanupWriters];
+        const writer: HostWriter = {
+          id: 'codex',
+          gui: false,
+          plannedNativeId,
+          detect: () => true,
+          stores: () => [],
+          listInstalled: scenario.listInstalled,
+          mcpEntries: () => [],
+          add: async () => {},
+          remove: async () => {},
+          pin: async () => ({ changes: [], refusals: [] }),
+        };
+        const output: string[] = [];
+        const originalLog = console.log;
+        cleanupWriters.splice(0, cleanupWriters.length, writer);
+        console.log = (value: string) => output.push(value);
+        try {
+          expect(await main(['remove', 'demo-plugin', '--target', 'codex', '--json'])).toBe(1);
+        } finally {
+          cleanupWriters.splice(0, cleanupWriters.length, ...originalWriters);
+          console.log = originalLog;
+        }
+
+        const report = parseLifecycleReport(JSON.parse(output.join('')));
+        expect({
+          result: report.outcomes[0]?.result,
+          resourceState: report.outcomes[0]?.resourceState,
+          activationState: report.outcomes[0]?.activationState,
+          reasonCode: report.outcomes[0]?.reason?.code,
+          terminalPhase: report.summary.terminalPhase,
+          mutationStarted: report.summary.mutationStarted,
+          recoveryId: report.summary.recoveryId,
+          readbackId: report.summary.readbackId,
+          pending: readState()[0]?.pending,
+        }).toEqual({
+          result: 'pending',
+          resourceState: 'potentially-changed',
+          activationState: 'unknown',
+          reasonCode: scenario.reasonCode,
+          terminalPhase: 'readback',
+          mutationStarted: true,
+          recoveryId: report.plan[0]!.operationId,
+          readbackId: report.plan[0]!.operationId,
+          pending: 'remove',
+        });
+      });
+    }
+  });
+
+  test('allows inactive retained native metadata after removal readback', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      writeLedger(home, [{ host: 'codex', id: 'demo-plugin', source: '/source', sourceSha: 'fixture' }]);
+      const originalWriters = [...cleanupWriters];
+      const writer: HostWriter = {
+        id: 'codex', gui: false, plannedNativeId,
+        detect: () => true,
+        stores: () => [],
+        listInstalled: () => [{ id: 'demo-plugin', name: 'demo-plugin', enabled: false }],
+        mcpEntries: () => [],
+        add: async () => {}, remove: async () => {},
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, writer);
+      console.log = (value: string) => output.push(value);
+      try {
+        expect(await main(['remove', 'demo-plugin', '--target', 'codex', '--json'])).toBe(0);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...originalWriters);
+        console.log = originalLog;
+      }
+      const report = parseLifecycleReport(JSON.parse(output.join('')));
+      expect({
+        result: report.outcomes[0]?.result,
+        resourceState: report.outcomes[0]?.resourceState,
+        activationState: report.outcomes[0]?.activationState,
+        state: readState(),
+      }).toEqual({
+        result: 'succeeded',
+        resourceState: 'absent',
+        activationState: 'inactive',
+        state: [],
+      });
+    });
+  });
+
   test('claude-code > removes plugin from registry', async () => {
     await withHostEnvAsync('claude-code', async (home) => {
       const sourceDir = mkdtempSync(join(tmpdir(), 'open-plugin-source-'));

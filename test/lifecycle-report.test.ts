@@ -603,7 +603,7 @@ describe('lifecycle report contract', () => {
     })).toEqual(Array(13).fill('protocol.contradictory-outcome'));
   });
 
-  test('requires recovery.required to identify mutated work that is pending or potentially changed', () => {
+  test('requires recovery.required to identify pending mutated work', () => {
     const recoveryReason = {
       category: 'recovery',
       code: 'recovery.required',
@@ -615,7 +615,7 @@ describe('lifecycle report contract', () => {
       const report = validReport();
       report.outcomes[0] = {
         ...report.outcomes[0]!,
-        result: 'failed',
+        result: 'pending',
         resourceState: 'unknown',
         activationState: 'unknown',
         changed: false,
@@ -636,14 +636,21 @@ describe('lifecycle report contract', () => {
 
     const noMutation = recoveryReport();
     noMutation.summary.mutationStarted = false;
-    const noRecoverableOutcome = recoveryReport();
-    const potentiallyChanged = recoveryReport();
-    potentiallyChanged.outcomes[0] = {
-      ...potentiallyChanged.outcomes[0]!,
-      resourceState: 'potentially-changed',
+    const noPendingRecovery = recoveryReport();
+    const runtimeReason = {
+      category: 'runtime',
+      code: 'runtime.operation-failed',
+      diagnostic: 'native operation failed',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    noPendingRecovery.outcomes[0] = {
+      ...noPendingRecovery.outcomes[0]!,
+      result: 'failed',
+      reason: runtimeReason,
     };
 
-    expect([noMutation, noRecoverableOutcome].map((report) => {
+    expect([noMutation, noPendingRecovery].map((report) => {
       try {
         parseLifecycleReport(report);
         return 'accepted';
@@ -654,7 +661,138 @@ describe('lifecycle report contract', () => {
       'protocol.contradictory-outcome',
       'protocol.contradictory-outcome',
     ]);
-    expect(parseLifecycleReport(potentiallyChanged)).toEqual(potentiallyChanged);
+    const pending = recoveryReport();
+    expect(parseLifecycleReport(pending)).toEqual(pending);
+  });
+
+  test('keeps durable readback failures pending with orthogonal readback and recovery identities', () => {
+    const report = validReport();
+    const readbackReason = {
+      category: 'readback',
+      code: 'readback.mismatch',
+      diagnostic: 'native readback did not find the applied representation',
+      capabilityId: null,
+      evidenceId: null,
+    } as const;
+    report.outcomes[0] = {
+      ...report.outcomes[0]!,
+      result: 'pending',
+      resourceState: 'potentially-changed',
+      activationState: 'unknown',
+      reason: readbackReason,
+    };
+    report.summary = {
+      ...report.summary,
+      result: 'incomplete',
+      terminalPhase: 'readback',
+      failureCategory: 'readback',
+      reason: readbackReason,
+      recoveryId: 'op-1',
+      readbackId: 'op-1',
+    };
+
+    expect(parseLifecycleReport(report)).toEqual(report);
+
+    const missingRecoveryIdentity: LifecycleReport = {
+      ...report,
+      summary: { ...report.summary, recoveryId: null },
+    };
+    let missingRecoveryDiagnostic = '';
+    try { parseLifecycleReport(missingRecoveryIdentity); }
+    catch (error) { missingRecoveryDiagnostic = (error as Error).message; }
+    expect(missingRecoveryDiagnostic).toContain('recoveryId');
+  });
+
+  test('distinguishes pending recovery requirements from terminal recovery failures', () => {
+    const recoveryReport = (code: 'recovery.required' | 'recovery.failed', result: 'pending' | 'failed'): LifecycleReport => {
+      const report = validReport();
+      const recoveryReason = {
+        category: 'recovery',
+        code,
+        diagnostic: code === 'recovery.required' ? 'recovery remains pending' : 'recovery attempt failed',
+        capabilityId: null,
+        evidenceId: null,
+      } as const;
+      report.outcomes[0] = {
+        ...report.outcomes[0]!,
+        result,
+        resourceState: code === 'recovery.required' ? 'potentially-changed' : 'unknown',
+        activationState: 'unknown',
+        reason: recoveryReason,
+      };
+      report.summary = {
+        ...report.summary,
+        result: 'incomplete',
+        terminalPhase: 'finalize',
+        failureCategory: 'recovery',
+        reason: recoveryReason,
+        recoveryId: 'op-1',
+      };
+      return report;
+    };
+
+    const pendingRequired = recoveryReport('recovery.required', 'pending');
+    const failedRequired = recoveryReport('recovery.required', 'failed');
+    const failedRecovery = recoveryReport('recovery.failed', 'failed');
+    const pendingFailedRecovery = recoveryReport('recovery.failed', 'pending');
+
+    expect(parseLifecycleReport(pendingRequired)).toEqual(pendingRequired);
+    expect(parseLifecycleReport(failedRecovery)).toEqual(failedRecovery);
+    expect([failedRequired, pendingFailedRecovery].map((report) => {
+      try {
+        parseLifecycleReport(report);
+        return 'accepted';
+      } catch (error) {
+        return (error as LifecycleReportValidationError).reason.code;
+      }
+    })).toEqual([
+      'protocol.contradictory-outcome',
+      'protocol.contradictory-outcome',
+    ]);
+  });
+
+  test('requires an exact native identity for every converged Desired outcome', () => {
+    const missingNativeIdentity = validReport();
+    missingNativeIdentity.plan[0] = { ...missingNativeIdentity.plan[0]!, nativeId: null };
+    missingNativeIdentity.outcomes[0] = { ...missingNativeIdentity.outcomes[0]!, nativeId: null };
+
+    let missingNativeDiagnostic = '';
+    try { parseLifecycleReport(missingNativeIdentity); }
+    catch (error) { missingNativeDiagnostic = (error as Error).message; }
+    expect(missingNativeDiagnostic).toContain('native identity');
+  });
+
+  test('previews disable-nonconforming without claiming the containment mutation ran', () => {
+    const report = validReport();
+    const capabilityReason = {
+      category: 'capability',
+      code: 'capability.unsupported',
+      diagnostic: 'the target cannot preserve the required invocation policy',
+      capabilityId: 'invocation-policy',
+      evidenceId: null,
+    } as const;
+    report.command = { ...report.command, dryRun: true };
+    report.plan[0] = { ...report.plan[0]!, action: 'disable-nonconforming' };
+    report.outcomes[0] = {
+      ...report.outcomes[0]!,
+      action: 'disable-nonconforming',
+      result: 'failed',
+      resourceState: 'retained',
+      activationState: 'active-nonconforming',
+      changed: false,
+      reason: capabilityReason,
+    };
+    report.summary = {
+      ...report.summary,
+      result: 'incomplete',
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      changed: false,
+      failureCategory: 'capability',
+      reason: null,
+    };
+
+    expect(parseLifecycleReport(report)).toEqual(report);
   });
 
   test('rejects capability outcomes that imply pair mutation except applied disablement containment', () => {

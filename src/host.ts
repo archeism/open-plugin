@@ -99,6 +99,13 @@ export interface PinOutcome {
   refusals: PinRefusal[];
 }
 
+export interface RemoveOptions {
+  /** Durable Source identity from the ownership ledger. */
+  source?: string;
+  /** Exact adapter-owned obsolete identities accepted for this canonical removal. */
+  legacyNativeIds?: readonly string[];
+}
+
 import type { PluginSource, ResolvedSource } from './source';
 
 export interface HostWriter extends HostReader {
@@ -108,8 +115,10 @@ export interface HostWriter extends HostReader {
   readonly plannedNativeId: (plugin: PluginSource) => string;
   /** Adapter-owned obsolete ledger identities eligible for migration to plannedNativeId. */
   readonly legacyNativeIds?: (plugin: PluginSource) => readonly string[];
+  /** Adapter-owned relation for a Source-unresolved historical ID and a requested identity. */
+  readonly unresolvedLegacyNativeIdConflicts?: (persistedNativeId: string, requestedNativeId: string) => boolean;
   add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'>;
-  remove(id: string): Promise<void>;
+  remove(id: string, opts?: RemoveOptions): Promise<void>;
   /**
    * Rewrite every *bare* stdio `command` in this plugin's installed copy to the
    * absolute path it resolves to on this process's PATH, so a GUI host with no
