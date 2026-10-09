@@ -35,11 +35,11 @@ conditionalTest.if(binary !== undefined)('real Grok loader reads a local bundle 
     const cli = join(import.meta.dir, '..', 'bin', 'plgnz.mjs');
     // Claude's same-name plugin must coexist without shadowing Grok's native copy.
     writeFiles(join(home, '.claude'), { '.keep': '' });
-    invoke(process.execPath, [cli, 'add', source, '--target', 'claude-code', '--json'], plgnzEnv);
+    invoke(process.execPath, [cli, 'add', source, '--target', 'claude-code', '--legacy-json'], plgnzEnv);
     const claudeBefore = fingerprintTree(join(home, '.claude'));
-    const first = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--json'], plgnzEnv)) as Array<{ status: string; nativeId: string }>;
+    const first = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--legacy-json'], plgnzEnv)) as Array<{ status: string; nativeId: string }>;
     expect(first[0]?.status).toBe('installed'); expect(first[0]?.nativeId).toBe('demo@native-proof');
-    const second = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--json'], plgnzEnv)) as Array<{ status: string }>;
+    const second = JSON.parse(invoke(process.execPath, [cli, 'add', source, '--target', 'grok', '--legacy-json'], plgnzEnv)) as Array<{ status: string }>;
     expect(second[0]?.status).toBe('unchanged');
     const inspect = JSON.parse(invoke(binary!, ['inspect', '--json'], nativeEnv)) as { plugins: Array<{ name: string; path: string; enabled: boolean; provides: { mcpServers: number } }>; skills: Array<{ name: string; source: { plugin_name?: string; path?: string } }>; mcpServers: Array<{ name: string }> };
     const installed = inspect.plugins.find(plugin => plugin.name === 'demo');
@@ -50,7 +50,7 @@ conditionalTest.if(binary !== undefined)('real Grok loader reads a local bundle 
     expect(readFileSync(join(installed!.path, 'resources', 'value.txt'), 'utf8')).toBe('amended resource\n');
     expect(readFileSync(join(installed!.path, 'skills', 'manual', 'SKILL.md'), 'utf8')).toContain('disable-model-invocation: true');
     expect(readFileSync(join(installed!.path, 'commands', 'run.md'), 'utf8')).toContain('first=$1 all=$ARGUMENTS');
-    const removed = JSON.parse(invoke(process.execPath, [cli, 'remove', 'demo@native-proof', '--target', 'grok', '--json'], plgnzEnv)) as Array<{ action: string }>;
+    const removed = JSON.parse(invoke(process.execPath, [cli, 'remove', 'demo@native-proof', '--target', 'grok', '--legacy-json'], plgnzEnv)) as Array<{ action: string }>;
     expect(removed[0]?.action).toBe('remove');
     expect(fingerprintTree(join(home, '.claude'))).toBe(claudeBefore);
   } finally { rmSync(root, { recursive: true, force: true }); }

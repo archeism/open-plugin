@@ -12,6 +12,7 @@ type Fixture = { root: string; home: string; source: string; plugin: PluginSourc
 
 function fixture(): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'plgnz-grok-lifecycle-'));
+  const home = join(root, 'home');
   const source = join(root, 'source');
   writeFiles(source, {
     '.claude-plugin/marketplace.json': '{"name":"catalog","plugins":[{"name":"demo","source":"./plugins/demo"}]}',
@@ -19,9 +20,16 @@ function fixture(): Fixture {
     'plugins/demo/skills/ordinary/SKILL.md': '---\nname: ordinary\ndescription: ordinary\n---\n\nfirst\n',
     'plugins/demo/resources/value.txt': 'one\n',
   });
-  const resolved = resolveSource(source);
+  const previous = process.env.OPEN_PLUGIN_HOME;
+  process.env.OPEN_PLUGIN_HOME = home;
+  let resolved: ResolvedSource;
+  try { resolved = resolveSource(source); }
+  finally {
+    if (previous === undefined) delete process.env.OPEN_PLUGIN_HOME;
+    else process.env.OPEN_PLUGIN_HOME = previous;
+  }
   const plugin = resolved.plugins[0]!;
-  return { root, home: join(root, 'home'), source, plugin, resolved };
+  return { root, home, source, plugin, resolved };
 }
 
 function writeFakeGrok(root: string): string {
@@ -107,15 +115,16 @@ describe('Grok Build native marketplace lifecycle', () => {
   });
 
   test('uses registry provenance to retain source identity, refreshes changed bytes, and removes only its owned marketplace', async () => {
-    await isolated(async ({ home, plugin, resolved }) => {
+    await isolated(async ({ home, source, plugin, resolved }) => {
       await grokWriter.add(plugin, resolved);
       const active = join(home, '.grok', 'installed-plugins', 'demo-native');
       expect(grok.listInstalled().map(value => value.id)).toEqual(['demo@catalog']);
       expect(readlinkSync(join(home, '.grok', 'plugins', 'demo'))).toBe(active);
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('one\n');
       expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
-      writeFileSync(join(plugin.dir, 'resources/value.txt'), 'two\n'); plugin.contentFingerprint = resolveSource(resolved.sourceUri).plugins[0]!.contentFingerprint;
-      await grokWriter.add(plugin, resolved);
+      writeFileSync(join(source, 'plugins/demo/resources/value.txt'), 'two\n');
+      const updated = resolveSource(resolved.sourceUri);
+      await grokWriter.add(updated.plugins[0]!, updated);
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('two\n');
       await grokWriter.remove('demo@catalog');
       let linkRemains = false;
@@ -166,14 +175,15 @@ describe('Grok Build native marketplace lifecycle', () => {
   });
 
   test('keeps the prior native bytes and source marker when update exits zero without applying staged content', async () => {
-    await isolated(async ({ home, plugin, resolved }) => {
+    await isolated(async ({ home, source, plugin, resolved }) => {
       await grokWriter.add(plugin, resolved);
       const active = join(home, '.grok', 'installed-plugins', 'demo-native');
       const marketplace = JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))[0].source.path as string;
       const markerBefore = readFileSync(join(marketplace, '.plgnz-install.json'), 'utf8');
-      writeFileSync(join(plugin.dir, 'resources/value.txt'), 'stale\n'); plugin.contentFingerprint = resolveSource(resolved.sourceUri).plugins[0]!.contentFingerprint;
+      writeFileSync(join(source, 'plugins/demo/resources/value.txt'), 'stale\n');
+      const updated = resolveSource(resolved.sourceUri);
       process.env.GROK_FAKE_NOOP_UPDATE = '1';
-      try { expect((await failure(() => grokWriter.add(plugin, resolved))).message).toContain('native readback does not match staged content'); }
+      try { expect((await failure(() => grokWriter.add(updated.plugins[0]!, updated))).message).toContain('native readback does not match staged content'); }
       finally { delete process.env.GROK_FAKE_NOOP_UPDATE; }
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('one\n');
       expect(readFileSync(join(marketplace, '.plgnz-install.json'), 'utf8')).toBe(markerBefore);
@@ -181,22 +191,22 @@ describe('Grok Build native marketplace lifecycle', () => {
   });
 
   test('projects sidecar user-only policy and TOML commands while retaining resources and MCP', async () => {
-    await isolated(async ({ home, plugin, resolved }) => {
-      writeFiles(plugin.dir, {
+    await isolated(async ({ home, source, resolved }) => {
+      writeFiles(join(source, 'plugins/demo'), {
         'skills/manual/SKILL.md': '---\nname: manual\ndescription: manual\n---\nmanual\n',
         'skills/manual/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: false\n',
         'commands/run.toml': 'description = "Run"\nprompt = "first=$1 all=$ARGUMENTS"\nargument-hint = "words"\n',
         '.mcp.json': '{"mcpServers":{"probe":{"command":"/usr/bin/true"}}}',
       });
-      plugin.contentFingerprint = resolveSource(resolved.sourceUri).plugins[0]!.contentFingerprint;
-      await grokWriter.add(plugin, resolved);
+      const updated = resolveSource(resolved.sourceUri);
+      await grokWriter.add(updated.plugins[0]!, updated);
       const active = join(home, '.grok', 'installed-plugins', 'demo-native');
       expect(readFileSync(join(active, 'skills/manual/SKILL.md'), 'utf8')).toContain('disable-model-invocation: true');
       expect(readFileSync(join(active, 'skills/manual/agents/openai.yaml'), 'utf8')).toContain('allow_implicit_invocation: false');
       expect(readFileSync(join(active, 'commands/run.md'), 'utf8')).toContain('first=$1 all=$ARGUMENTS');
       expect(readFileSync(join(active, 'resources/value.txt'), 'utf8')).toBe('one\n');
       expect(grok.mcpEntries().map(entry => entry.name)).toEqual(['probe']);
-      expect(await grokWriter.add(plugin, resolved)).toBe('unchanged');
+      expect(await grokWriter.add(updated.plugins[0]!, updated)).toBe('unchanged');
     });
   });
 

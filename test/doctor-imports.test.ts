@@ -12,7 +12,7 @@
  * performs a filesystem mutation.
  */
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 const srcDir = join(import.meta.dir, '..', 'src');
@@ -54,8 +54,11 @@ function importGraph(entry: string): string[] {
   return [...seen].sort();
 }
 
-/** Writer modules by name: the per-host `<host>-writer.ts`, `writers.ts`, and the shared write sides. */
-const WRITER_MODULE = /(^|[-\/])(writer|writers|write)\.ts$/;
+/** Writer modules by name, including the new writer-only lifecycle runtime and future registry. */
+const WRITER_MODULE = /(?:^|[-\/])(?:writer|writers|write)\.ts$|(?:^|\/)lifecycle-(?:runtime|registry|writers?)\.ts$/;
+
+/** Lifecycle implementation modules that must consume only already-frozen Source facts. */
+const LIFECYCLE_WRITER_MODULE = /(?:^|\/)(?:lifecycle-(?:runtime|registry|writers?)|[^/]+-lifecycle)\.ts$/;
 
 /** Exported symbols (`export const/function/class …`) that name a writer. */
 const WRITER_SYMBOL = /Writer$/;
@@ -76,6 +79,20 @@ function exportedSymbols(text: string): string[] {
   return names;
 }
 
+function sourceFiles(root: string): string[] {
+  return readdirSync(root).flatMap((name) => {
+    const path = join(root, name);
+    const stat = statSync(path);
+    return stat.isDirectory() ? sourceFiles(path) : stat.isFile() && path.endsWith('.ts') ? [path] : [];
+  });
+}
+
+function resolvesSource(text: string): boolean {
+  const code = stripComments(text);
+  return valueImports(code).some((specifier) => /(?:^|\/)source$/.test(specifier))
+    || /\bresolveSource\s*\(/.test(code);
+}
+
 describe('doctor import graph (read-only by construction)', () => {
   const modules = importGraph(join(srcDir, 'doctor.ts'));
 
@@ -87,6 +104,15 @@ describe('doctor import graph (read-only by construction)', () => {
   test('no module in the graph is a writer module', () => {
     const offenders = modules.filter((file) => WRITER_MODULE.test(basename(file)));
     expect(offenders).toEqual([]);
+  });
+
+  test('the writer matcher explicitly catches lifecycle runtime and registry modules', () => {
+    const fixture = [
+      join(srcDir, 'lifecycle-runtime.ts'),
+      join(srcDir, 'lifecycle-registry.ts'),
+      join(srcDir, 'lifecycle-writers.ts'),
+    ];
+    expect(fixture.filter((file) => WRITER_MODULE.test(file))).toEqual(fixture);
   });
 
   test('no module in the graph exports a writer symbol', () => {
@@ -101,5 +127,13 @@ describe('doctor import graph (read-only by construction)', () => {
   test('no module in the graph mutates the filesystem', () => {
     const offenders = modules.filter((file) => FS_MUTATION.test(stripComments(readFileSync(file, 'utf8'))));
     expect(offenders).toEqual([]);
+  });
+
+  test('lifecycle implementations cannot import or invoke the Source resolver', () => {
+    const lifecycleWriters = sourceFiles(srcDir).filter((file) => LIFECYCLE_WRITER_MODULE.test(file));
+    expect(lifecycleWriters).toContain(join(srcDir, 'lifecycle-runtime.ts'));
+    const offenders = lifecycleWriters.filter((file) => resolvesSource(readFileSync(file, 'utf8')));
+    expect(offenders).toEqual([]);
+    expect(resolvesSource("import { resolveSource } from './source';\nresolveSource(input);\n")).toBe(true);
   });
 });

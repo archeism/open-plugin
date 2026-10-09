@@ -47,7 +47,7 @@ npx plgnz doctor --target codex --json
 - `sync` authoritatively reconciles the complete package selection for each requested source × target scope. A `--plugin` selection is the complete desired set for those scopes; applied sync retires omitted installations only when plgnz can prove ownership, while `--dry-run` previews the same plan without mutation.
 - `retire-source` explicitly ends recorded source × target scopes and removes only ownership-proven installations. It removes deployed code and active registration but preserves plugin-created data and inactive host metadata. An unavailable, malformed, or merely uninvoked source preserves its installations and fails or remains untouched; absence is never inferred as retirement.
 - Missing sources, zero discovered packages, unknown/absent requested targets, collisions and incompatible conversions cannot report success.
-- `--json` emits structured per-package/per-target outcomes and actionable diagnostics; automation uses these plus a nonzero exit status for required failures. A capability-limited pair fails closed and remains visibly red while independent pairs may proceed, but no unsupported or unverified result is reported as success, deferral, or a warning-only deployment. Logs go to stderr. Dry-run must not alter active installs/configuration.
+- Mutation `--json` emits the schema-v1 lifecycle report: command context, frozen plan, one structured outcome per planned operation, and aggregate summary. Automation validates this envelope and uses it with the nonzero exit status for required failures. A capability-limited pair fails closed and remains visibly red while independent pairs may proceed, but no unsupported or unverified result is reported as success, deferral, or a warning-only deployment. Logs go to stderr. Dry-run must not alter active installs/configuration. `--legacy-json` is an explicit one-release compatibility serializer for the former `InstallOutcome[]` shape; it is not a second execution model.
 - Personal bundles once, then invokes `sync` with its chosen local source and targets; the pinned CLI version is explicit. Local development can invoke that same CLI from the checkout without an npm release. Remote refresh applies only to a source explicitly supplied as remote.
 - Preserve established marketplace/plugin identity during migration so previously installed packages are refreshed, not duplicated. Remove only recorded/verified owned artifacts; never remove unrelated user configuration.
 
@@ -64,16 +64,21 @@ npx plgnz doctor --target codex --json
 
 Bun + TypeScript, existing repository conventions. plgnz's `src/source.ts` and CLI own generic orchestration; `src/hosts/` owns consumer profiles/adapters and native lifecycle behavior; shared conversion logic has no Personal imports. Tests remain under `test/`. Personal retains its house bundler and replaces installation branches with one CLI client in `src/cli/`; its tests stay under `tests/`.
 
-Prefer small explicit interfaces and existing modules; no new daemon, agent framework or mandatory replacement authoring manifest. Example outcome shape to finalize with the CLI contract:
+Prefer small explicit interfaces and existing modules; no new daemon, agent framework or mandatory replacement authoring manifest. The mutation contract is the versioned `LifecycleReport` exported and validated by `src/lifecycle-report.ts`. It keeps plan action, operation result, resource state, activation state, route, changed flag, coverage kind, and structured reason as orthogonal fields:
 
 ```ts
-type InstallOutcome = {
-  plugin: string;
-  target: string;
-  status: 'installed' | 'unchanged' | 'unsupported' | 'unverified' | 'failed';
-  diagnostic?: string;
+type LifecycleReport = {
+  schemaVersion: 1;
+  command: { name: string; dryRun: boolean; sourceSnapshots: LifecycleSourceSnapshotContext[] };
+  plan: LifecyclePlanOperation[];
+  outcomes: LifecycleOperationOutcome[];
+  summary: LifecycleReportSummary;
 };
 ```
+
+Every pair row carries the canonical nested deployment-scope identity rather than parallel scope/target fields; a pre-pair command-global failure lives in the summary without a fabricated wildcard pair. The validator requires exactly one non-contradictory outcome for every planned operation and rejects duplicate, unexpected, or missing outcomes. Exit `0` means converged, exit `1` means a valid request was incomplete, and exit `2` means usage or selection error.
+
+`result` describes convergence of the Desired operation. Protective `retain-prior` and `disable-nonconforming` actions therefore carry `result: 'failed'` plus the exact pair reason; their resource, activation, and changed fields report the successful retention or disablement independently.
 
 Before CLI/source/conversion/adapter implementation, inspect the pinned source and command surface of `vercel-labs/skills` and `neon-solutions/add-mcp`, then record an adopt/reject rationale. The current decision is in `docs/research/prior-art-2026-09-22.md`; the frozen worker interface is `docs/implementation-contract.md`. Reuse only a proven fitting surface; do not copy a feature set, add an OS/harness, or make an add-on manifest mandatory. `add-mcp` remains a separate API boundary unless a separately approved contract changes that.
 

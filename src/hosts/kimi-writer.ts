@@ -2,7 +2,7 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
+import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome, RemoveOptions } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
 import { normalizeCommandSources } from '../conversion';
 import { kimi, mcpCandidates, pluginsDir } from './kimi';
@@ -19,6 +19,10 @@ type Registry = { version: 1; plugins: Array<Record<string, unknown>> };
 export const kimiWriter: HostWriter = {
   ...kimi,
   supportsAdoption: true,
+  plannedNativeId: (plugin) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`,
+  legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [] : [plugin.name],
+  persistedNativeIdMayAlias: (persisted, requested) =>
+    !persisted.includes('@') && (requested === persisted || requested.startsWith(`${persisted}@`)),
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const id = plugin.name;
     const ownedId = plugin.marketplace === undefined ? id : `${id}@${plugin.marketplace}`;
@@ -46,11 +50,18 @@ export const kimiWriter: HostWriter = {
         if (!opts?.adoptExisting) throw new Error(`Kimi managed plugin ${id} is unowned and differs from the staged representation; pass --adopt-existing to take ownership explicitly`);
         validateNativeIdentity(target, id);
       }
-      const unchanged = marker !== null && marker.fingerprint === (plugin.contentFingerprint ?? '') && same && priorRow?.enabled === true && sameRoot(priorRow.root, target);
+      const unchanged = marker?.pluginId === ownedId && marker.fingerprint === (plugin.contentFingerprint ?? '') && same && priorRow?.enabled === true && sameRoot(priorRow.root, target);
+      const legacyIdentityOnly = marker !== null && marker.pluginId !== ownedId &&
+        marker.fingerprint === (plugin.contentFingerprint ?? '') && same &&
+        priorRow?.enabled === true && sameRoot(priorRow.root, target);
       if (opts?.dryRun) {
         console.log(`[kimi] would install and enable staged plugin: ${target}`);
         console.log(`[kimi] would let Kimi update registry: ${registryFile}`);
         return unchanged ? 'unchanged' : undefined;
+      }
+      if (legacyIdentityOnly) {
+        rewriteOwnership(target, { source: resolved.sourceUri, pluginId: ownedId, fingerprint: plugin.contentFingerprint ?? '' });
+        return;
       }
       if (unchanged) return 'unchanged';
 
@@ -84,14 +95,18 @@ export const kimiWriter: HostWriter = {
     if (plugin.path === undefined || !existsSync(plugin.path)) return { changes: [], refusals: [] };
     return pinPluginMcpFiles(plugin.path, mcpCandidates(), opts);
   },
-  async remove(id: string): Promise<void> {
+  async remove(id: string, opts?: RemoveOptions): Promise<void> {
     const nativeId = id.split('@', 1)[0] ?? '';
     assertId(nativeId);
     const root = pluginsDir(); const target = join(root, 'managed', nativeId); const registryFile = join(root, 'installed.json');
     assertManagedPath(kimiRootPath(), root); assertManagedPath(kimiRootPath(), dirname(target)); assertManagedPath(kimiRootPath(), target); assertFilePath(kimiRootPath(), registryFile);
     const row = readRegistry(registryFile).plugins.find(candidate => candidate.id === nativeId);
     const marker = readOwnership(target);
-    if (row === undefined || marker === null || marker.pluginId !== id || !sameRoot(row.root, target)) throw new Error(`Kimi plugin ${id} is not wholly plgnz-owned; refusing native removal`);
+    const acceptedMarkerIds = new Set([id, ...(opts?.legacyNativeIds ?? [])]);
+    if (row === undefined || marker === null || !acceptedMarkerIds.has(marker.pluginId) ||
+        (opts?.source !== undefined && marker.source !== opts.source) || !sameRoot(row.root, target)) {
+      throw new Error(`Kimi plugin ${id} is not wholly plgnz-owned; refusing native removal`);
+    }
     await nativeRemove(kimiRootPath(), resolveKimiBinary(), nativeId);
     if (readRegistry(registryFile).plugins.some(candidate => candidate.id === nativeId)) throw new Error(`Kimi native removal did not deactivate plugin ${id}`);
   },
@@ -193,6 +208,16 @@ function readSourceManifest(stage: string): Record<string, unknown> {
 function parseJson(path: string, label: string): Record<string, unknown> { try { const raw: unknown = JSON.parse(readFileSync(path, 'utf8')); if (!isObject(raw)) throw new Error('must be an object'); return raw; } catch (error) { throw new Error(`invalid ${label}: ${path} (${(error as Error).message})`); } }
 function validateNativeIdentity(target: string, id: string): void { const file = join(target, 'kimi.plugin.json'); if (!existsSync(file) || parseJson(file, 'Kimi native manifest').name !== id) throw new Error(`unowned Kimi managed plugin has no matching native manifest: ${target}`); }
 function readOwnership(target: string): Ownership | null { const file = join(target, MARKER); const stat = lstatIfPresent(file); if (stat === undefined) return null; if (stat.isSymbolicLink()) throw new Error(`plgnz ownership marker is a symlink: ${file}`); if (!stat.isFile()) throw new Error(`plgnz ownership marker is not a file: ${file}`); const value = parseJson(file, 'plgnz ownership marker'); if (typeof value.source !== 'string' || typeof value.pluginId !== 'string' || typeof value.fingerprint !== 'string') throw new Error(`invalid plgnz ownership marker: ${file}`); return { source: value.source, pluginId: value.pluginId, fingerprint: value.fingerprint }; }
+function rewriteOwnership(target: string, ownership: Ownership): void {
+  const marker = join(target, MARKER);
+  const temporary = join(target, `.plgnz-ownership-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  try {
+    writeFileSync(temporary, JSON.stringify(ownership));
+    renameSync(temporary, marker);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
 function sameTree(left: string, right: string): boolean { if (!existsSync(right)) return false; const readBytes = readFileSync as unknown as (path: string) => Uint8Array; const list = (root: string): string[] => { const out: string[] = []; const walk = (dir: string, prefix: string): void => { for (const name of readdirSync(dir).sort()) { if (name === MARKER) continue; const path = join(dir, name); const rel = prefix ? `${prefix}/${name}` : name; const stat = lstatSync(path); if (stat.isSymbolicLink()) throw new Error(`Kimi plugin contains symlink: ${path}`); if (stat.isDirectory()) walk(path, rel); else if (stat.isFile()) out.push(`${rel}:${Array.from(readBytes(path)).join(',')}`); else throw new Error(`Kimi plugin contains unsupported file: ${path}`); } }; walk(root, ''); return out; }; return JSON.stringify(list(left)) === JSON.stringify(list(right)); }
 function assertNoSymlinks(root: string): void { const walk = (dir: string): void => { const stat = lstatSync(dir); if (stat.isSymbolicLink()) throw new Error(`Kimi plugin contains symlink: ${dir}`); if (!stat.isDirectory()) throw new Error(`Kimi plugin path is not a directory: ${dir}`); for (const name of readdirSync(dir)) { const path = join(dir, name); const child = lstatSync(path); if (child.isSymbolicLink()) throw new Error(`Kimi plugin contains symlink: ${path}`); if (child.isDirectory()) walk(path); else if (!child.isFile()) throw new Error(`Kimi plugin contains unsupported file: ${path}`); } }; walk(root); }
 function moveAside(target: string, root: string): { commit(): void; rollback(): void } { if (!existsSync(target)) return { commit: () => {}, rollback: () => {} }; mkdirSync(root, { recursive: true }); const dir = mkdtempSync(join(root, '.plgnz-kimi-backup-')); const previous = join(dir, 'previous'); renameSync(target, previous); return { commit: () => rmSync(dir, { recursive: true, force: true }), rollback: () => { renameSync(previous, target); rmSync(dir, { recursive: true, force: true }); } }; }

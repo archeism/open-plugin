@@ -5,6 +5,9 @@ import { parse as parseToml } from 'smol-toml';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { grokRoot } from '../paths';
 import { collectPluginServers } from '../mcp';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const grokTargetProfile = singleInstanceTargetProfile('grok');
 
 export const MARKER = '.plgnz-install.json';
 export type GrokOwnership = { source: string; pluginId: string; fingerprint: string; nativeFingerprint?: string };

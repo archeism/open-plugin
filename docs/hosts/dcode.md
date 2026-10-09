@@ -27,16 +27,23 @@ Callers must verify the legacy copy's bytes against their expected source
 before requesting adoption. Ordinary adds do not take over unmarked records.
 
 dcode has native-loader evidence for ordinary plugin skills in
-`docs/evidence/dcode-native-loader-20260922.json` and a five-package public-CLI
-probe against deepagents-code 0.1.74 in
-`docs/evidence/dcode-native-batch2-20260923.md`. Plugin commands and agents
-are unsupported, and user-only skill invocation is not retained by the loader,
-so the writer rejects those inputs before activation. The check reads both
-opening `SKILL.md` frontmatter and a Codex `agents/openai.yaml` sidecar with
-`policy.allow_implicit_invocation: false`. Hooks and MCP declarations
-remain in the staged package unchanged; the writer does not translate or drop
-them, and the native inventory accepts root `mcpServers` / `hooks`, `.mcp.json`,
-and `hooks/hooks.json`. Its manifest reader accepts only `plugin.json`,
-`.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`; a
-`.plugin/plugin.json`-only package is rejected instead of silently losing its
-manifest semantics.
+`docs/evidence/dcode-native-loader-20260922.json` and current lifecycle evidence
+for deepagents-code 0.1.83 in
+`docs/evidence/dcode-native-update-0.1.83-20261009.json`. Source semantics are
+inventoried generically before this writer can activate anything. The 0.1.83
+Managed evidence profile admits ordinary skills, MCP, hooks and resources, but
+returns separate typed gaps for commands, agents, model-invocation control,
+user-invocation control, and permission/preprocessing semantics. Frontmatter
+aliases and a Codex `agents/openai.yaml` sidecar remain distinct declarations;
+malformed or contradictory policy is invalid input rather than a capability
+gap. Unknown detected versions have no optimistic fallback profile.
+The legacy writer bridge still supplies the catalog's pinned observed version;
+actual runtime version discovery belongs to the lifecycle host SPI and must use
+the same profile lookup before activation.
+
+Hooks and MCP declarations remain in the staged package unchanged; the writer
+does not translate or drop them, and the native inventory accepts root
+`mcpServers` / `hooks`, `.mcp.json`, and `hooks/hooks.json`. Its manifest reader
+accepts only `plugin.json`, `.claude-plugin/plugin.json`, and
+`.codex-plugin/plugin.json`; a `.plugin/plugin.json`-only package is rejected
+instead of silently losing its manifest semantics.

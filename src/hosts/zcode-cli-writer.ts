@@ -17,6 +17,7 @@ type Ownership = { owner: 'plgnz'; schema: 1; logicalId: string; nativeId: strin
 export const zcodeCliWriter: HostWriter = {
   ...zcodeCli,
   supportsAdoption: false,
+  plannedNativeId: (plugin) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     if (opts?.adoptExisting) throw new Error('Official ZCode adoption is not implemented; refusing an unowned native install');
     assertName(plugin.name, 'plugin name');

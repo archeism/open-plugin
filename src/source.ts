@@ -1,12 +1,20 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, basename, isAbsolute, resolve } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { join, basename, isAbsolute, relative, resolve } from 'node:path';
 import { cacheRoot } from './paths';
 import { isGitUrl } from './exec';
 import { fingerprintTree } from './fingerprint';
+import { validateGitRef, validateSourceBinding, validateStableIdentityString, type SourceBinding, type SourceSnapshotReference } from './source-reference';
+
+export type { SourceBinding, SourceSnapshotReference } from './source-reference';
 
 export interface PluginSource {
+  /** Immutable package bytes inside the resolved Source snapshot. */
   dir: string;
+  /** Canonical authored package path for local-source provenance. */
+  sourceDir?: string;
+  /** Package directory relative to the Source snapshot root (`.` for its root). */
+  relativeDir?: string;
   name: string;
   version?: string;
   marketplace?: string;
@@ -25,42 +33,55 @@ export interface ResolvedSource {
   sourceUri: string;
   sha: string;
   isGit: boolean;
+  /** Present on sources returned by `resolveSource`; optional for legacy adapter fixtures. */
+  snapshot?: SourceSnapshotReference;
+  /** Ephemeral immutable filesystem root consumed by lifecycle adapters. */
+  snapshotDir?: string;
   plugins: PluginSource[];
 }
 
-export function resolveSource(source: string): ResolvedSource {
-  const sourceUri = normalizeSource(source);
-  const isGit = isGitUrl(sourceUri);
+/** A Source whose lifecycle inputs have been copied into an immutable byte view. */
+export interface FrozenSource extends ResolvedSource {
+  snapshot: SourceSnapshotReference;
+  snapshotDir: string;
+}
+
+export function resolveSource(source: string): FrozenSource {
+  const parsed = parseSource(source);
+  let sourceUri = parsed.sourceUri;
+  const isGit = parsed.binding.kind === 'git';
   let targetDir = sourceUri;
+  let sourceRoot: string | undefined;
   let sha = 'local';
+  let binding = parsed.binding;
   
-  if (isGit) {
-    const ls = spawnSync('git', ['ls-remote', sourceUri, 'HEAD'], { encoding: 'utf8' });
-    if (ls.status !== 0) throw new Error(`Failed to resolve git remote: ${sourceUri}`);
-    sha = ls.stdout.split('\t')[0] || '';
-    if (!sha || sha.length !== 40) throw new Error(`Invalid sha from git ls-remote: ${sha}`);
-    
-    const cacheDir = cacheRoot();
-    mkdirSync(cacheDir, { recursive: true });
-    targetDir = join(cacheDir, sha);
-    
-    if (!existsSync(targetDir)) {
-      const clone = spawnSync('git', ['clone', '--depth=1', sourceUri, targetDir]);
-      if (clone.status !== 0) throw new Error(`Failed to clone ${sourceUri}`);
-    }
+  if (parsed.binding.kind === 'git') {
+    sha = resolveRemoteRevision(parsed.fetchLocator!, parsed.binding.ref, parsed.binding.locator);
+    targetDir = freezeRemoteSource(parsed.fetchLocator!, sha, parsed.binding.locator);
   } else {
     // An absolute source (what `add` records in state.json, and what `update`
     // feeds back) must not be re-rooted at the cwd — path.join does not reset
     // on an absolute second argument.
     targetDir = sourceUri;
     if (!existsSync(targetDir)) throw new Error(`Local source not found: ${targetDir}`);
+    targetDir = assertSafeSourceTree(targetDir);
+    sourceRoot = targetDir;
+    sourceUri = targetDir;
+    binding = { kind: 'local', locator: targetDir };
     const rev = spawnSync('git', ['-C', targetDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
     if (rev.status === 0) {
       const match = rev.stdout.trim().match(/^[0-9a-f]{40}$/i);
       if (match) sha = match[0];
     }
+    targetDir = freezeLocalSource(targetDir);
   }
   targetDir = assertSafeSourceTree(targetDir);
+  const snapshotFingerprint = fingerprintTree(targetDir);
+  const snapshot: SourceSnapshotReference = {
+    binding,
+    revision: isGit ? sha : snapshotFingerprint,
+    fingerprint: snapshotFingerprint,
+  };
 
   const plugins: PluginSource[] = [];
   
@@ -84,56 +105,223 @@ export function resolveSource(source: string): ResolvedSource {
       const pDir = resolve(targetDir, entry['source']);
       if (!isInside(targetDir, pDir)) throw new Error(`Marketplace plugin source escapes collection root: ${entry['source']}`);
       if (!existsSync(pDir) || !statSync(pDir).isDirectory()) throw new Error(`Marketplace plugin source is not a directory: ${entry['source']}`);
-      plugins.push(pluginFromDir(pDir, marketplaceName));
+      plugins.push(pluginFromDir(pDir, marketplaceName, targetDir, sourceRoot));
     }
   }
   
-  if (plugins.length > 0) return resolvedSource(sourceUri, sha, isGit, plugins);
+  if (plugins.length > 0) return resolvedSource(sourceUri, sha, isGit, snapshot, targetDir, plugins);
 
   // 2. Root plugin
   if (isPluginDir(targetDir)) {
-    plugins.push(pluginFromDir(targetDir));
-    return resolvedSource(sourceUri, sha, isGit, plugins);
+    plugins.push(pluginFromDir(targetDir, undefined, targetDir, sourceRoot));
+    return resolvedSource(sourceUri, sha, isGit, snapshot, targetDir, plugins);
   }
 
   // 3. Recursive scan (1 level deep)
   for (const entry of readdirSync(targetDir)) {
     const subDir = join(targetDir, entry);
     if (statSync(subDir).isDirectory() && isPluginDir(subDir)) {
-      plugins.push(pluginFromDir(subDir));
+      plugins.push(pluginFromDir(subDir, undefined, targetDir, sourceRoot));
     }
   }
   
   if (plugins.length === 0) throw new Error(`No plugins discovered in source: ${sourceUri}`);
-  return resolvedSource(sourceUri, sha, isGit, plugins);
+  return resolvedSource(sourceUri, sha, isGit, snapshot, targetDir, plugins);
 }
 
-function resolvedSource(sourceUri: string, sha: string, isGit: boolean, plugins: PluginSource[]): ResolvedSource {
+function resolvedSource(sourceUri: string, sha: string, isGit: boolean, snapshot: SourceSnapshotReference, snapshotDir: string, plugins: PluginSource[]): FrozenSource {
   const seen = new Set<string>();
   for (const plugin of plugins) {
     const identity = `${plugin.name}@${plugin.marketplace ?? 'local'}`;
     if (seen.has(identity)) throw new Error(`Duplicate plugin identity discovered: ${identity}`);
     seen.add(identity);
   }
-  return { sourceUri, sha, isGit, plugins };
+  return { sourceUri, sha, isGit, snapshot, snapshotDir, plugins };
 }
 
 /** Owner/repo is the public GitHub shorthand; all local roots become absolute. */
 export function normalizeSource(source: string): string {
-  if (source.startsWith('./') || source.startsWith('../') || isAbsolute(source)) return resolve(source);
-  if (/^[^/\s]+\/[^/\s]+$/.test(source)) return `https://github.com/${source}.git`;
-  if (isGitUrl(source)) return source;
-  return resolve(source);
+  return parseSource(source).sourceUri;
 }
 
 function withFingerprint(plugin: PluginSource): PluginSource {
   return { ...plugin, contentFingerprint: fingerprintTree(plugin.dir) };
 }
 
-function pluginFromDir(dir: string, marketplace?: string): PluginSource {
+function pluginFromDir(dir: string, marketplace?: string, snapshotRoot: string = dir, sourceRoot?: string): PluginSource {
   const manifest = readPluginManifest(dir);
   const name = manifest?.name ?? inferredPluginName(dir);
-  return withFingerprint({ dir, name, ...(manifest?.version === undefined ? {} : { version: manifest.version }), ...(marketplace === undefined ? {} : { marketplace }) });
+  const relativeDir = relative(snapshotRoot, dir) || '.';
+  const sourceDir = sourceRoot === undefined ? undefined : relativeDir === '.' ? sourceRoot : join(sourceRoot, relativeDir);
+  return withFingerprint({ dir, name, relativeDir, ...(sourceDir === undefined ? {} : { sourceDir }), ...(manifest?.version === undefined ? {} : { version: manifest.version }), ...(marketplace === undefined ? {} : { marketplace }) });
+}
+
+/** Copy a local Source twice and retain one content-addressed immutable byte view. */
+function freezeLocalSource(source: string): string {
+  const snapshots = join(cacheRoot(), 'source-snapshots');
+  if (isInside(source, snapshots)) throw new Error(`Local source contains plugnz's snapshot cache: ${source}`);
+  mkdirSync(snapshots, { recursive: true });
+  const candidate = mkdtempSync(join(snapshots, '.candidate-'));
+  const verification = mkdtempSync(join(snapshots, '.verification-'));
+  try {
+    copySourceTree(source, candidate);
+    copySourceTree(source, verification);
+    const fingerprint = fingerprintTree(candidate);
+    if (fingerprintTree(verification) !== fingerprint) throw new Error(`Local source changed while it was being frozen: ${source}`);
+    const target = join(snapshots, fingerprint);
+    if (existsSync(target)) {
+      if (fingerprintTree(assertSafeSourceTree(target)) !== fingerprint) throw new Error(`Cached Source snapshot is corrupt: ${target}`);
+      return target;
+    }
+    renameSync(candidate, target);
+    return target;
+  } finally {
+    rmSync(candidate, { recursive: true, force: true });
+    rmSync(verification, { recursive: true, force: true });
+  }
+}
+
+function copySourceTree(source: string, destination: string): void {
+  for (const entry of readdirSync(source).sort()) {
+    if (entry === '.git') continue;
+    const from = join(source, entry);
+    const to = join(destination, entry);
+    const stat = lstatSync(from);
+    if (stat.isSymbolicLink()) throw new Error(`Symlink resources are not supported: ${from}`);
+    if (stat.isDirectory()) {
+      mkdirSync(to, { recursive: true });
+      copySourceTree(from, to);
+    } else if (stat.isFile()) cpSync(from, to);
+    else throw new Error(`Source contains a non-file resource: ${from}`);
+  }
+}
+
+interface ParsedSource {
+  binding: SourceBinding;
+  sourceUri: string;
+  /** Authentication-bearing transport locator; never returned or persisted. */
+  fetchLocator?: string;
+}
+
+function parseSource(source: string): ParsedSource {
+  if (source.startsWith('./') || source.startsWith('../') || isAbsolute(source)) {
+    const locator = resolve(source);
+    const binding: SourceBinding = { kind: 'local', locator };
+    validateSourceBinding(binding);
+    return { binding, sourceUri: locator };
+  }
+  if (isGitUrl(source)) {
+    const hash = source.indexOf('#');
+    const rawLocator = hash === -1 ? source : source.slice(0, hash);
+    const ref = validateGitRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
+    const fetchLocator = rawLocator;
+    const locator = credentialFreeHttpLocator(rawLocator);
+    const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
+    return { binding, sourceUri: formatSourceBinding(binding), fetchLocator };
+  }
+  const shorthand = /^([^/\s#]+)\/([^/\s#]+?)(?:#([\s\S]*))?$/u.exec(source);
+  if (shorthand !== null) {
+    const owner = shorthand[1]!;
+    const repository = shorthand[2]!.endsWith('.git') ? shorthand[2]! : `${shorthand[2]!}.git`;
+    const ref = validateGitRef(shorthand[3] ?? 'HEAD');
+    const locator = `https://github.com/${owner}/${repository}`;
+    const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
+    return { binding, sourceUri: formatSourceBinding(binding), fetchLocator: locator };
+  }
+  const locator = resolve(source);
+  const binding: SourceBinding = { kind: 'local', locator };
+  validateSourceBinding(binding);
+  return { binding, sourceUri: locator };
+}
+
+function formatSourceBinding(binding: SourceBinding): string {
+  return binding.kind === 'git' && binding.ref !== 'HEAD' ? `${binding.locator}#${binding.ref}` : binding.locator;
+}
+
+function credentialFreeHttpLocator(locator: string): string {
+  if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
+  validateStableIdentityString(locator, 'Raw HTTP(S) Source locator');
+  if (locator.includes('\\')) throw new Error('Raw HTTP(S) Source locator must not contain backslashes');
+  const match = /^(https?:\/\/)([^/?#]*)([\s\S]*)$/u.exec(locator);
+  if (match === null) return locator;
+  const authority = match[2]!;
+  const at = authority.lastIndexOf('@');
+  if (at === -1) return locator;
+  if (authority.indexOf('@') !== at) throw new Error('Raw HTTP(S) Source locator must not contain multiple literal @ characters');
+  const userinfo = authority.slice(0, at);
+  validateStableIdentityString(userinfo, 'Raw HTTP(S) Source locator userinfo');
+  if (userinfo.includes(' ')) throw new Error('Raw HTTP(S) Source locator userinfo must not contain spaces');
+  return `${match[1]!}${authority.slice(at + 1)}${match[3]!}`;
+}
+
+function resolveRemoteRevision(fetchLocator: string, ref: string, displayLocator: string): string {
+  if (/^[0-9a-f]{40}$/iu.test(ref)) return ref.toLowerCase();
+  const queries = ref === 'HEAD'
+    ? ['HEAD']
+    : ref.startsWith('refs/')
+      ? [ref, `${ref}^{}`]
+      : [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`];
+  const result = spawnSync(gitExecutable(), ['ls-remote', fetchLocator, ...queries], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    const detail = safeGitDiagnostic(result.stderr, fetchLocator, displayLocator);
+    throw new Error(`Failed to resolve git remote: ${displayLocator}${detail === '' ? '' : ` (${detail})`}`);
+  }
+  const rows = result.stdout.split('\n').map((line) => {
+    const [revision, name] = line.trim().split(/\s+/u);
+    return revision !== undefined && /^[0-9a-f]{40}$/iu.test(revision) && name !== undefined ? { revision: revision.toLowerCase(), name } : undefined;
+  }).filter((row): row is { revision: string; name: string } => row !== undefined);
+  let selected: string | undefined;
+  if (ref === 'HEAD') selected = rows.find((row) => row.name === 'HEAD')?.revision;
+  else if (ref.startsWith('refs/')) selected = rows.find((row) => row.name === `${ref}^{}`)?.revision ?? rows.find((row) => row.name === ref)?.revision;
+  else {
+    const branch = rows.find((row) => row.name === `refs/heads/${ref}`)?.revision;
+    const tag = rows.find((row) => row.name === `refs/tags/${ref}^{}`)?.revision ?? rows.find((row) => row.name === `refs/tags/${ref}`)?.revision;
+    if (branch !== undefined && tag !== undefined) throw new Error(`Ambiguous git ref '${ref}' at ${displayLocator}`);
+    selected = branch ?? tag;
+  }
+  if (selected === undefined) throw new Error(`Git ref '${ref}' was not found at ${displayLocator}`);
+  return selected;
+}
+
+function freezeRemoteSource(fetchLocator: string, revision: string, displayLocator: string): string {
+  const snapshots = join(cacheRoot(), 'source-snapshots');
+  mkdirSync(snapshots, { recursive: true });
+  const candidate = mkdtempSync(join(snapshots, '.candidate-'));
+  try {
+    requireGit(['init', '--quiet', candidate], `Failed to initialize Source snapshot for ${displayLocator}`);
+    requireGit(['-C', candidate, 'fetch', '--quiet', '--depth=1', fetchLocator, revision], `Failed to fetch resolved revision ${revision} from ${displayLocator}`);
+    requireGit(['-C', candidate, 'checkout', '--quiet', '--detach', 'FETCH_HEAD'], `Failed to materialize resolved revision ${revision} from ${displayLocator}`);
+    const head = spawnSync(gitExecutable(), ['-C', candidate, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    if (head.status !== 0 || head.stdout.trim().toLowerCase() !== revision) throw new Error(`Git materialization did not produce resolved revision ${revision} from ${displayLocator}`);
+    rmSync(join(candidate, '.git'), { recursive: true, force: true });
+    const fingerprint = fingerprintTree(candidate);
+    const target = join(snapshots, fingerprint);
+    if (existsSync(target)) {
+      if (fingerprintTree(assertSafeSourceTree(target)) !== fingerprint) throw new Error(`Cached Source snapshot is corrupt: ${target}`);
+      return target;
+    }
+    renameSync(candidate, target);
+    return target;
+  } finally {
+    rmSync(candidate, { recursive: true, force: true });
+  }
+}
+
+function requireGit(args: string[], message: string): void {
+  const result = spawnSync(gitExecutable(), args, { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(message);
+}
+
+function gitExecutable(): string {
+  return process.env['OPEN_PLUGIN_GIT_BIN'] ?? 'git';
+}
+
+function safeGitDiagnostic(stderr: string, fetchLocator: string, displayLocator: string): string {
+  return stderr.trim()
+    .replaceAll(fetchLocator, displayLocator)
+    .replace(/https?:\/\/[^/@\s]+@/giu, (prefix) => prefix.slice(0, prefix.indexOf('//') + 2));
 }
 
 function assertSafeSourceTree(path: string): string {

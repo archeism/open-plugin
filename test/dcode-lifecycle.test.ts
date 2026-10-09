@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { dcode } from '../src/hosts/dcode';
 import { dcodeWriter } from '../src/hosts/dcode-writer';
 import { CompatibilityError } from '../src/compatibility';
+import { PackageCapabilityError } from '../src/capability-evidence';
+import { SemanticInventoryError } from '../src/semantic-inventory';
 import type { PluginSource, ResolvedSource } from '../src/source';
 import { writeFiles } from './util';
 
@@ -22,6 +24,7 @@ async function isolated(fn: (root: string) => Promise<void>): Promise<void> {
 }
 async function failed(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected failure'); }
 const registry = (root: string) => join(root, '.state', 'installed_plugins.json');
+const enablement = (root: string) => join(root, '.state', 'plugin_state.json');
 const copy = (root: string) => join(root, 'plugins/cache/personal/addy/0.1.0');
 
 describe('dcode lifecycle', () => {
@@ -97,27 +100,177 @@ describe('dcode lifecycle', () => {
       expect(readFileSync(join(copy(root), '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"fixture"}}}\n'); expect(readFileSync(join(copy(root), 'hooks/hooks.json'), 'utf8')).toBe('{"hooks":{}}\n');
     });
   });
+  test('refuses hook declarations that dcode would mask or partially ignore before activation', async () => {
+    for (const shape of ['masked-manifest', 'mixed-array'] as const) {
+      await isolated(async root => {
+        const item = incoming();
+        const inline = { PreToolUse: [{ hooks: [{ type: 'command', command: 'true' }] }] };
+        if (shape === 'masked-manifest') {
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({ name: 'addy', version: '0.1.0', hooks: inline })}\n`,
+          });
+        } else {
+          rmSync(join(item.plugin.dir, 'plugin.json'));
+          writeFiles(item.plugin.dir, {
+            '.claude-plugin/plugin.json': `${JSON.stringify({
+              name: 'addy', version: '0.1.0', hooks: ['./config/hooks.json', inline],
+            })}\n`,
+            'config/hooks.json': `${JSON.stringify({ hooks: inline })}\n`,
+          });
+        }
+
+        const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+        expect(error instanceof PackageCapabilityError).toBe(true);
+        expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+          { capabilityId: 'hooks', code: 'capability.unsupported' },
+        ]);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+      });
+    }
+  });
+  test('refuses hook groups whose dcode handler options or matchers would be dropped before activation', async () => {
+    const cases = [
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', async: true }] }, code: 'capability.unsupported', diagnostic: "handler option 'async' enables unsupported asynchronous execution" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', argv: [] }] }, code: 'capability.unsupported', diagnostic: "handler option 'argv' is not a non-empty string array with an executable" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', timeout: 0 }] }, code: 'capability.unsupported', diagnostic: "handler option 'timeout' is not a positive finite number" },
+      { event: 'PreToolUse', group: { matcher: 'Write', hooks: [{ type: 'command', command: 'true', statusMessage: 1 }] }, code: 'capability.unsupported', diagnostic: "handler option 'statusMessage' is not a string" },
+      { event: 'Stop', group: { matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unsupported', diagnostic: "event 'Stop' does not support matcher 'Bash'" },
+      { event: 'PreToolUse', group: { matcher: '[', hooks: [{ type: 'command', command: 'true' }] }, code: 'capability.unverified', diagnostic: "matcher '[' for event 'PreToolUse' uses unverified pattern syntax" },
+    ] as const;
+
+    for (const fixture of cases) {
+      await isolated(async root => {
+        const item = incoming();
+        writeFiles(item.plugin.dir, {
+          'hooks/hooks.json': `${JSON.stringify({ hooks: { [fixture.event]: [fixture.group] } })}\n`,
+        });
+
+        const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+        expect(error instanceof PackageCapabilityError).toBe(true);
+        expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code }) => ({ capabilityId, code }))).toEqual([
+          { capabilityId: 'hooks', code: fixture.code },
+        ]);
+        expect(error.message).toContain(fixture.diagnostic);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+      });
+    }
+  });
+  test('admits the proven dcode command options and a declared JSON document without a json suffix', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      const hooks = {
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Write',
+            hooks: [{
+              type: 'command', command: 'true', async: false, argv: ['true'], timeout: 1, statusMessage: 'running',
+            }],
+          }],
+        },
+      };
+      writeFiles(item.plugin.dir, {
+        'plugin.json': `${JSON.stringify({ name: 'addy', version: '0.1.0', hooks: './config/hooks.conf' })}\n`,
+        'config/hooks.conf': `${JSON.stringify(hooks)}\n`,
+      });
+
+      await dcodeWriter.add(item.plugin, item.resolved);
+      expect(readFileSync(join(copy(root), 'config/hooks.conf'), 'utf8')).toBe(`${JSON.stringify(hooks)}\n`);
+    });
+  });
   test('refuses a .plugin-only manifest that the native loader does not read', async () => {
     await isolated(async root => {
       const item = incoming(); rmSync(join(item.plugin.dir, 'plugin.json')); writeFiles(item.plugin.dir, { '.plugin/plugin.json': '{"name":"addy","version":"0.1.0"}\n' });
       expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('no supported plugin manifest'); expect(existsSync(copy(root))).toBe(false);
     });
   });
-  test('unsupported command and user-only semantics preserve the active copy', async () => {
+  test('unsupported commands, agents, and model-invocation controls are typed before activation', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': 'nope\n' });
-      const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved)); expect(commandFailure instanceof CompatibilityError).toBe(true); expect(commandFailure.message).toContain("target 'dcode' is unsupported for commandProjection"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': '---\ndescription: x\n---\nbody\n', 'agents/x.md': '---\nname: x\ndescription: x\n---\nbody\n' });
+      const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved));
+      expect(commandFailure instanceof PackageCapabilityError).toBe(true);
+      expect((commandFailure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual(['commands', 'agents']);
+      expect(commandFailure.message).toContain("target 'dcode' 0.1.83 managed update is unsupported for commands");
+      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: true\n---\nbody\n' });
-      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain("target 'dcode' is unsupported for userOnlySkills"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain('unsupported for model-invocation-control'); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
-  test('reads all user-only aliases only from opening YAML frontmatter', async () => {
+  test('rejects unknown, duplicate, and malformed alternate component roots before first activation', async () => {
+    const cases: Array<{ name: string; files: Record<string, string> }> = [
+      { name: 'unknown-command', files: { 'commands/run.txt': 'must not activate\n' } },
+      { name: 'unknown-agent', files: { 'agents/reviewer.txt': 'must not activate\n' } },
+      { name: 'unsupported-preprocessing', files: { 'commands/run.md': '---\ndescription: Run\n---\nRead @{../resources/guide.md}.\n' } },
+      {
+        name: 'malformed-alternate-command',
+        files: {
+          'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+          '.claude/commands/hidden.txt': 'must not be suppressed\n',
+        },
+      },
+      {
+        name: 'malformed-alternate-agent',
+        files: {
+          'agents/reviewer.md': '---\nname: reviewer\ndescription: Review\n---\nbody\n',
+          '.claude/agents/hidden.toml': 'must not be suppressed\n',
+        },
+      },
+      {
+        name: 'duplicate-command',
+        files: {
+          'commands/run.md': '---\ndescription: Run\n---\nbody\n',
+          'commands/run.toml': 'description = "Run"\nprompt = "body"\n',
+        },
+      },
+    ];
+
+    for (const item of cases) {
+      await isolated(async root => {
+        const candidate = incoming();
+        writeFiles(candidate.plugin.dir, item.files);
+        const failure = await failed(() => dcodeWriter.add(candidate.plugin, candidate.resolved));
+        expect(failure instanceof SemanticInventoryError).toBe(true);
+        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(registry(root))).toBe(false);
+        expect(existsSync(enablement(root))).toBe(false);
+      });
+    }
+  });
+  test('unions stronger semantics from a valid alternate root before replacing active state', async () => {
+    await isolated(async root => {
+      const first = incoming('first\n');
+      await dcodeWriter.add(first.plugin, first.resolved);
+      const beforeSkill = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const beforeRegistry = readFileSync(registry(root), 'utf8');
+      const beforeEnablement = readFileSync(enablement(root), 'utf8');
+      const changed = incoming('second\n');
+      changed.resolved.sourceUri = first.resolved.sourceUri;
+      writeFiles(changed.plugin.dir, {
+        'commands/run.toml': 'description = "Run"\nprompt = "neutral body"\n',
+        '.claude/commands/run.md': '---\ndescription: Run\npermissionMode: bypassPermissions\ndisable-model-invocation: true\nuser-invocable: false\n---\nprojected body\n',
+      });
+
+      const failure = await failed(() => dcodeWriter.add(changed.plugin, changed.resolved));
+      expect(failure instanceof PackageCapabilityError).toBe(true);
+      expect((failure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual([
+        'commands',
+        'model-invocation-control',
+        'user-invocation-control',
+        'permissions-preprocessing',
+      ]);
+      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(beforeSkill);
+      expect(readFileSync(registry(root), 'utf8')).toBe(beforeRegistry);
+      expect(readFileSync(enablement(root), 'utf8')).toBe(beforeEnablement);
+    });
+  });
+  test('reads model and user invocation aliases independently only from opening YAML frontmatter', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      for (const [key, value] of [['disable-model-invocation', true], ['disable_model_invocation', true], ['user-invocable', false], ['user_invocable', false]] as const) {
+      for (const [key, value, capability] of [['disable-model-invocation', true, 'model-invocation-control'], ['disable_model_invocation', true, 'model-invocation-control'], ['user-invocable', false, 'user-invocation-control'], ['user_invocable', false, 'user-invocation-control']] as const) {
         const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': `---\nname: a\ndescription: fixture\n"${key}": ${value}\n---\nbody\n` });
-        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain("target 'dcode' is unsupported for userOnlySkills"); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain(`unsupported for ${capability}`); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       }
       const ordinary = incoming(); ordinary.resolved.sourceUri = first.resolved.sourceUri; writeFiles(ordinary.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: false\nuser-invocable: true\n---\nbody\n', 'skills/a/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: true\n' });
       expect(await dcodeWriter.add(ordinary.plugin, ordinary.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
@@ -132,9 +285,11 @@ describe('dcode lifecycle', () => {
       writeFiles(restricted.plugin.dir, { 'skills/a/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: false\n' });
       const failure = await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved));
       expect(failure instanceof CompatibilityError).toBe(true);
-      expect(failure.message).toContain("target 'dcode' is unsupported for userOnlySkills");
+      expect(failure.message).toContain('unsupported for model-invocation-control');
       writeFiles(restricted.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: false\nuser-invocable: true\n---\nsecond\n' });
-      expect((await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved))).message).toContain("target 'dcode' is unsupported for userOnlySkills");
+      const conflict = await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved));
+      expect(conflict instanceof SemanticInventoryError).toBe(true);
+      expect(conflict.message).toContain('conflicting model-invocation policy declarations');
       expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toContain('first');
     });
   });

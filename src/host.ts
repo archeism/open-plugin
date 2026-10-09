@@ -71,19 +71,6 @@ export interface AddOptions {
   adoptExisting?: boolean;
 }
 
-export type InstallStatus = 'installed' | 'unchanged' | 'unsupported' | 'unverified' | 'failed';
-
-/** Generic mutation result; readers keep their host-native data shapes. */
-export interface InstallOutcome {
-  plugin: string;
-  target: string;
-  status: InstallStatus;
-  dryRun: boolean;
-  diagnostic?: string;
-  nativeId?: string;
-  action?: 'install' | 'update' | 'remove';
-}
-
 export interface PinOptions {
   /** Report what would change without writing. */
   dryRun?: boolean;
@@ -112,13 +99,26 @@ export interface PinOutcome {
   refusals: PinRefusal[];
 }
 
+export interface RemoveOptions {
+  /** Durable Source identity from the ownership ledger. */
+  source?: string;
+  /** Exact adapter-owned obsolete identities accepted for this canonical removal. */
+  legacyNativeIds?: readonly string[];
+}
+
 import type { PluginSource, ResolvedSource } from './source';
 
 export interface HostWriter extends HostReader {
   /** Whether this writer implements explicit legacy adoption. */
   readonly supportsAdoption?: boolean;
+  /** Exact public native identity this adapter will expose through readback after apply. */
+  readonly plannedNativeId: (plugin: PluginSource) => string;
+  /** Adapter-owned obsolete ledger identities eligible for migration to plannedNativeId. */
+  readonly legacyNativeIds?: (plugin: PluginSource) => readonly string[];
+  /** Pure, conservative relation used to select a persisted ID before dynamic identity capture. */
+  readonly persistedNativeIdMayAlias?: (persistedNativeId: string, requestedIdentity: string) => boolean;
   add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'>;
-  remove(id: string): Promise<void>;
+  remove(id: string, opts?: RemoveOptions): Promise<void>;
   /**
    * Rewrite every *bare* stdio `command` in this plugin's installed copy to the
    * absolute path it resolves to on this process's PATH, so a GUI host with no

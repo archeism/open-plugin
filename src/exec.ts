@@ -75,16 +75,36 @@ export function gitHead(dir: string): string | null {
  * cannot drift apart.
  */
 export function isGitUrl(source: string): boolean {
-  return source.startsWith('http://') || source.startsWith('https://') || source.startsWith('git@');
+  return source.startsWith('http://')
+    || source.startsWith('https://')
+    || source.startsWith('ssh://')
+    || source.startsWith('git://')
+    || source.startsWith('git@');
 }
 
 /** Current HEAD sha of a git remote via `git ls-remote`, or null when unreachable. */
 export function gitRemoteHead(url: string): string | null {
   try {
-    const r = spawnSync('git', ['ls-remote', url, 'HEAD'], { encoding: 'utf8' });
+    const hash = url.lastIndexOf('#');
+    const locator = hash === -1 ? url : url.slice(0, hash);
+    const ref = hash === -1 ? 'HEAD' : url.slice(hash + 1);
+    if (/^[0-9a-f]{40}$/iu.test(ref)) return ref.toLowerCase();
+    const queries = ref === 'HEAD'
+      ? ['HEAD']
+      : ref.startsWith('refs/')
+        ? [ref, `${ref}^{}`]
+        : [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`];
+    const r = spawnSync(process.env['OPEN_PLUGIN_GIT_BIN'] ?? 'git', ['ls-remote', locator, ...queries], { encoding: 'utf8', env: { ...process.env } });
     if (r.status !== 0) return null;
-    const sha = r.stdout.split('\t')[0]?.trim() ?? '';
-    return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+    const rows = r.stdout.split('\n').map((line) => {
+      const [revision, name] = line.trim().split(/\s+/u);
+      return revision !== undefined && /^[0-9a-f]{40}$/iu.test(revision) && name !== undefined ? { revision: revision.toLowerCase(), name } : undefined;
+    }).filter((row): row is { revision: string; name: string } => row !== undefined);
+    if (ref === 'HEAD') return rows.find((row) => row.name === 'HEAD')?.revision ?? null;
+    if (ref.startsWith('refs/')) return rows.find((row) => row.name === `${ref}^{}`)?.revision ?? rows.find((row) => row.name === ref)?.revision ?? null;
+    const branch = rows.find((row) => row.name === `refs/heads/${ref}`)?.revision;
+    const tag = rows.find((row) => row.name === `refs/tags/${ref}^{}`)?.revision ?? rows.find((row) => row.name === `refs/tags/${ref}`)?.revision;
+    return branch !== undefined && tag !== undefined ? null : branch ?? tag ?? null;
   } catch {
     return null;
   }

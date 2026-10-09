@@ -16,6 +16,7 @@ declare const Bun: { YAML: { parse(input: string): unknown } };
 
 export const opencodeWriter: HostWriter = {
   ...opencode,
+  plannedNativeId: (plugin) => `${plugin.name}@${plugin.marketplace ?? 'local'}`,
   async add(plugin: PluginSource, resolved: ResolvedSource, opts?: AddOptions): Promise<void | 'unchanged'> {
     const market = plugin.marketplace ?? 'local', id = `${plugin.name}@${market}`, name = packageName(market, plugin.name);
     assertIdentity(market); assertIdentity(plugin.name); assertStore(); assertTree(plugin.dir); assertSupportedRoot(plugin.dir);
