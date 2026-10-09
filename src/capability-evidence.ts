@@ -49,6 +49,11 @@ export type PackageAdmissionRequest =
       inventory: PackageSemanticInventory;
     })
   | (PackageAdmissionRequestBase & {
+      operation: 'disable';
+      /** Disablement is authorized from a recorded owned activation, never Source bytes. */
+      inventory?: never;
+    })
+  | (PackageAdmissionRequestBase & {
       operation: 'retire';
       /** Retirement is authorized from recorded activation state when Source is unavailable. */
       inventory?: PackageSemanticInventory;
@@ -73,7 +78,7 @@ export class PackageCapabilityError extends CompatibilityError {
   }
 }
 
-const dcode0183Managed = defineProfile({
+const dcode0183Managed = createCapabilityEvidenceProfile({
   host: 'dcode',
   detectedVersion: '0.1.83',
   sourceTypes: ['local', 'git'],
@@ -96,6 +101,7 @@ const dcode0183Managed = defineProfile({
     readback: 'supported',
     rollback: 'supported',
     'activation-reload': 'supported',
+    'reversible-disable': 'unverified',
   },
   evidence: [
     'docs/evidence/dcode-native-update-0.1.83-20261009.json',
@@ -112,16 +118,30 @@ export const capabilityEvidenceProfiles: readonly CapabilityEvidenceProfile[] = 
  * this function never admits a supported subset of a refused package.
  */
 export function admitPackageSemantics(request: PackageAdmissionRequest): PackageAdmission {
+  return admitPackageSemanticsFromProfiles(request, capabilityEvidenceProfiles);
+}
+
+/** Pure evidence lookup used by the lifecycle route selector with its frozen profile set. */
+export function admitPackageSemanticsFromProfiles(
+  request: PackageAdmissionRequest,
+  profiles: readonly CapabilityEvidenceProfile[],
+): PackageAdmission {
   const requirements = request.operation === 'retire'
     ? requiredSemanticsForOperation(request.inventory, 'retire')
-    : requiredSemanticsForOperation(request.inventory, request.operation);
+    : request.operation === 'disable'
+      ? requiredSemanticsForOperation(undefined, 'disable')
+      : requiredSemanticsForOperation(request.inventory, request.operation);
   const version = normalizedDetectedVersion(request.detectedVersion);
-  const profile = version === undefined ? undefined : capabilityEvidenceProfiles.find((candidate) =>
+  const matching = version === undefined ? [] : profiles.filter((candidate) =>
     candidate.host === request.host
     && candidate.detectedVersion === version
     && candidate.sourceTypes.includes(request.sourceType)
     && candidate.operations.includes(request.operation)
     && candidate.route === request.route);
+  if (matching.length > 1) {
+    throw new Error(`ambiguous capability evidence for ${request.host} ${version} ${request.sourceType} ${request.route} ${request.operation}`);
+  }
+  const profile = matching[0];
 
   if (profile === undefined) {
     const displayVersion = version ?? 'unknown/unparseable';
@@ -193,7 +213,9 @@ function capabilityReason(
   );
 }
 
-function defineProfile(input: Omit<CapabilityEvidenceProfile, 'schemaVersion' | 'evidenceId'>): CapabilityEvidenceProfile {
+export function createCapabilityEvidenceProfile(
+  input: Omit<CapabilityEvidenceProfile, 'schemaVersion' | 'evidenceId'>,
+): CapabilityEvidenceProfile {
   const sourceTypes = [...input.sourceTypes].sort();
   const operations = [...input.operations].sort();
   const evidence = [...input.evidence].sort();

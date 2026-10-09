@@ -22,9 +22,10 @@ export const PACKAGE_SEMANTICS = [
   'readback',
   'rollback',
   'activation-reload',
+  'reversible-disable',
 ] as const;
 
-export const CAPABILITY_OPERATIONS = ['install', 'update', 'retire'] as const;
+export const CAPABILITY_OPERATIONS = ['install', 'update', 'disable', 'retire'] as const;
 export const SOURCE_TYPES = ['local', 'git'] as const;
 
 export type PackageSemantic = (typeof PACKAGE_SEMANTICS)[number];
@@ -207,6 +208,10 @@ export function requiredSemanticsForOperation(
   operation: 'retire',
 ): PackageSemantic[];
 export function requiredSemanticsForOperation(
+  inventory: undefined,
+  operation: 'disable',
+): PackageSemantic[];
+export function requiredSemanticsForOperation(
   inventory: PackageSemanticInventory | undefined,
   operation: CapabilityOperation,
 ): PackageSemantic[] {
@@ -217,6 +222,15 @@ export function requiredSemanticsForOperation(
       'readback',
       'rollback',
       'activation-reload',
+    ]));
+  }
+  if (operation === 'disable') {
+    return ordered(new Set<PackageSemantic>([
+      'retention-safety',
+      'readback',
+      'rollback',
+      'activation-reload',
+      'reversible-disable',
     ]));
   }
   if (inventory === undefined) invalid(`${operation} semantic admission requires Source inventory`);

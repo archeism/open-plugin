@@ -11,7 +11,9 @@ import {
 } from '../src/semantic-inventory';
 import {
   admitPackageSemantics,
+  admitPackageSemanticsFromProfiles,
   capabilityEvidenceProfiles,
+  createCapabilityEvidenceProfile,
 } from '../src/capability-evidence';
 import type { PluginSource } from '../src/source';
 import { writeFiles } from './util';
@@ -64,6 +66,7 @@ describe('source package semantic inventory', () => {
       'readback',
       'rollback',
       'activation-reload',
+      'reversible-disable',
     ]);
   });
 
@@ -340,6 +343,39 @@ describe('source package semantic inventory', () => {
 });
 
 describe('versioned capability evidence', () => {
+  test('selects from an explicit immutable evidence set and rejects ambiguous cells', () => {
+    const inventory = inventoryPackageSemantics(source('explicit-evidence', {
+      'skills/a/SKILL.md': skill(),
+    }));
+    const profile = createCapabilityEvidenceProfile({
+      host: 'fixture',
+      detectedVersion: '1.0.0',
+      sourceTypes: ['local'],
+      operations: ['install'],
+      route: 'managed',
+      operationStatus: 'supported',
+      semantics: Object.fromEntries(PACKAGE_SEMANTICS.map((semantic) => [semantic, 'supported'])) as Record<(typeof PACKAGE_SEMANTICS)[number], 'supported'>,
+      evidence: ['docs/adr/0002-preflight-before-native-activation.md'],
+    });
+    const request = {
+      host: 'fixture',
+      detectedVersion: '1.0.0',
+      sourceType: 'local' as const,
+      operation: 'install' as const,
+      route: 'managed' as const,
+      inventory,
+    };
+
+    expect(admitPackageSemanticsFromProfiles(request, [profile]).status).toBe('admitted');
+    let ambiguous: unknown;
+    try {
+      admitPackageSemanticsFromProfiles(request, [profile, profile]);
+    } catch (error) {
+      ambiguous = error;
+    }
+    expect(ambiguous instanceof Error ? ambiguous.message : '').toContain('ambiguous capability evidence');
+  });
+
   test('admits one complete ordinary dcode package and refuses the complete package when any required semantic has a gap', () => {
     const ordinary = inventoryPackageSemantics(source('ordinary-profile', {
       'skills/a/SKILL.md': skill(),
@@ -413,6 +449,28 @@ describe('versioned capability evidence', () => {
         'activation-reload',
       ]);
     }
+  });
+
+  test('requires explicit reversible-disable evidence instead of inferring it from rollback', () => {
+    expect(requiredSemanticsForOperation(undefined, 'disable')).toEqual([
+      'retention-safety',
+      'readback',
+      'rollback',
+      'activation-reload',
+      'reversible-disable',
+    ]);
+
+    const admission = admitPackageSemantics({
+      host: 'dcode',
+      detectedVersion: '0.1.83',
+      sourceType: 'git',
+      operation: 'disable',
+      route: 'managed',
+    });
+
+    expect(admission.status).toBe('refused');
+    expect(admission.profile).toBe(null);
+    expect(admission.gaps[0]?.code).toBe('capability.unverified');
   });
 
   test('still requires Source inventory for install and update at the runtime boundary', () => {
