@@ -136,6 +136,7 @@ declare module 'node:child_process' {
   export interface ChildProcessLike {
     exitCode: number | null;
     on(event: 'exit', listener: (code: number | null) => void): ChildProcessLike;
+    on(event: 'error', listener: (error: Error) => void): ChildProcessLike;
     kill(): void;
   }
   export function spawn(command: string, args: string[], options: { env?: Record<string, string | undefined>; stdio?: unknown }): ChildProcessLike;

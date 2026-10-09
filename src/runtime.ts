@@ -52,15 +52,29 @@ export interface ChildHandle {
 }
 
 export function spawn(command: readonly string[], options: SpawnOptions = {}): ChildHandle {
-  const child = nodeSpawn(command[0]!, [...command.slice(1)], {
-    ...(options.env === undefined ? {} : { env: options.env }),
-    stdio: ['ignore', 'pipe', 'pipe'],
+  // A vanished binary fails two ways: Node emits an async `error` event
+  // (never `exit`); Bun's node-compat spawn throws synchronously. Catch both
+  // so callers watching exited/exitCode always see -1 instead of an unhandled
+  // error killing the CLI.
+  let child: ReturnType<typeof nodeSpawn> | undefined;
+  let failedSpawn = false;
+  try {
+    child = nodeSpawn(command[0]!, [...command.slice(1)], {
+      ...(options.env === undefined ? {} : { env: options.env }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    failedSpawn = true;
+  }
+  const exited = new Promise<number>((resolve) => {
+    if (child === undefined) { resolve(-1); return; }
+    child.on('exit', (code) => resolve(code ?? -1));
+    child.on('error', () => { failedSpawn = true; resolve(-1); });
   });
-  const exited = new Promise<number>((resolve) => { child.on('exit', (code) => resolve(code ?? -1)); });
   return {
-    get exitCode() { return child.exitCode; },
+    get exitCode() { return failedSpawn ? -1 : child?.exitCode ?? null; },
     exited,
-    kill: () => { child.kill(); },
+    kill: () => { child?.kill(); },
   };
 }
 
