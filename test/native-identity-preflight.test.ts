@@ -336,36 +336,54 @@ describe('native identity preflight coverage', () => {
     }
   });
 
-  test('Cursor rejects a canonical plus historical row selected by the historical identity', async () => {
+  test('Cursor rejects a cross-Source canonical collision selected by the historical identity', async () => {
     for (const command of ['update', 'remove'] as const) {
       for (const dryRun of [true, false]) {
         await withHostEnvAsync('cursor', async (home) => {
-          const source = join(home, `${command}-cursor-duplicate-${String(dryRun)}`);
-          const pluginDir = join(source, 'plugins', 'demo');
-          const sha = initGitRepo(source, {
+          const rootSource = join(home, `${command}-cursor-root-${String(dryRun)}`);
+          const marketplaceSource = join(home, `${command}-cursor-marketplace-${String(dryRun)}`);
+          const otherSource = join(home, `${command}-cursor-other-${String(dryRun)}`);
+          const rootSha = initGitRepo(rootSource, {
+            'plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+          });
+          const marketplaceSha = initGitRepo(marketplaceSource, {
             'marketplace.json': JSON.stringify({
               name: 'personal',
               plugins: [{ name: 'demo', source: './plugins/demo' }],
             }),
             'plugins/demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
           });
+          const otherSha = initGitRepo(otherSource, {
+            'plugin.json': JSON.stringify({ name: 'other', version: '1.0.0' }),
+          });
           writeLedger(home, [
-            { host: 'cursor', id: 'demo', source, sourceSha: sha },
-            { host: 'cursor', id: 'demo@personal', source, sourceSha: sha },
+            { host: 'cursor', id: 'demo', source: rootSource, sourceSha: rootSha },
+            { host: 'cursor', id: 'demo@personal', source: marketplaceSource, sourceSha: marketplaceSha },
+            { host: 'cursor', id: 'other', source: otherSource, sourceSha: otherSha },
           ]);
           const before = JSON.stringify(readState());
+          let plannedCalls = 0;
+          let legacyCalls = 0;
           let addCalls = 0;
           let removeCalls = 0;
           const writer: HostWriter = {
             id: 'cursor',
             gui: true,
-            plannedNativeId: (plugin) => plugin.name,
-            legacyNativeIds: (plugin) => plugin.marketplace === undefined ? [] : [`${plugin.name}@${plugin.marketplace}`],
+            plannedNativeId: (plugin) => {
+              plannedCalls += 1;
+              if (plugin.name === 'other') throw new Error('unselected identity must not run');
+              return plugin.name;
+            },
+            legacyNativeIds: (plugin) => {
+              legacyCalls += 1;
+              if (plugin.name === 'other') throw new Error('unselected alias must not run');
+              return plugin.marketplace === undefined ? [] : [`${plugin.name}@${plugin.marketplace}`];
+            },
             persistedNativeIdMayAlias: (persisted, requested) =>
               cursorWriter.persistedNativeIdMayAlias?.(persisted, requested) === true,
             detect: () => true,
             stores: () => [],
-            listInstalled: () => [{ id: 'demo', name: 'demo', marketplace: 'personal', enabled: true, path: pluginDir }],
+            listInstalled: () => [{ id: 'demo', name: 'demo', marketplace: 'personal', enabled: true, path: join(marketplaceSource, 'plugins', 'demo') }],
             mcpEntries: () => [],
             add: async () => { addCalls += 1; },
             remove: async () => { removeCalls += 1; },
@@ -388,20 +406,24 @@ describe('native identity preflight coverage', () => {
 
           expect({
             code,
+            plannedCalls,
+            legacyCalls,
             addCalls,
             removeCalls,
-            plan: report.plan,
-            outcomes: report.outcomes,
+            plan: report.plan.map(({ package: packageName, nativeId, action, route }) => ({ packageName, nativeId, action, route })),
+            outcomes: report.outcomes.map(({ result, reason }) => ({ result, reasonCode: reason?.code })),
             terminalPhase: report.summary.terminalPhase,
             mutationStarted: report.summary.mutationStarted,
             reasonCode: report.summary.reason?.code,
             stateUnchanged: JSON.stringify(readState()) === before,
           }).toEqual({
             code: 1,
+            plannedCalls: 2,
+            legacyCalls: 2,
             addCalls: 0,
             removeCalls: 0,
-            plan: [],
-            outcomes: [],
+            plan: [{ packageName: 'demo', nativeId: 'demo', action: 'not-attempted', route: 'none' }],
+            outcomes: [{ result: 'failed', reasonCode: 'internal.ambiguous-ownership' }],
             terminalPhase: 'preflight',
             mutationStarted: false,
             reasonCode: 'internal.ambiguous-ownership',
@@ -486,6 +508,98 @@ describe('native identity preflight coverage', () => {
             mutationStarted: false,
             reasonCode: 'internal.ambiguous-ownership',
             stateUnchanged: true,
+          });
+        });
+      }
+    }
+  });
+
+  test('Kimi keeps distinct root and marketplace native identities during collision preflight', async () => {
+    for (const command of ['update', 'remove'] as const) {
+      for (const dryRun of [true, false]) {
+        await withHostEnvAsync('kimi', async (home) => {
+          const rootSource = join(home, `${command}-kimi-root-${String(dryRun)}`);
+          const marketplaceSource = join(home, `${command}-kimi-marketplace-${String(dryRun)}`);
+          const rootSha = initGitRepo(rootSource, {
+            'plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+          });
+          const marketplaceSha = initGitRepo(marketplaceSource, {
+            'marketplace.json': JSON.stringify({
+              name: 'personal',
+              plugins: [{ name: 'demo', source: './plugins/demo' }],
+            }),
+            'plugins/demo/plugin.json': JSON.stringify({ name: 'demo', version: '1.0.0' }),
+          });
+          writeLedger(home, [
+            { host: 'kimi', id: 'demo', source: rootSource, sourceSha: rootSha },
+            { host: 'kimi', id: 'demo@personal', source: marketplaceSource, sourceSha: marketplaceSha },
+          ]);
+          let plannedCalls = 0;
+          let legacyCalls = 0;
+          let addCalls = 0;
+          let removeCalls = 0;
+          let marketplaceRemoved = false;
+          const writer: HostWriter = {
+            id: 'kimi',
+            gui: false,
+            plannedNativeId: (plugin) => {
+              plannedCalls += 1;
+              return plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`;
+            },
+            legacyNativeIds: (plugin) => {
+              legacyCalls += 1;
+              return plugin.marketplace === undefined ? [] : [plugin.name];
+            },
+            persistedNativeIdMayAlias: (persisted, requested) =>
+              kimiWriter.persistedNativeIdMayAlias?.(persisted, requested) === true,
+            detect: () => true,
+            stores: () => [],
+            listInstalled: () => [
+              { id: 'demo', name: 'demo', enabled: true, path: rootSource },
+              ...(marketplaceRemoved ? [] : [{ id: 'demo@personal', name: 'demo', marketplace: 'personal', enabled: true, path: join(marketplaceSource, 'plugins', 'demo') }]),
+            ],
+            mcpEntries: () => [],
+            add: async () => { addCalls += 1; },
+            remove: async () => { removeCalls += 1; marketplaceRemoved = true; },
+            pin: async () => ({ changes: [], refusals: [] }),
+          };
+          const registry = command === 'remove' ? cleanupWriters : writers;
+          const original = [...registry];
+          const output: string[] = [];
+          const originalLog = console.log;
+          registry.splice(0, registry.length, writer);
+          console.log = (value: string) => output.push(value);
+          let code: number;
+          try {
+            code = await main([command, 'demo@personal', '--target', 'kimi', ...(dryRun ? ['--dry-run'] : []), '--json']);
+          } finally {
+            registry.splice(0, registry.length, ...original);
+            console.log = originalLog;
+          }
+          const report = parseLifecycleReport(JSON.parse(output.join('')));
+
+          expect({
+            code,
+            plannedCalls,
+            legacyCalls,
+            addCalls,
+            removeCalls,
+            plan: report.plan.map(({ package: packageName, nativeId, action, route }) => ({ packageName, nativeId, action, route })),
+            outcomes: report.outcomes.map(({ result, reason }) => ({ result, reasonCode: reason?.code })),
+            terminalPhase: report.summary.terminalPhase,
+            mutationStarted: report.summary.mutationStarted,
+            stateIds: readState().map(({ id }) => id),
+          }).toEqual({
+            code: 0,
+            plannedCalls: 2,
+            legacyCalls: 2,
+            addCalls: command === 'update' ? 1 : 0,
+            removeCalls: command === 'remove' && !dryRun ? 1 : 0,
+            plan: [{ packageName: 'demo', nativeId: 'demo@personal', action: command === 'update' ? 'update' : 'retire-orphan', route: 'managed' }],
+            outcomes: [{ result: 'succeeded', reasonCode: undefined }],
+            terminalPhase: 'complete',
+            mutationStarted: !dryRun,
+            stateIds: dryRun || command === 'update' ? ['demo', 'demo@personal'] : ['demo'],
           });
         });
       }

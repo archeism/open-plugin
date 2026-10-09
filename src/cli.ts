@@ -302,6 +302,20 @@ interface PreparedNativeIdentity {
   failure: LifecycleReason | null;
 }
 
+interface PersistedNativeIdentityCandidate {
+  activationIndex: number;
+  record: InstallRecord;
+  scope: DeploymentScopeIdentity;
+  package: string;
+  sourceRelativeDir?: string;
+  host: string;
+  writer: HostWriter;
+}
+
+interface CapturedPersistedNativeIdentityCandidate extends PersistedNativeIdentityCandidate {
+  identity: PreparedNativeIdentity;
+}
+
 function exactPersistedIdentity(record: InstallRecord, packageHint: string): PreparedNativeIdentity {
   return {
     package: packageHint,
@@ -404,6 +418,59 @@ function requestedCapturedIdentityMatches(
   if (requested === undefined) return true;
   return requested === identity.package || requested === identity.nativeId || requested === persistedId ||
     requested === logicalNativeName(persistedId) || identity.equivalentNativeIds.has(requested);
+}
+
+function capturePersistedNativeIdentity(
+  candidate: PersistedNativeIdentityCandidate,
+  captures: Map<number, PreparedNativeIdentity>,
+): CapturedPersistedNativeIdentityCandidate {
+  let identity = captures.get(candidate.activationIndex);
+  if (identity === undefined) {
+    identity = preparedNativeIdentity(
+      candidate.writer,
+      candidate.record,
+      candidate.package,
+      candidate.sourceRelativeDir,
+    );
+    captures.set(candidate.activationIndex, identity);
+  }
+  return { ...candidate, identity };
+}
+
+function nativeIdentityCollision(
+  selected: CapturedPersistedNativeIdentityCandidate,
+  candidates: readonly PersistedNativeIdentityCandidate[],
+  captures: Map<number, PreparedNativeIdentity>,
+): LifecycleReason | null {
+  const nativeId = selected.identity.nativeId;
+  if (nativeId === null || selected.identity.failure !== null) return null;
+  for (const candidate of candidates) {
+    if (candidate.activationIndex === selected.activationIndex ||
+      candidate.scope.target.kind !== selected.scope.target.kind ||
+      candidate.scope.target.instance !== selected.scope.target.instance) continue;
+
+    let identity = captures.get(candidate.activationIndex);
+    const exactCollision = candidate.record.id === nativeId;
+    const possibleAlias = selected.identity.equivalentNativeIds.has(candidate.record.id) ||
+      candidate.writer.persistedNativeIdMayAlias?.(candidate.record.id, nativeId) === true;
+    if (identity === undefined && !exactCollision && !possibleAlias) continue;
+    if (exactCollision) {
+      return reason(
+        'internal',
+        'internal.ambiguous-ownership',
+        `multiple ${selected.scope.target.kind}/${selected.scope.target.instance} deployment scopes own native package '${nativeId}'`,
+      );
+    }
+    if (identity === undefined) identity = capturePersistedNativeIdentity(candidate, captures).identity;
+    if (identity.failure !== null) return identity.failure;
+    if (identity.adapterResolved ? identity.nativeId !== nativeId : !possibleAlias) continue;
+    return reason(
+      'internal',
+      'internal.ambiguous-ownership',
+      `multiple ${selected.scope.target.kind}/${selected.scope.target.instance} deployment scopes resolve to native package '${nativeId}'`,
+    );
+  }
+  return null;
 }
 
 function usageReport(command: LifecycleCommandName, dryRun: boolean, diagnostic: string, code: Extract<LifecycleReasonCode, `usage.${string}`> = 'usage.invalid-argument'): LifecycleReport {
@@ -625,6 +692,7 @@ export async function main(argv: string[]): Promise<number> {
       failure: LifecycleReason | null;
       operation: LifecyclePlanOperation;
     }> = [];
+    const nativeIdentityCaptures = new Map<number, PreparedNativeIdentity>();
     let preflightFailure: LifecycleReason | null = null;
     for (const writer of selection.selected) {
       const persistedCandidates = reportScopesForTarget(lifecycleState, writer.id, 'default').flatMap((match) => {
@@ -633,20 +701,25 @@ export async function main(argv: string[]): Promise<number> {
           preflightFailure = reason('internal', 'internal.invariant', `install record '${match.activation.nativeId}' on ${writer.id} has no exact deployment scope identity`);
           return [];
         }
-        return [{ match, record }];
+        return [{
+          activationIndex: match.activationIndex,
+          record,
+          scope: match.scope,
+          package: match.activation.packageId,
+          ...(match.activation.sourceRelativeDir === undefined ? {} : { sourceRelativeDir: match.activation.sourceRelativeDir }),
+          host: writer.id,
+          writer,
+        } satisfies PersistedNativeIdentityCandidate];
       });
       if (preflightFailure !== null) break;
-      const selectedCandidates = persistedCandidates.filter(({ match, record }) => requestedPersistedIdentityMatches(
+      const selectedCandidates = persistedCandidates.filter(({ package: packageId, record }) => requestedPersistedIdentityMatches(
         writer,
-        match.activation.packageId,
+        packageId,
         record.id,
         target,
       ));
-      const matches = selectedCandidates.map(({ match, record }) => ({
-        match,
-        record,
-        identity: preparedNativeIdentity(writer, record, match.activation.packageId, match.activation.sourceRelativeDir),
-      })).filter(({ identity, record }) =>
+      const matches = selectedCandidates.map((candidate) =>
+        capturePersistedNativeIdentity(candidate, nativeIdentityCaptures)).filter(({ identity, record }) =>
         identity.failure !== null || !identity.adapterResolved || requestedCapturedIdentityMatches(identity, record.id, target));
       if (matches.length > 1) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', `multiple ${writer.id}/default deployment scopes own native package '${target}'`);
@@ -656,7 +729,8 @@ export async function main(argv: string[]): Promise<number> {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', `no owned install record for '${target}' on ${writer.id}; refusing removal`);
         break;
       }
-      const { match, record, identity } = matches[0]!;
+      const selected = matches[0]!;
+      const { record, identity } = selected;
       if (identity.failure !== null) {
         pairs.push({
           writer,
@@ -666,7 +740,26 @@ export async function main(argv: string[]): Promise<number> {
           failure: identity.failure,
           operation: planOperation({
             command: 'remove',
-            scope: match.scope,
+            scope: selected.scope,
+            package: identity.package,
+            nativeId: identity.nativeId,
+            action: 'not-attempted',
+            route: 'none',
+          }),
+        });
+        continue;
+      }
+      const collision = nativeIdentityCollision(selected, persistedCandidates, nativeIdentityCaptures);
+      if (collision !== null) {
+        pairs.push({
+          writer,
+          record,
+          nativeId: identity.nativeId,
+          legacyNativeIds: Object.freeze([]),
+          failure: collision,
+          operation: planOperation({
+            command: 'remove',
+            scope: selected.scope,
             package: identity.package,
             nativeId: identity.nativeId,
             action: 'not-attempted',
@@ -708,7 +801,7 @@ export async function main(argv: string[]): Promise<number> {
         failure: null,
         operation: planOperation({
           command: 'remove',
-          scope: match.scope,
+          scope: selected.scope,
           package: identity.package,
           nativeId: identity.nativeId,
           action: 'retire-orphan',
@@ -1291,14 +1384,8 @@ export async function main(argv: string[]): Promise<number> {
     const selectedTargetKinds = new Set(selection.selected.map((writer) => writer.id));
     const scopesById = new Map(lifecycleState.scopes.map((scope) => [scope.id, scope]));
     const requestedName = flags.positionals[0];
-    const persistedCandidates: Array<{
-      record: InstallRecord;
-      scope: DeploymentScopeIdentity;
-      package: string;
-      sourceRelativeDir?: string;
-      host: string;
-      writer: HostWriter;
-    }> = [];
+    const persistedCandidates: PersistedNativeIdentityCandidate[] = [];
+    const nativeIdentityCaptures = new Map<number, PreparedNativeIdentity>();
     const nativeIdentitySnapshots = new Map<InstallRecord, NativeIdentitySnapshot>();
     let scopeFailure: LifecycleReason | null = null;
     lifecycleState.activations.forEach((activation, activationIndex) => {
@@ -1316,6 +1403,7 @@ export async function main(argv: string[]): Promise<number> {
         return;
       }
       persistedCandidates.push({
+        activationIndex,
         record,
         scope: createDeploymentScopeIdentity(stored.source, { kind: stored.target.kind, instance: stored.target.instance }),
         package: activation.packageId,
@@ -1330,36 +1418,21 @@ export async function main(argv: string[]): Promise<number> {
       candidate.record.id,
       requestedName,
     ));
-    const selectedPairs: Array<{
-      record: InstallRecord;
-      scope: DeploymentScopeIdentity;
-      package: string;
-      nativeId: string | null;
-      host: string;
-      legacyNativeIds: readonly string[];
-      equivalentNativeIds: ReadonlySet<string>;
-      adapterResolved: boolean;
-      failure: LifecycleReason | null;
-    }> = selectedCandidates.map((candidate) => {
-      const identity = preparedNativeIdentity(
-        candidate.writer,
-        candidate.record,
-        candidate.package,
-        candidate.sourceRelativeDir,
-      );
+    const selectedPairs = selectedCandidates.map((candidate) =>
+      capturePersistedNativeIdentity(candidate, nativeIdentityCaptures)).filter((candidate) =>
+      candidate.identity.failure !== null || !candidate.identity.adapterResolved ||
+        requestedCapturedIdentityMatches(candidate.identity, candidate.record.id, requestedName)).map((candidate) => {
+      const { identity } = candidate;
       return {
-        record: candidate.record,
-        scope: candidate.scope,
+        ...candidate,
         package: identity.package,
         nativeId: identity.nativeId,
-        host: candidate.host,
         legacyNativeIds: identity.legacyNativeIds,
         equivalentNativeIds: identity.equivalentNativeIds,
         adapterResolved: identity.adapterResolved,
         failure: identity.failure,
       };
-    }).filter((pair) =>
-      pair.failure !== null || !pair.adapterResolved || requestedCapturedIdentityMatches(pair, pair.record.id, requestedName));
+    });
     if (scopeFailure === null) {
       for (const pair of selectedPairs) {
         if (pair.failure !== null) continue;
@@ -1378,6 +1451,8 @@ export async function main(argv: string[]): Promise<number> {
           );
           break;
         }
+        const collision = nativeIdentityCollision(pair, persistedCandidates, nativeIdentityCaptures);
+        if (collision !== null) pair.failure = collision;
       }
     }
     if (scopeFailure !== null || (requestedName !== undefined && selectedPairs.length === 0)) {
