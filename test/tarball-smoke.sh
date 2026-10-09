@@ -12,7 +12,7 @@ STRICT="/usr/bin:/bin:$NODE_DIR"
 NPM_BIN="$(command -v npm)"
 NVM_BIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort | tail -1 || true)"
 if [ -n "$NVM_BIN" ] && [ -x "$NVM_BIN/npm" ]; then NPM_BIN="$NVM_BIN/npm"; STRICT="/usr/bin:/bin:$NVM_BIN"; fi
-if env PATH="$STRICT" command -v bun >/dev/null 2>&1; then echo "bun on PATH — smoke invalid"; exit 1; fi
+if env PATH="$STRICT" sh -c 'command -v bun' >/dev/null 2>&1; then echo "bun on PATH — smoke invalid"; exit 1; fi
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT

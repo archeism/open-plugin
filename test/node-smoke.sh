@@ -9,7 +9,7 @@ BUNDLE=dist/plugnz.mjs
 NODE_BIN="$(command -v node)"
 [ -x "$BUNDLE" ] || { echo "missing $BUNDLE — run: bun scripts/build.mjs"; exit 1; }
 STRICT_PATH="/usr/bin:/bin:$(dirname "$NODE_BIN")"
-if env PATH="$STRICT_PATH" command -v bun >/dev/null 2>&1; then echo "bun still on PATH — smoke must prove a Bun-free runtime"; exit 1; fi
+if env PATH="$STRICT_PATH" sh -c 'command -v bun' >/dev/null 2>&1; then echo "bun still on PATH — smoke must prove a Bun-free runtime"; exit 1; fi
 echo "ok: bun absent from smoke PATH"
 
 echo "== version contract (ambient node, no bun on PATH) =="
@@ -17,12 +17,23 @@ env PATH="$STRICT_PATH" node "$BUNDLE" --version --json | grep -q '"name":"plugn
 echo "ok: ambient $("$NODE_BIN" --version), identity byte-stable"
 
 echo "== version contract (node@22 via npx) =="
-NODE22="$(ls -d "$HOME"/.nvm/versions/node/v22*/bin/node 2>/dev/null | sort | tail -1 || true)"
-if [ -n "$NODE22" ]; then
+# Node 22 is mandatory somewhere: this leg runs it when a local v22 exists
+# (nvm), and the node-compat workflow always runs this script under Node 22.
+# CI must never take the absent branch.
+NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
+NODE22=""
+for candidate in "$HOME"/.nvm/versions/node/v22*/bin/node; do
+  [ -x "$candidate" ] && NODE22="$candidate"
+done
+if [ "$NODE_MAJOR" = "22" ]; then
+  echo "ok: ambient Node 22 job — the version-contract leg above already proved v22"
+elif [ -n "$NODE22" ]; then
   env PATH="/usr/bin:/bin:$(dirname "$NODE22")" "$NODE22" "$BUNDLE" --version --json | grep -q '"name":"plugnz"'
   echo "ok: $("$NODE22" --version) identity byte-stable (bun-free PATH)"
+elif [ "${CI:-}" = "true" ] || [ "${CI:-}" = "1" ]; then
+  echo "CI must run this script under Node 22 (see .github/workflows/node-compat.yml)"; exit 1
 else
-  echo "skip: no local node@22 (nvm) — CI covers this leg via the workflow's Node matrix"
+  echo "note: no local node@22; the node-compat workflow owns this leg"
 fi
 
 echo "== isolated lifecycle under plain node (cursor target) =="
@@ -50,9 +61,19 @@ unset OPEN_PLUGIN_HOME
 BUN_JSON="$(bun bin/plugnz.mjs doctor --json 2>/dev/null || true)"
 NODE_JSON="$(PATH="$PATH" node "$BUNDLE" doctor --json 2>/dev/null || true)"
 [ -n "$NODE_JSON" ] || { echo "doctor produced no output on real stores"; exit 1; }
-if diff <(printf '%s' "$BUN_JSON" | grep '"message"' | sort) <(printf '%s' "$NODE_JSON" | grep '"message"' | sort) >/dev/null; then
-  echo "ok: finding sets byte-identical between bun and node artifacts ($(printf '%s' "$NODE_JSON" | grep -c '✗' || true) pre-existing stale findings, unchanged by the artifact)"
+# Whole-document comparison with finding arrays order-normalized: a field
+# change (host, mark, pluginId) must fail the gate, not just message text.
+printf '%s' "$BUN_JSON" > /tmp/doctor-bun.json
+printf '%s' "$NODE_JSON" > /tmp/doctor-node.json
+if node <<'NODE'
+const fs = require("node:fs");
+const normalize = (doc) => { const value = JSON.parse(doc); const entries = Array.isArray(value) ? [value] : Object.values(value).filter(Array.isArray); for (const entry of entries) entry.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))); return JSON.stringify(value); };
+process.exit(normalize(fs.readFileSync("/tmp/doctor-bun.json", "utf8")) === normalize(fs.readFileSync("/tmp/doctor-node.json", "utf8")) ? 0 : 1);
+NODE
+then
+  echo "ok: doctor documents identical (order-normalized) between bun and node artifacts ($(printf '%s' "$NODE_JSON" | grep -c '✗' || true) pre-existing stale findings, unchanged by the artifact)"
 else
-  echo "runtime parity failed: bun and node doctor findings differ"; exit 1
+  echo "runtime parity failed: bun and node doctor documents differ"; exit 1
 fi
+rm -f /tmp/doctor-bun.json /tmp/doctor-node.json
 echo "node-smoke: ALL GREEN"

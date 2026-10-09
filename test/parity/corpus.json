@@ -196,32 +196,64 @@
   "raw": "name: build-review-interface\ndescription: >\n  Build a custom browser-based annotation interface tailored to your data for\n  reviewing LLM traces and collecting structured feedback. Use when you need to\n  build an annotation tool, review traces, or collect human labels.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/build-review-interface/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/build-review-interface/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/eval-skills/skills/build-review-interface/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Build Review Interface\"\n  short_description: \"Build browser-based annotation interfaces.\"\n  default_prompt: \"Use $build-review-interface to build an annotation interface for my data.\"\n\npolicy:\n  allow_implicit_invocation: true"
+ },
+ {
   "source": "personal/plugins/eval-skills/skills/error-discovery/SKILL.md",
   "raw": "name: error-discovery\ndescription: Run error analysis on a dataset. Build a review UI, select diverse samples, monitor annotations, and organize failure modes.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/error-discovery/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/error-discovery/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/eval-skills/skills/error-discovery/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Error Discovery\"\n  short_description: \"Find and organize failure modes in traces.\"\n  default_prompt: \"Use $error-discovery to find failure modes in my traces.\"\n\npolicy:\n  allow_implicit_invocation: true"
  },
  {
   "source": "personal/plugins/eval-skills/skills/eval-audit/SKILL.md",
   "raw": "name: eval-audit\ndescription: >\n  Audit an LLM eval pipeline and surface problems: missing error analysis,\n  unvalidated judges, vanity metrics, etc. Use when\n  inheriting an eval system, when unsure whether evals are trustworthy, or as a\n  starting point when no eval infrastructure exists. Do NOT use when the goal\n  is to build a new evaluator from scratch (use error-discovery,\n  write-judge-prompt, or validate-evaluator instead).\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/eval-audit/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/eval-audit/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/eval-skills/skills/eval-audit/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Eval Audit\"\n  short_description: \"Audit whether an LLM eval pipeline is trustworthy.\"\n  default_prompt: \"Use $eval-audit to audit my existing LLM eval pipeline.\"\n\npolicy:\n  allow_implicit_invocation: true"
+ },
+ {
   "source": "personal/plugins/eval-skills/skills/evals-start/SKILL.md",
   "raw": "name: evals-start\ndescription: >\n  Entry point for evals. Use when the user asks for help with evals,\n  does not know where to begin, or asks for something no other skill\n  in this plugin matches. Do NOT use when a more specific skill in\n  this plugin already matches; load that skill directly.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/evals-start/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/evals-start/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/eval-skills/skills/evals-start/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Evals Start\"\n  short_description: \"Route an eval request to the right workflow.\"\n  default_prompt: \"Use $evals-start to help me choose the right eval workflow.\"\n\npolicy:\n  allow_implicit_invocation: true"
  },
  {
   "source": "personal/plugins/eval-skills/skills/evaluate-rag/SKILL.md",
   "raw": "name: evaluate-rag\ndescription: >\n  Guides evaluation of RAG pipeline retrieval and generation quality.\n  Use when evaluating a retrieval-augmented generation system, measuring retrieval quality,\n  assessing generation faithfulness or relevance, generating synthetic QA pairs for retrieval\n  testing, or optimizing chunking strategies.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/evaluate-rag/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/evaluate-rag/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/eval-skills/skills/evaluate-rag/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Evaluate RAG\"\n  short_description: \"Evaluate RAG retrieval and generation quality.\"\n  default_prompt: \"Use $evaluate-rag to evaluate my RAG pipeline.\"\n\npolicy:\n  allow_implicit_invocation: true"
+ },
+ {
   "source": "personal/plugins/eval-skills/skills/generate-synthetic-data/SKILL.md",
   "raw": "name: generate-synthetic-data\ndescription: >\n  Create diverse synthetic test inputs for LLM pipeline evaluation using\n  dimension-based tuple generation. Use when bootstrapping an eval dataset,\n  when real user data is sparse, or when stress-testing specific failure\n  hypotheses. Do NOT use when you already have 100+ representative real\n  traces (use stratified sampling instead), or when the task is collecting\n  production logs.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/generate-synthetic-data/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/generate-synthetic-data/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/eval-skills/skills/generate-synthetic-data/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Generate Synthetic Data\"\n  short_description: \"Create diverse synthetic inputs for evals.\"\n  default_prompt: \"Use $generate-synthetic-data to create diverse test inputs for my pipeline.\"\n\npolicy:\n  allow_implicit_invocation: true"
  },
  {
   "source": "personal/plugins/eval-skills/skills/validate-evaluator/SKILL.md",
   "raw": "name: validate-evaluator\ndescription: >\n  Calibrate an LLM judge against human labels using data splits, TPR/TNR, and\n  bias correction. Use after writing a judge prompt (write-judge-prompt) when you\n  need to verify alignment before trusting its outputs. Do NOT use for code-based\n  evaluators (those are deterministic; test with standard unit tests).\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/validate-evaluator/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/validate-evaluator/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/eval-skills/skills/validate-evaluator/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Validate Evaluator\"\n  short_description: \"Calibrate LLM judges against human labels.\"\n  default_prompt: \"Use $validate-evaluator to calibrate my LLM judge against human labels.\"\n\npolicy:\n  allow_implicit_invocation: true"
+ },
+ {
   "source": "personal/plugins/eval-skills/skills/write-judge-prompt/SKILL.md",
   "raw": "name: write-judge-prompt\ndescription: >\n  Design LLM-as-Judge evaluators for subjective criteria that code-based checks\n  cannot handle. Use when a failure mode requires interpretation (tone,\n  faithfulness, relevance, completeness). Do NOT use when the failure mode can be\n  checked with code (regex, schema validation, execution tests). Do NOT use when\n  you need to validate or calibrate the judge — use validate-evaluator instead.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/ai-evals-course/evals-skills\"\n  upstream_path: \"skills/write-judge-prompt/SKILL.md\"\n  upstream_revision: \"2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab\"\n  upstream_url: \"https://github.com/ai-evals-course/evals-skills/blob/2edbc5b1b0dc91f74fcfa8fd8f7eaeb302e052ab/skills/write-judge-prompt/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/eval-skills/skills/write-judge-prompt/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Write Judge Prompt\"\n  short_description: \"Design reliable prompts for LLM judges.\"\n  default_prompt: \"Use $write-judge-prompt to design an LLM judge for this failure mode.\"\n\npolicy:\n  allow_implicit_invocation: true"
  },
  {
   "source": "personal/plugins/karakeep/skills/house/SKILL.md",
@@ -236,148 +268,296 @@
   "raw": "name: ask-matt\ndescription: Ask which skill or flow fits your situation. A router over the skills in this repo.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/ask-matt/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/ask-matt/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/ask-matt/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Find the right skill or workflow\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/claude-handoff/SKILL.md",
   "raw": "name: claude-handoff\ndescription: Hand the current conversation off to a fresh background agent that picks up the work immediately.\nargument-hint: \"What will the next session be used for?\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/claude-handoff/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/claude-handoff/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/claude-handoff/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Hand off to a background agent\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/code-review/SKILL.md",
   "raw": "name: code-review\ndescription: \"Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes: Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to \\\"review since X\\\".\"\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/code-review/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/code-review/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/code-review/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Review a diff on standards and spec\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/codebase-design/SKILL.md",
   "raw": "name: codebase-design\ndescription: Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/codebase-design/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/codebase-design/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/codebase-design/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Vocabulary for deep-module design\""
  },
  {
   "source": "personal/plugins/mattpocock/skills/diagnosing-bugs/SKILL.md",
   "raw": "name: diagnosing-bugs\ndescription: Diagnosis loop for hard bugs and performance regressions. Use when the user says \"diagnose\"/\"debug this\", or reports something broken/throwing/failing/slow.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/diagnosing-bugs/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/diagnosing-bugs/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/diagnosing-bugs/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Diagnose hard bugs and regressions\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/domain-modeling/SKILL.md",
   "raw": "name: domain-modeling\ndescription: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a GLOSSARY.md, or recording or editing an ADR.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/domain-modeling/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/domain-modeling/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/domain-modeling/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Build and sharpen a domain model\""
  },
  {
   "source": "personal/plugins/mattpocock/skills/git-guardrails-claude-code/SKILL.md",
   "raw": "name: git-guardrails-claude-code\ndescription: Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, branch -D, etc.) before they execute. Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/misc/git-guardrails-claude-code/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/misc/git-guardrails-claude-code/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/git-guardrails-claude-code/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Block dangerous git commands\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/grill-me/SKILL.md",
   "raw": "name: grill-me\ndescription: A relentless interview to sharpen a plan or design.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/grill-me/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/grill-me/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/grill-me/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Sharpen a plan through interview\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/grill-with-docs/SKILL.md",
   "raw": "name: grill-with-docs\ndescription: A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/grill-with-docs/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/grill-with-docs/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/grill-with-docs/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Grill a design and write its docs\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/grilling/SKILL.md",
   "raw": "name: grilling\ndescription: Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/grilling/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/grilling/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/grilling/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Stress-test thinking a round of questions at a time\""
  },
  {
   "source": "personal/plugins/mattpocock/skills/handoff/SKILL.md",
   "raw": "name: handoff\ndescription: Compact the current conversation into a handoff document for another agent to pick up.\nargument-hint: \"What will the next session be used for?\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/handoff/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/handoff/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/handoff/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Compact a conversation into a handoff\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/implement/SKILL.md",
   "raw": "name: implement\ndescription: \"Implement a piece of work based on a spec or set of tickets.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/implement/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/implement/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/implement/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Build work from a spec or tickets\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/implement-spec/SKILL.md",
   "raw": "name: implement-spec\ndescription: \"Implement the result of /mattpocock:to-spec and /mattpocock:to-tickets in code.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/implement-spec/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/implement-spec/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/implement-spec/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Implement the result of /mattpocock:to-spec and /mattpocock:to-tickets in code.\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/improve-codebase-architecture/SKILL.md",
   "raw": "name: improve-codebase-architecture\ndescription: Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/improve-codebase-architecture/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/improve-codebase-architecture/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/improve-codebase-architecture/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Find and grill architecture improvements\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/loop-me/SKILL.md",
   "raw": "name: loop-me\ndescription: Grill me about specs for the workflows I want to build, within this workspace.\ndisable-model-invocation: true\nargument-hint: \"A workflow to design, or nothing to go find one\"\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/loop-me/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/loop-me/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/loop-me/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Spec the workflows you want to build\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/migrate-to-shoehorn/SKILL.md",
   "raw": "name: migrate-to-shoehorn\ndescription: Migrate test files from `as` type assertions to @total-typescript/shoehorn. Use when user mentions shoehorn, wants to replace `as` in tests, or needs partial test data.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/misc/migrate-to-shoehorn/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/misc/migrate-to-shoehorn/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/migrate-to-shoehorn/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Replace test assertions with shoehorn\""
  },
  {
   "source": "personal/plugins/mattpocock/skills/pr/SKILL.md",
   "raw": "name: pr\ndescription: \"Use when writing a PR body.\"\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/pr/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/pr/SKILL.md\"\n  upstream_ref: \"HEAD\"\n  credits: \"{\\\"skill\\\":\\\"show-me\\\",\\\"author\\\":\\\"Dex Horthy\\\",\\\"organisation\\\":\\\"Humanlayer\\\",\\\"url\\\":\\\"https://github.com/humanlayer/skills/blob/main/plugins/show-me/skills/show-me/SKILL.md\\\"}\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/pr/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Write a PR body that's fast to review\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/prototype/SKILL.md",
   "raw": "name: prototype\ndescription: Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, or explore what a UI should look like.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/prototype/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/prototype/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/prototype/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Prototype to answer a design question\""
  },
  {
   "source": "personal/plugins/mattpocock/skills/research/SKILL.md",
   "raw": "name: research\ndescription: Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/research/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/research/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/research/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Research from high-trust sources\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/retro/SKILL.md",
   "raw": "name: retro\ndescription: \"Conduct a retrospective on a coding session.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/retro/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/retro/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/retro/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Conduct a retrospective on a coding session.\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/scaffold-exercises/SKILL.md",
   "raw": "name: scaffold-exercises\ndescription: Create exercise directory structures with sections, problems, solutions, and explainers that pass linting. Use when user wants to scaffold exercises, create exercise stubs, or set up a new course section.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/misc/scaffold-exercises/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/misc/scaffold-exercises/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/scaffold-exercises/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Scaffold lint-ready course exercises\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/setup-matt-pocock-skills/SKILL.md",
   "raw": "name: setup-matt-pocock-skills\ndescription: \"Configure this repo for the engineering skills: set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/setup-matt-pocock-skills/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/setup-matt-pocock-skills/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/setup-matt-pocock-skills/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Configure a repo for the skills\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/setup-pre-commit/SKILL.md",
   "raw": "name: setup-pre-commit\ndescription: Set up Husky pre-commit hooks with lint-staged (Prettier), type checking, and tests in the current repo. Use when user wants to add pre-commit hooks, set up Husky, configure lint-staged, or add commit-time formatting/typechecking/testing.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/misc/setup-pre-commit/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/misc/setup-pre-commit/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/setup-pre-commit/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Add pre-commit quality checks\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/setup-ts-deep-modules/SKILL.md",
   "raw": "name: setup-ts-deep-modules\ndescription: Wire dependency-cruiser into a TypeScript repo so each package is a deep module, with implementation hidden in subfolders and reachable only through its entry-point files. User-invoked.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/setup-ts-deep-modules/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/setup-ts-deep-modules/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/setup-ts-deep-modules/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Enforce deep TypeScript modules\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/tdd/SKILL.md",
   "raw": "name: tdd\ndescription: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions \"red-green-refactor\", or wants integration tests.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/tdd/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/tdd/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/tdd/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Test-driven red-green-refactor\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/teach/SKILL.md",
   "raw": "name: teach\ndescription: Teach the user a new skill or concept, within this workspace.\ndisable-model-invocation: true\nargument-hint: \"What would you like to learn about?\"\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/teach/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/teach/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/teach/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Learn a concept in a guided workspace\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/to-questionnaire/SKILL.md",
   "raw": "name: to-questionnaire\ndescription: Turn a decision you can't fully answer into a questionnaire for someone else to fill in.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/to-questionnaire/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/to-questionnaire/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/to-questionnaire/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Front-load questions into a doc for someone to answer\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/to-spec/SKILL.md",
   "raw": "name: to-spec\ndescription: \"Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/to-spec/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/to-spec/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/to-spec/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Turn a conversation into a spec\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/to-tickets/SKILL.md",
   "raw": "name: to-tickets\ndescription: Break a plan, spec, or the current conversation into a set of tracer-bullet tickets, each declaring its blocking edges, published to the configured tracker (edges as text in one file per ticket locally, or native blocking links on a real tracker).\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/to-tickets/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/to-tickets/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/to-tickets/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Split a plan into tracer-bullet tickets\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/triage/SKILL.md",
   "raw": "name: triage\ndescription: Move issues and external PRs through a state machine of triage roles, categorise, verify, grill if needed, and write agent-ready briefs.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/triage/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/triage/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/triage/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Move issues through triage roles\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/wait-what/SKILL.md",
   "raw": "name: wait-what\ndescription: \"Stop. That last message did not land: re-pitch it.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/wait-what/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/wait-what/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/wait-what/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Re-pitch that: simpler, with the context I'm missing\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/wayfinder/SKILL.md",
   "raw": "name: wayfinder\ndescription: Plan a huge chunk of work (more than one agent session can hold) as a shared map of decision tickets on your issue tracker, and resolve them one at a time until the way to the destination is clear.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/wayfinder/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/wayfinder/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/wayfinder/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Map a large effort as decision tickets\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/wizard/SKILL.md",
   "raw": "name: wizard\ndescription: Generate an interactive bash wizard that walks a human through steps only they can perform. Use when provisioning infrastructure, setting up credentials or CI secrets, walking an unfamiliar third-party dashboard, or running a one-off migration or cutover. Don't invoke this for steps the agent can perform itself.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/engineering/wizard/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/engineering/wizard/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/wizard/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Generate an interactive setup wizard\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/writing-beats/SKILL.md",
   "raw": "name: writing-beats\ndescription: Writing, exploit; assemble raw material into a journey of beats, grounding each term before a beat leans on it.\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/writing-beats/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/writing-beats/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/writing-beats/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Assemble raw material into beats\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/mattpocock/skills/writing-for-agents/SKILL.md",
   "raw": "name: writing-for-agents\ndescription: Writing documents for agents. Use when creating or editing skills, or modifying AGENTS.md or CLAUDE.md.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/productivity/writing-for-agents/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/productivity/writing-for-agents/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/writing-for-agents/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Write documents agents consume\""
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/writing-fragments/SKILL.md",
   "raw": "name: writing-fragments\ndescription: \"Writing, explore: mine raw fragments, no structure yet.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/writing-fragments/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/writing-fragments/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/mattpocock/skills/writing-fragments/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Mine raw writing fragments\"\npolicy:\n  allow_implicit_invocation: false"
+ },
+ {
   "source": "personal/plugins/mattpocock/skills/writing-shape/SKILL.md",
   "raw": "name: writing-shape\ndescription: \"Writing, exploit: shape raw material into an article, paragraph by paragraph.\"\ndisable-model-invocation: true\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/mattpocock/skills\"\n  upstream_path: \"skills/in-progress/writing-shape/SKILL.md\"\n  upstream_revision: \"24fe0ef7737efae15c87225755e9f6f5965e4888\"\n  upstream_url: \"https://github.com/mattpocock/skills/blob/24fe0ef7737efae15c87225755e9f6f5965e4888/skills/in-progress/writing-shape/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/mattpocock/skills/writing-shape/agents/openai.yaml",
+  "raw": "interface:\n  short_description: \"Shape raw material into an article\"\npolicy:\n  allow_implicit_invocation: false"
  },
  {
   "source": "personal/plugins/toolbox/skills/codegraph/SKILL.md",
@@ -386,6 +566,10 @@
  {
   "source": "personal/plugins/toolbox/skills/confer/SKILL.md",
   "raw": "name: confer\ndescription: Research and compare implementation details across Confer's synchronized GitHub corpus, or add a source repository through its tracked catalog. Use for multi-repository comparisons, repository discovery, and explicitly requested corpus additions.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/archeism/confer-service\"\n  upstream_path: \"skills/confer/SKILL.md\"\n  upstream_revision: \"96c9eaa466c8af436d580d1259b87a4052f17aea\"\n  upstream_url: \"https://github.com/archeism/confer-service/blob/96c9eaa466c8af436d580d1259b87a4052f17aea/skills/confer/SKILL.md\"\n  upstream_ref: \"HEAD\"\n  kind: inspired\n  last_reviewed: 2026-09-18\n  external_refs: [https://github.com/archeism/confer-service]"
+ },
+ {
+  "source": "personal/plugins/toolbox/skills/confer/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Confer\"\n  short_description: \"Research code with verified evidence\"\n  default_prompt: \"Use $confer to research the relevant codebases with commit-pinned evidence.\"\ndependencies:\n  tools:\n    - type: \"mcp\"\n      value: \"confer\"\n      description: \"Authenticated research over Confer's synchronized source corpus\"\n      transport: \"streamable_http\"\n      url: \"https://charles.tailf37632.ts.net/mcp\""
  },
  {
   "source": "personal/plugins/toolbox/skills/herdr/SKILL.md",
@@ -420,12 +604,20 @@
   "raw": "name: lieflat-charts\ndescription: 一套模板驱动的数据可视化与报告生成 skill，既能严格从 Lupi、Basics、Glance、Maps 与 Interactive gallery 的真实实现生成 HTML 图表，也能从 12 套中英文整页报告模板生成可发布的 HTML 报告；以 Mono 为保底，能按数据语义自动选择内置彩色预设，也支持用户明确提供的自定义色板。地图仅在用户明确要求时启用，同一交付禁止混用色系。\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/larashero3-dotcom/lieflat-charts\"\n  upstream_path: \"SKILL.md\"\n  upstream_revision: \"eace082a317b696c5570c25826a53a7fa113e984\"\n  upstream_url: \"https://github.com/larashero3-dotcom/lieflat-charts/blob/eace082a317b696c5570c25826a53a7fa113e984/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
+  "source": "personal/plugins/try-skill/skills/lieflat-charts/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Lieflat Charts\"\n  short_description: \"Template-driven charts and bilingual HTML reports\"\n  default_prompt: \"Use $lieflat-charts to turn this data into polished HTML charts by default. Only generate a complete bilingual-ready report when the user explicitly asks for a report, annual/monthly report, white paper, poster, brief, or similar narrative deliverable. Reuse the closest chart or report templates with one coherent color system.\""
+ },
+ {
   "source": "personal/plugins/typesafe/skills/build/SKILL.md",
   "raw": "name: build\nlicense: MIT\ndescription: >\n  Build AI-powered software with TypeSafe: small units of AI intelligence you\n  can use like programming primitives. Its System One models, including Jev,\n  turn natural language and application state into typed judgments and\n  probabilities that code can combine. Use when a feature needs programmable\n  common sense, when brainstorming what AI could make possible in an app, or\n  when an LLM prompt-and-parse step could become a structured decision.\n  Applications include routing, ranking, extraction, verification, and\n  interactive experiences; these are starting points, not the limits.\n  Read live docs and cookbooks to find useful patterns and discover new combinations.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/typesafe-ai/skills\"\n  upstream_path: \"skills/typesafe-ai/SKILL.md\"\n  upstream_revision: \"65a39f393687675ce170e6094757de20370365b9\"\n  upstream_url: \"https://github.com/typesafe-ai/skills/blob/65a39f393687675ce170e6094757de20370365b9/skills/typesafe-ai/SKILL.md\"\n  upstream_ref: \"HEAD\""
  },
  {
   "source": "personal/plugins/uiux/skills/better-ui/SKILL.md",
   "raw": "name: better-ui\ndescription: Polishes and improves the UI in your project. Covers concentric border radius, optical alignment, surface depth, contextual icons, hit areas and more.\nmetadata:\n  origin: \"vendored\"\n  upstream_repository: \"https://github.com/jakubkrehel/skills\"\n  upstream_path: \"skills/better-ui/SKILL.md\"\n  upstream_revision: \"267330e1adfc66a718fb65fa6918c1f06d0a689e\"\n  upstream_url: \"https://github.com/jakubkrehel/skills/blob/267330e1adfc66a718fb65fa6918c1f06d0a689e/skills/better-ui/SKILL.md\"\n  upstream_ref: \"HEAD\""
+ },
+ {
+  "source": "personal/plugins/uiux/skills/better-ui/agents/openai.yaml",
+  "raw": "interface:\n  display_name: \"Better UI\"\n  short_description: \"Design engineering details for polished interfaces\""
  },
  {
   "source": "personal/plugins/uiux/skills/emil-design-eng/SKILL.md",

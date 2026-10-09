@@ -1,0 +1,38 @@
+name: Node compatibility
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@v2
+      - name: Install and typecheck
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+      - name: Build the runtime-agnostic bundle
+        run: |
+          bun scripts/build.mjs
+          node dist/plugnz.mjs --version --json
+      - name: Plain-Node contract smoke (bun-free PATH)
+        run: bash test/node-smoke.sh
+      - name: Tarball installation smoke (npx shape)
+        run: bash test/tarball-smoke.sh

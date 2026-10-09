@@ -20,7 +20,10 @@ const walk = (dir: string, rel: string): void => {
     if (name === "SKILL.md" || (rel?.endsWith("agents") === true && name.endsWith(".yaml"))) {
       const raw = readFileSync(path, "utf8");
       const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
-      if (match) entries.push({ source: `personal/plugins/${relPath}`, raw: match[1]! });
+      // SKILL.md frontmatter is delimited; standalone sidecars are whole
+      // YAML documents and contribute their full contents either way.
+      const document = name === "SKILL.md" ? match?.[1] : (match?.[1] ?? raw.trim());
+      if (document) entries.push({ source: `personal/plugins/${relPath}`, raw: document });
     }
   }
 };
