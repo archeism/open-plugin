@@ -138,6 +138,16 @@ function addOtherScope(state: LifecycleStateV2): string {
   return id;
 }
 
+function rebindFixtureSource(state: LifecycleStateV2, source: SourceBinding): void {
+  const id = createDeploymentScopeIdentity(source, fixtureTarget).id;
+  state.scopes[0]!.id = id;
+  state.scopes[0]!.source = source;
+  state.activations[0]!.scopeId = id;
+  state.attempts[0]!.scopeIds = [id];
+  state.attempts[0]!.journal[0]!.scopeId = id;
+  state.tombstones[0]!.scopeId = id;
+}
+
 function setPendingTuple(
   state: LifecycleStateV2,
   tuple: {
@@ -654,6 +664,57 @@ describe('state v2 public reader and writer', () => {
       writeFileSync(file, JSON.stringify(value));
       expectThrow(() => readLifecycleState(file), 'does not match canonical Source and target identity');
     }
+  });
+
+  test('round-trips only canonical credential-free remote Source bindings', () => {
+    for (const locator of [
+      'https://example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/repo.git',
+      'git://example.invalid/owner/repo.git',
+      'git@example.invalid:owner/repo.git',
+    ]) {
+      const { file } = tempStateFile();
+      const value = stateFixture();
+      rebindFixtureSource(value, { kind: 'git', locator, ref: 'main' });
+      writeLifecycleState(value, { globalPreflight: 'succeeded' }, file);
+      expect(readLifecycleState(file).state.scopes[0]?.source).toEqual({ kind: 'git', locator, ref: 'main' });
+    }
+  });
+
+  test('never persists password, query, fragment, or malformed SCP Source locators', () => {
+    const locators = [
+      'https://alice@example.invalid/owner/repo.git',
+      'https://example.invalid/owner/repo.git?token=synthetic',
+      'https://example.invalid/owner/repo.git#synthetic-secret',
+      'ssh://alice:secret@example.invalid/owner/repo.git',
+      'ssh://example.invalid/owner/repo.git?token=synthetic',
+      'ssh://example.invalid/owner/repo.git#synthetic-secret',
+      'git://alice:secret@example.invalid/owner/repo.git',
+      'git://example.invalid/owner/repo.git?token=synthetic',
+      'git://example.invalid/owner/repo.git#synthetic-secret',
+      'git@example.invalid:owner/repo.git?token=synthetic',
+      'git@example.invalid:owner/repo.git#synthetic-secret',
+    ];
+
+    for (const locator of locators) {
+      const { file } = tempStateFile();
+      const value = stateFixture();
+      value.scopes[0]!.source = { kind: 'git', locator, ref: 'main' };
+      expectThrow(
+        () => writeLifecycleState(value, { globalPreflight: 'succeeded' }, file),
+        'credential-free',
+      );
+      expect(existsSync(file)).toBe(false);
+    }
+
+    const { file } = tempStateFile();
+    const value = stateFixture();
+    value.scopes[0]!.source = { kind: 'git', locator: 'git@example.invalid:owner/\u0085repo.git', ref: 'main' };
+    expectThrow(
+      () => writeLifecycleState(value, { globalPreflight: 'succeeded' }, file),
+      'stable value',
+    );
+    expect(existsSync(file)).toBe(false);
   });
 
   test('validates before atomic replacement and removes its temporary file on failure', () => {

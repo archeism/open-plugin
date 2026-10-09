@@ -58,6 +58,14 @@ unique so persisted state is deterministic. Source-relative directories use
 `/`, contain no empty, `.` or `..` segments, and use `.` alone for the Source
 root.
 
+Canonical remote Source bindings use HTTP(S), SSH, Git protocol, or the exact
+SCP-style `git@host:path` form. URL locators contain no password, query, or
+fragment. HTTP(S) and Git protocol locators contain no userinfo; SSH may retain
+a username because it identifies the transport account, but never a password.
+SCP-style locators are control- and whitespace-free, use the literal `git`
+username, and keep query/fragment-like suffixes out of the locator because the
+ref is a separate field.
+
 `readLifecycleState()` returns the strict v2 document plus the source file
 version. `readState()` remains a temporary compatibility projection for the
 existing additive verbs and `doctor`; v2 legacy ownership projects as

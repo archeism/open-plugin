@@ -8,7 +8,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
-import { createDeploymentScopeIdentity, type TargetIdentity } from './deployment-scope';
+import { createDeploymentScopeIdentity, validateSourceBinding, type TargetIdentity } from './deployment-scope';
 import { stateFile } from './paths';
 import type { SourceBinding } from './source-reference';
 
@@ -476,10 +476,11 @@ function validateSource(value: unknown, label: string): PersistedSourceBinding {
   const kind = oneOf(rec['kind'], ['local', 'git'], `${label}.kind`);
   exactFields(rec, kind === 'git' ? ['kind', 'locator', 'ref'] : ['kind', 'locator'], 'source binding');
   const locator = requiredString(rec['locator'], `${label}.locator`);
-  if (kind === 'local') {
-    if (!isAbsolute(locator)) invalid(`${label}.locator must be an absolute path`);
-  } else requiredString(rec['ref'], `${label}.ref`);
-  return value as PersistedSourceBinding;
+  const source: PersistedSourceBinding = kind === 'local'
+    ? { kind, locator }
+    : { kind, locator, ref: requiredString(rec['ref'], `${label}.ref`) };
+  validateCanonicalSourceBinding(source, label);
+  return source;
 }
 
 function validateTarget(value: unknown, label: string): PersistedTargetIdentity {
@@ -742,15 +743,26 @@ function validateTombstone(value: unknown, label: string): TombstoneRecord {
 }
 
 function legacySourceBinding(source: string): PersistedSourceBinding {
-  assertCredentialFree(source, 'legacy source');
   if (isLegacyGitSource(source)) {
     const fragment = source.lastIndexOf('#');
-    return fragment === -1
+    const binding: PersistedSourceBinding = fragment === -1
       ? { kind: 'git', locator: source, ref: 'HEAD' }
       : { kind: 'git', locator: source.slice(0, fragment), ref: source.slice(fragment + 1) };
+    validateCanonicalSourceBinding(binding, 'legacy source');
+    return binding;
   }
   if (!isAbsolute(source)) invalid(`legacy local source must be an absolute path: ${source}`);
-  return { kind: 'local', locator: source };
+  const binding: PersistedSourceBinding = { kind: 'local', locator: source };
+  validateCanonicalSourceBinding(binding, 'legacy source');
+  return binding;
+}
+
+function validateCanonicalSourceBinding(source: PersistedSourceBinding, label: string): void {
+  try {
+    validateSourceBinding(source);
+  } catch (error) {
+    invalid(`${label}: ${(error as Error).message}`);
+  }
 }
 
 function compatibilitySourceUri(source: PersistedSourceBinding): string {
