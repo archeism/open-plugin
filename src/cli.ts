@@ -383,7 +383,7 @@ export async function main(argv: string[]): Promise<number> {
               source: resolved.sourceUri,
               sourceSha: resolved.sha,
               installedAt: new Date().toISOString(),
-              sourceDir: plugin.dir,
+              sourceDir: plugin.sourceDir ?? plugin.dir,
               installedFingerprint: fingerprintInstallation(match),
               ...(plugin.contentFingerprint !== undefined ? { fingerprint: plugin.contentFingerprint } : {}),
             };

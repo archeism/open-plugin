@@ -172,7 +172,7 @@ export async function runUpdate(name?: string, options: UpdateOptions = {}): Pro
         sourceSha: resolved.sha,
         installedAt: new Date().toISOString(),
         ownership: record.ownership ?? 'plgnz',
-        sourceDir: plugin.dir,
+        sourceDir: plugin.sourceDir ?? plugin.dir,
         installedFingerprint: fingerprintInstallation(installed),
         ...(plugin.contentFingerprint !== undefined ? { fingerprint: plugin.contentFingerprint } : {}),
       };

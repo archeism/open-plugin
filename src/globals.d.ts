@@ -10,10 +10,12 @@ declare module 'node:fs' {
   export function readFileSync(path: string, encoding: 'utf8'): string;
   export function readdirSync(path: string): string[];
   export function statSync(path: string): {
+    mode: number;
     isFile(): boolean;
     isDirectory(): boolean;
   };
   export function lstatSync(path: string): {
+    mode: number;
     isSymbolicLink(): boolean;
     isFile(): boolean;
     isDirectory(): boolean;
@@ -60,6 +62,7 @@ declare module 'node:os' {
 
 /** Minimal surface of Bun's test runner used by this repo's tests. */
 declare module 'bun:test' {
+  export function afterAll(fn: () => void | Promise<void>): void;
   export function describe(name: string, fn: () => void): void;
   export function it(name: string, fn: () => void | Promise<void>): void;
   export const test: typeof it;
@@ -88,6 +91,16 @@ declare const process: {
 declare const console: {
   log(...args: unknown[]): void;
   error(...args: unknown[]): void;
+};
+
+declare const URL: {
+  new(input: string): {
+    username: string;
+    password: string;
+    search: string;
+    hash: string;
+    toString(): string;
+  };
 };
 
 interface ImportMeta {
