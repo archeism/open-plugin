@@ -11,9 +11,10 @@ import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { homeRoot, zcodeCliConfigRoot, zcodeCliRoot, zcodeStorageRoot } from '../paths';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+import { spawnSync as bunShapedSpawnSync } from '../runtime';
+
 export const zcodeCliTargetProfile = singleInstanceTargetProfile('zcode-cli');
 
-declare const Bun: any;
 declare const TextDecoder: any;
 
 type NativeRecord = { id: string; name: string; marketplace: string; version: string; installPath: string; scope: 'user' | 'workspace' };
@@ -94,11 +95,11 @@ export function readZcodeOwnership(root: string): Ownership | null {
 function isOfficialZcodeCliBinary(binary: string): boolean {
   if (!existsSync(binary)) return false;
   try {
-    const versionResult = Bun.spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
+    const versionResult = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
     if (versionResult.exitCode !== 0 || !(versionResult.stdout instanceof Uint8Array)) return false;
     const version = new TextDecoder().decode(versionResult.stdout).trim();
     if (/zcode-app-cli/iu.test(version) || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) return false;
-    const result = Bun.spawnSync([binary, 'doctor', '--json'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
+    const result = bunShapedSpawnSync([binary, 'doctor', '--json'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
     if (result.exitCode !== 0 || !(result.stdout instanceof Uint8Array)) return false;
     const stdout = new TextDecoder().decode(result.stdout);
     if (/zcode-app-cli/iu.test(stdout)) return false;
@@ -120,7 +121,7 @@ export function isOfficialZcodeCli(): boolean {
 export function runOfficialZcode(args: string[]): string {
   const binary = resolveOfficialZcodeCli();
   if (binary === undefined) throw new Error('Official ZCode CLI required: set OPEN_PLUGIN_ZCODE_CLI_BIN to a binary whose doctor --json reports zcode/zcode-cli, or install the ZCode desktop app (its bundled CLI is probed automatically on darwin)');
-  const result = Bun.spawnSync([binary, ...args], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 30_000 });
+  const result = bunShapedSpawnSync([binary, ...args], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 30_000 });
   const stdout = result.stdout instanceof Uint8Array ? new TextDecoder().decode(result.stdout) : '';
   const stderr = result.stderr instanceof Uint8Array ? new TextDecoder().decode(result.stderr) : '';
   if (result.exitCode !== 0) throw new Error(`Official ZCode CLI ${args.join(' ')} failed: ${(stderr || stdout).trim()}`);

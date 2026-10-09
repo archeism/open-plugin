@@ -26,9 +26,10 @@ import { kimiRoot } from '../paths';
 import { collectPluginServers, readJson, type PluginMcpCandidate, type RawServerDef } from '../mcp';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+import { spawnSync as bunShapedSpawnSync } from '../runtime';
+
 export const kimiTargetProfile = singleInstanceTargetProfile('kimi');
 
-declare const Bun: any;
 declare const TextDecoder: any;
 
 export function pluginsDir(): string {
@@ -132,7 +133,7 @@ function explicitCurrentKimiBinary(): boolean {
   const binary = process.env['OPEN_PLUGIN_KIMI_BIN'];
   if (!binary || !existsSync(binary)) return false;
   try {
-    const result = Bun.spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+    const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
     if (result.exitCode !== 0 || !(result.stdout instanceof Uint8Array)) return false;
     const version = new TextDecoder().decode(result.stdout).trim();
     const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);

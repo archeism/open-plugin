@@ -10,9 +10,8 @@ import { parse as parseToml } from 'smol-toml';
 import { readPluginManifest } from './source';
 import { hermesCommandCompanionId } from './hermes-identity';
 
-declare const Bun: {
-  YAML: { parse(input: string): unknown; stringify(input: unknown): string };
-};
+import { yamlParse, yamlStringify } from './yaml';
+
 
 interface Command {
   name: string;
@@ -164,7 +163,7 @@ function stripOmpInvocationMetadata(path: string, parsed: Record<string, unknown
   if (!match) throw new Error(`skill frontmatter is required: ${path}`);
   const kept = { ...parsed };
   for (const key of ['disable-model-invocation', 'disable_model_invocation', 'user-invocable', 'user_invocable', 'argument-hint', 'argument_hint']) delete kept[key];
-  writeFileSync(path, `---\n${Bun.YAML.stringify(kept).replace(/\s*$/u, '')}\n---\n${match[2] ?? ''}`);
+  writeFileSync(path, `---\n${yamlStringify(kept).replace(/\s*$/u, '')}\n---\n${match[2] ?? ''}`);
 
 }
 
@@ -470,7 +469,7 @@ function stripOrdinaryHermesPolicy(skill: string): void {
   for (const key of ['disable-model-invocation', 'disable_model_invocation', 'user-invocable', 'user_invocable']) {
     if (metadata[key] !== undefined) { delete metadata[key]; changed = true; }
   }
-  if (changed) writeFileSync(skill, `---\n${Bun.YAML.stringify(metadata).trimEnd()}\n---${raw.slice(match[0].length)}`);
+  if (changed) writeFileSync(skill, `---\n${yamlStringify(metadata).trimEnd()}\n---${raw.slice(match[0].length)}`);
 }
 
 function translateNativeSkillPolicies(stage: string): void {
@@ -500,7 +499,7 @@ function translateNativeSkillPolicies(stage: string): void {
 }
 
 function readImplicitPolicy(path: string): boolean | undefined {
-  const parsed: unknown = Bun.YAML.parse(readFileSync(path, 'utf8'));
+  const parsed: unknown = yamlParse(readFileSync(path, 'utf8'));
   if (!isRecord(parsed)) throw new Error(`invalid Codex sidecar: ${path}`);
   const policy = parsed['policy'];
   if (policy === undefined) return undefined;
@@ -523,7 +522,7 @@ function publishStage(stage: string, destination: string): void {
 
 function parseYaml(text: string, path: string): Record<string, unknown> {
   try {
-    const parsed: unknown = Bun.YAML.parse(text);
+    const parsed: unknown = yamlParse(text);
     if (!isRecord(parsed)) throw new Error('frontmatter must be a mapping');
     return parsed;
   } catch (error) {

@@ -1,13 +1,9 @@
 import { validateSourceBinding, validateStableIdentityString, type SourceBinding } from './source-reference';
 
+import { CryptoHasher } from './runtime';
+
 export { validateSourceBinding } from './source-reference';
 
-declare const Bun: {
-  CryptoHasher: new (algorithm: 'sha256') => {
-    update(input: string | Uint8Array): void;
-    digest(encoding: 'hex'): string;
-  };
-};
 
 declare const TextEncoder: {
   new (): { encode(input?: string): Uint8Array };
@@ -37,7 +33,7 @@ export function createDeploymentScopeIdentity(source: SourceBinding, target: Tar
     target.kind,
     target.instance,
   ];
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   const encoder = new TextEncoder();
   for (const field of fields) frame(hash, encoder.encode(field));
   return {
@@ -51,7 +47,7 @@ function validateIdentityField(value: string, label: string): void {
   validateStableIdentityString(value, `Deployment scope ${label}`);
 }
 
-function frame(hash: InstanceType<typeof Bun.CryptoHasher>, bytes: Uint8Array): void {
+function frame(hash: CryptoHasher, bytes: Uint8Array): void {
   hash.update(new Uint8Array([bytes.byteLength >>> 24, bytes.byteLength >>> 16, bytes.byteLength >>> 8, bytes.byteLength]));
   hash.update(bytes);
 }

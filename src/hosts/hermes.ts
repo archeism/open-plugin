@@ -20,7 +20,8 @@ import {
   type TargetProfile,
 } from '../target-profile';
 
-declare const Bun: { YAML: { parse(input: string): unknown } };
+import { yamlParse, yamlStringify } from '../yaml';
+
 
 export const hermesTargetProfile: TargetProfile<'hermes'> = {
   kind: 'hermes',
@@ -108,7 +109,7 @@ function names(key: 'enabled' | 'disabled'): Set<string> {
   const config = join(hermesRoot(), 'config.yaml');
   if (!existsSync(config)) return new Set();
   try {
-    const parsed: unknown = Bun.YAML.parse(readFileSync(config, 'utf8'));
+    const parsed: unknown = yamlParse(readFileSync(config, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Set();
     const plugins = (parsed as Record<string, unknown>)['plugins'];
     if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return new Set();

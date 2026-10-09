@@ -22,6 +22,8 @@ import { claudeCodeRoot, homeRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+import { spawnSync as bunShapedSpawnSync } from '../runtime';
+
 export const claudeCodeTargetProfile = singleInstanceTargetProfile('claude-code');
 
 /** Where a plugin copy declares MCP servers (spec `mcp.json`, plus the `npx plugins` `.mcp.json` twin). */
@@ -44,13 +46,12 @@ export function pluginsDir(): string {
 }
 
 /** An explicit Claude Code binary permits first install before its config root exists. */
-declare const Bun: { spawnSync(command: string[], options: { stdout: 'pipe'; stderr: 'pipe'; timeout: number }): { exitCode: number | null; stdout: Uint8Array } };
 
 export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
   const binary = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
   if (!binary || !existsSync(binary)) return false;
   try {
-    const result = Bun.spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+    const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
     const stdout = [...result.stdout].map((byte) => String.fromCharCode(byte)).join('');
     return result.exitCode === 0 && /^\d+\.\d+\.\d+ \(Claude Code\)\s*$/.test(stdout);
   } catch { return false; }

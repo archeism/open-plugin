@@ -70,12 +70,8 @@ import type {
 } from './lifecycle-host';
 import type { CapabilityOperation, PackageSemanticInventory, SourceType } from './semantic-inventory';
 
-declare const Bun: {
-  CryptoHasher: new (algorithm: 'sha256') => {
-    update(input: string | Uint8Array): void;
-    digest(encoding: 'hex'): string;
-  };
-};
+import { CryptoHasher } from './runtime';
+
 
 export type LifecycleHostPhase =
   | 'version'
@@ -1551,7 +1547,7 @@ function compare(left: string, right: string): number {
 }
 
 function contentAddress(value: unknown): string {
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   hash.update(canonicalJson(value));
   return `sha256:${hash.digest('hex')}`;
 }

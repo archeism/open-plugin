@@ -3,12 +3,8 @@ import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { InstalledPlugin } from './host';
 
-declare const Bun: {
-  CryptoHasher: new (algorithm: 'sha256') => {
-    update(input: string | Uint8Array): void;
-    digest(encoding: 'hex'): string;
-  };
-};
+import { CryptoHasher } from './runtime';
+
 
 declare const TextEncoder: {
   new (): { encode(input?: string): Uint8Array };
@@ -25,7 +21,7 @@ export function fingerprintSourceTree(root: string): string {
 
 function fingerprint(root: string, ignoreGitMetadata: boolean): string {
   if (lstatSync(root).isSymbolicLink()) throw new Error('cannot fingerprint symlink: .');
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir).sort()) {
       if (ignoreGitMetadata && entry === '.git') continue;
@@ -42,7 +38,7 @@ function fingerprint(root: string, ignoreGitMetadata: boolean): string {
         // Normalize to that portable semantic instead of hashing platform-
         // specific read/write permission bits.
         hash.update(stat.mode & 0o111 ? 'x\0' : '-\0');
-        const content = new Bun.CryptoHasher('sha256');
+        const content = new CryptoHasher('sha256');
         content.update(readBytes(path));
         hash.update(content.digest('hex'));
         hash.update('\0');
@@ -67,7 +63,7 @@ export function fingerprintInstallation(plugin: InstalledPlugin): string {
   }
   const roots = Object.entries(plugin.contentRoots).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   if (roots.length === 0) throw new Error('cannot fingerprint installation with no content roots');
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   for (const [label, root] of roots) {
     if (label.length === 0) throw new Error('cannot fingerprint installation with an empty content root label');
     if (!isAbsolute(root)) throw new Error(`content root '${label}' is not absolute: ${root}`);
@@ -78,7 +74,7 @@ export function fingerprintInstallation(plugin: InstalledPlugin): string {
   return hash.digest('hex');
 }
 
-function frame(hash: InstanceType<typeof Bun.CryptoHasher>, value: string): void {
+function frame(hash: CryptoHasher, value: string): void {
   const bytes = new TextEncoder().encode(value);
   const size = new Uint8Array([bytes.byteLength >>> 24, bytes.byteLength >>> 16, bytes.byteLength >>> 8, bytes.byteLength]);
   hash.update(size);

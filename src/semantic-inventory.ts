@@ -4,7 +4,8 @@ import { parse as parseToml } from 'smol-toml';
 import { createLifecycleReason, type LifecycleReason } from './lifecycle-report';
 import type { PluginSource } from './source';
 
-declare const Bun: { YAML: { parse(input: string): unknown } };
+import { yamlParse, yamlStringify } from './yaml';
+
 
 export const PACKAGE_SEMANTICS = [
   'ordinary-skills',
@@ -352,7 +353,7 @@ function requiredOpeningFrontmatter(raw: string, path: string): Record<string, u
 function parseYamlObject(raw: string, label: string): Record<string, unknown> {
   let parsed: unknown;
   try {
-    parsed = Bun.YAML.parse(raw);
+    parsed = yamlParse(raw);
   } catch (error) {
     invalid(`${label} has invalid YAML (${errorDiagnostic(error)})`);
   }

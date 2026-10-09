@@ -7,6 +7,8 @@ import { grokRoot } from '../paths';
 import { collectPluginServers } from '../mcp';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+import { which } from '../runtime';
+
 export const grokTargetProfile = singleInstanceTargetProfile('grok');
 
 export const MARKER = '.plgnz-install.json';
@@ -65,7 +67,7 @@ function validMarker(repo: Repo, name: string, marker: GrokOwnership | null, pro
 
 export const grok: HostReader = {
   id: 'grok', gui: false,
-  detect(): boolean { return existsSync(grokRoot()) || process.env['OPEN_PLUGIN_GROK_BIN'] !== undefined || Bun.which('grok') !== null; },
+  detect(): boolean { return existsSync(grokRoot()) || process.env['OPEN_PLUGIN_GROK_BIN'] !== undefined || which('grok') !== null; },
   stores(): string[] { return [join(grokRoot(), 'installed-plugins'), marketplacesRoot()]; },
   listInstalled(): InstalledPlugin[] {
     const out: InstalledPlugin[] = [];
@@ -94,4 +96,3 @@ export const grok: HostReader = {
 export function provenanceOf(repo: Repo): { root: string; subdir: string; name?: string } | null { return marketplace(repo); }
 export function namesOf(repo: Repo): string[] { return pluginNames(repo); }
 
-declare const Bun: { which(command: string): string | null };
