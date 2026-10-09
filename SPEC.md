@@ -1,8 +1,19 @@
+---
+id: plugnz-spec
+type: spec
+summary: >-
+  Product boundary, lifecycle contract, migration scope, and verification requirements
+  for distributing plugins across native agent-harness stores.
+read_when:
+  - changing plugnz product scope, CLI behavior, lifecycle, or host migration requirements
+keywords: [plugnz, plugins, lifecycle, hosts, migration, verification]
+---
+
 # Spec: one plugin distributor — plgnz
 
 Status: approved for the milestone implementation. Source pushes are authorized for verified work; npm publication and fleet rollout remain separately authorized.
 
-Personal prepares the plugins; plgnz distributes them. The same `add` command accepts a GitHub/Git source or a local package/collection, adapts it for the selected harness, installs it, and verifies the installation. Personal calls that command instead of maintaining a second distributor.
+Personal prepares the plugins; plgnz distributes them. The same public CLI accepts a GitHub/Git source or a local package/collection, adapts it for the selected harness, installs it, and verifies the installation. Personal calls authoritative `sync` instead of maintaining a second distributor.
 
 ## Objective and ownership
 
@@ -24,16 +35,18 @@ npx plgnz add owner/repo --target codex
 npx plgnz add https://github.com/owner/repo.git --target codex
 npx plgnz add ./dist/plugins --target codex --json
 npx plgnz add ./dist/plugins --target codex --dry-run --json
+npx plgnz sync ./dist/plugins --target codex --dry-run --json
 npx plgnz update --target codex --json
 npx plgnz list --target codex --json
 npx plgnz remove <installed-id> --target codex --json
 npx plgnz doctor --target codex --json
 ```
 
-- `add` accepts a plugin directory, local collection/marketplace, or remote source. Repeating it reconciles that source's selected installations, including changed local bytes without a version/commit bump. `update` reuses recorded sources and selections.
+- `add` accepts a plugin directory, local collection/marketplace, or remote source. Repeating it refreshes selected installations, including changed local bytes without a version/commit bump, but never prunes omissions. `update` refreshes recorded installations and is also non-pruning.
+- `sync` authoritatively reconciles the complete package selection for each requested source × target scope. A `--plugin` selection is the complete desired set for those scopes; applied sync retires omitted installations only when plgnz can prove ownership, while `--dry-run` previews the same plan without mutation.
 - Missing sources, zero discovered packages, unknown/absent requested targets, collisions and incompatible conversions cannot report success.
 - `--json` emits structured per-package/per-target outcomes and diagnostics; automation uses these plus a nonzero exit status for required failures. Logs go to stderr. Dry-run must not alter active installs/configuration.
-- Personal bundles once, then invokes `add` with its chosen local source and targets; the pinned CLI version is explicit. Local development can invoke that same CLI from the checkout without an npm release. Remote refresh applies only to a source explicitly supplied as remote.
+- Personal bundles once, then invokes `sync` with its chosen local source and targets; the pinned CLI version is explicit. Local development can invoke that same CLI from the checkout without an npm release. Remote refresh applies only to a source explicitly supplied as remote.
 - Preserve established marketplace/plugin identity during migration so previously installed packages are refreshed, not duplicated. Remove only recorded/verified owned artifacts; never remove unrelated user configuration.
 
 ## Compatibility and lifecycle requirements
