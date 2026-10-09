@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-09",
+  "question": "What native refresh and exact-plugin reinstall behavior does deepagents-code 0.1.83 expose for an OpenPlugin marketplace plugin?",
+  "sandbox": {
+    "provider": "Vercel Sandbox",
+    "name": "plugnz-dcode-0183-proof-final-20261009",
+    "team": "charfeng1s-projects",
+    "project": "vercel-sandbox-default-project",
+    "region": "iad1",
+    "imageReported": "vercel/sandbox/universal@sha256:c77f7436b9bc… (CLI-truncated)",
+    "vcpus": 2,
+    "memoryMb": 4096,
+    "timeout": "15m",
+    "sessionId": "sbx_QGU1VhAIWqJBuj24gWUF6YqQcMou"
+  },
+  "isolation": {
+    "fixtureRoot": "/tmp/dcode-native-update-proof",
+    "dcodeHome": "/tmp/dcode-native-update-proof/home",
+    "realInstallationTouched": false,
+    "note": "The probe ran remotely in a newly created sandbox. Its generated source, HTTPS Git server, virtual environment, dcode state, and HOME all lived under sandbox /tmp."
+  },
+  "versions": {
+    "vercelCli": "59.11.7",
+    "sandboxCli": "4.1.0",
+    "deepagentsCode": "0.1.83",
+    "deepagentsSdk": "0.7.23",
+    "python": "3.13.15",
+    "kernel": "Linux 6.18.49 x86_64"
+  },
+  "execution": {
+    "command": "vercel sandbox exec --scope charfeng1s-projects --timeout 12m plugnz-dcode-0183-proof-final-20261009 -- bash /tmp/dcode-native-update-0.1.83-20261009.sh",
+    "exitCode": 0,
+    "script": "dcode-native-update-0.1.83-20261009.sh",
+    "scriptSha256": "f2d865671a8605d5be09e95f58a63e6d6ed1becbb2668dbdd407759521e09e9a",
+    "rawOutput": "dcode-native-update-0.1.83-20261009.raw.txt",
+    "rawOutputSha256": "70ea2cde258e0fedf195dcc7dcdb92db3c52f27090a5ae61820c4125d52b1fd7"
+  },
+  "observations": [
+    {
+      "id": "hashed-native-path",
+      "result": "Initial native install used hashed marketplace, plugin, and version directories.",
+      "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba"
+    },
+    {
+      "id": "no-public-marketplace-update",
+      "result": "dcode plugin marketplace update proof-market exited 2; the accepted subcommands were list, ls, add, and remove."
+    },
+    {
+      "id": "same-version-refresh",
+      "result": "After upstream marker-v1 changed to marker-v2 at version 0.1.0, marketplace re-add, exact-plugin reinstall, and internal auto_update_plugins() all left marker-v1 active."
+    },
+    {
+      "id": "opted-in-version-update",
+      "result": "With extensions.com.langchain.deepagents.code.autoUpdate=true, internal auto_update_plugins() advanced 0.1.0 to 0.1.1 and installed marker-v3-version-bump.",
+      "versionPath": "0-1-1-11ee23b8fc2fc619d6eab6277adb5a52"
+    },
+    {
+      "id": "explicit-background-update-opt-out",
+      "result": "With extensions.com.langchain.deepagents.code.autoUpdate=false at upstream version 0.1.2, internal auto_update_plugins() returned an empty tuple and active state remained at 0.1.1."
+    },
+    {
+      "id": "public-exact-plugin-reinstall",
+      "result": "After the marketplace source had been refreshed, public dcode plugin install proof-plugin@proof-market advanced active state from 0.1.1 to 0.1.2 despite autoUpdate=false.",
+      "versionPath": "0-1-2-54a46c644c4eb6f128f99f7f08434918"
+    }
+  ],
+  "claimBoundary": [
+    "The exact-plugin reinstall followed an internal updater call that had refreshed marketplace source while declining background activation. It proves public exact-plugin install can apply a declared newer version from an already-refreshed marketplace; it does not prove install alone refreshes a stale marketplace clone.",
+    "The probe establishes dcode 0.1.83 behavior only. It does not turn OpenPlugin format or open-source status into a cross-harness lifecycle guarantee.",
+    "The final case is an explicit autoUpdate=false opt-out, not an absent extension."
+  ],
+  "resources": {
+    "scope": "Entire final sandbox session through stop: creation, preflight, one corrected probe run, and stop-time snapshot creation.",
+    "activeCpuSeconds": 19.151,
+    "configuredMemoryMb": 4096,
+    "durationSeconds": 37.528,
+    "ingressReported": "124 MB",
+    "egressReported": "164 KB",
+    "stopSnapshotSizeReported": "913 MB"
+  },
+  "cleanup": {
+    "sandboxRemoved": true,
+    "snapshotId": "snap_F6wkeEbrEO2ZKMXGH6SyFma4NJcf",
+    "snapshotDeleted": true,
+    "verification": "Filtered sandbox and snapshot lists were empty; snapshot get reported status=deleted and expiration=deleted."
+  }
+}

@@ -1,0 +1,151 @@
+Vercel CLI 59.11.7 (Node.js 22.23.1)
+$ bash /tmp/dcode-native-update-0.1.83-20261009.sh
+Cloning into bare repository '/tmp/dcode-native-update-proof/web/repo.git'...
+done.
+Downloading cpython-3.13.15-linux-x86_64-gnu (download) (33.4MiB)
+ Downloaded cpython-3.13.15-linux-x86_64-gnu (download)
+Using CPython 3.13.15
+Creating virtual environment at: /tmp/dcode-native-update-proof/venv
+Activate with: source /tmp/dcode-native-update-proof/venv/bin/activate
+deepagents-code 0.1.83
+deepagents (SDK) 0.7.23
+
+Installed optional dependencies:
+  anthropic     langchain-anthropic     1.7.5
+  google-genai  langchain-google-genai  4.4.0
+  openai        langchain-openai        1.7.0
+Added marketplace proof-market (1 plugin(s)).
+Installed plugin proof-plugin@proof-market (version: 0.1.0). Run /reload to activate.
+
+=== initial install ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba",
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+To /tmp/dcode-native-update-proof/web/repo.git
+   6fc4e69..49be7d0  main -> main
+
+=== documented manual command ===
+exit=2
+usage: dcode plugin marketplace [-h] {list,ls,add,remove} ...
+dcode plugin marketplace: error: argument marketplace_command: invalid choice: 'update' (choose from 'list', 'ls', 'add', 'remove')
+Added marketplace proof-market (1 plugin(s)).
+Installed plugin proof-plugin@proof-market (version: 0.1.0). Run /reload to activate.
+
+=== re-add plus reinstall, same version ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba",
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+internal_auto_update_same_version= ()
+
+=== internal updater, same version ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba",
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+To /tmp/dcode-native-update-proof/web/repo.git
+   49be7d0..d0f8ec2  main -> main
+internal_auto_update_version_bump= ('proof-plugin@proof-market',)
+
+=== internal updater, version bump ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-1-11ee23b8fc2fc619d6eab6277adb5a52",
+        "version": "0.1.1"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-1-11ee23b8fc2fc619d6eab6277adb5a52/skills/proof-skill/SKILL.md
+marker_body=marker-v3-version-bump
+To /tmp/dcode-native-update-proof/web/repo.git
+   d0f8ec2..809edc1  main -> main
+internal_auto_update_opted_out= ()
+
+=== internal updater, dcode autoUpdate false ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-1-11ee23b8fc2fc619d6eab6277adb5a52",
+        "version": "0.1.1"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-1-11ee23b8fc2fc619d6eab6277adb5a52/skills/proof-skill/SKILL.md
+marker_body=marker-v3-version-bump
+Installed plugin proof-plugin@proof-market (version: 0.1.2). Run /reload to activate.
+
+=== public exact-plugin reinstall, dcode autoUpdate false ===
+installed_state= {
+  "plugins": {
+    "proof-plugin@proof-market": [
+      {
+        "installPath": "/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-2-54a46c644c4eb6f128f99f7f08434918",
+        "version": "0.1.2"
+      }
+    ]
+  },
+  "version": 2
+}
+
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-0-6ad9613a455798d6d92e5f5f390ab4ba/skills/proof-skill/SKILL.md
+marker_body=marker-v1
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-1-11ee23b8fc2fc619d6eab6277adb5a52/skills/proof-skill/SKILL.md
+marker_body=marker-v3-version-bump
+marker_path=/tmp/dcode-native-update-proof/home/.deepagents/plugins/cache/proof-market-cd9f423ff3061dae749b94f13389ee37/proof-plugin-5491552c13c89a0b05ab1afb3cbcb782/0-1-2-54a46c644c4eb6f128f99f7f08434918/skills/proof-skill/SKILL.md
+marker_body=marker-v4-auto-update-false
+
+=== public commands ===
+usage: dcode plugin marketplace [-h] {list,ls,add,remove} ...
+
+positional arguments:
+  {list,ls,add,remove}
+    list (ls)           List marketplaces
+    add                 Add a marketplace
+    remove              Remove a marketplace and uninstall its plugins
+
+options:
+  -h, --help            show this help message and exit
