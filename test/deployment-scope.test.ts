@@ -132,6 +132,30 @@ describe('deployment scope identity', () => {
     ).source).toEqual({ kind: 'git', locator: 'git@example.invalid:owner/repo.git', ref: 'release%candidate' });
   });
 
+  test('accepts only refs supported by the canonical public Source grammar', () => {
+    for (const ref of [
+      'feature#evil',
+      '-bad',
+      'bad..ref',
+      'bad@{ref',
+      'bad~ref',
+      'bad^ref',
+      'bad:ref',
+      'bad?ref',
+      'bad*ref',
+      'bad\\ref',
+      'bad[ref',
+    ]) {
+      expectThrow(
+        () => createDeploymentScopeIdentity(
+          { kind: 'git', locator: 'https://example.invalid/owner/repo.git', ref },
+          { kind: 'dcode', instance: 'default' },
+        ),
+        'Invalid git ref',
+      );
+    }
+  });
+
   test('requires canonical credential-free SCP-style syntax', () => {
     for (const locator of [
       'alice@example.invalid:owner/repo.git',

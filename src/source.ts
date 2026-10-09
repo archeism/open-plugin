@@ -4,7 +4,7 @@ import { join, basename, isAbsolute, relative, resolve } from 'node:path';
 import { cacheRoot } from './paths';
 import { isGitUrl } from './exec';
 import { fingerprintTree } from './fingerprint';
-import type { SourceBinding, SourceSnapshotReference } from './source-reference';
+import { validateGitRef, validateSourceBinding, type SourceBinding, type SourceSnapshotReference } from './source-reference';
 
 export type { SourceBinding, SourceSnapshotReference } from './source-reference';
 
@@ -206,28 +206,34 @@ interface ParsedSource {
 function parseSource(source: string): ParsedSource {
   if (source.startsWith('./') || source.startsWith('../') || isAbsolute(source)) {
     const locator = resolve(source);
-    return { binding: { kind: 'local', locator }, sourceUri: locator };
+    const binding: SourceBinding = { kind: 'local', locator };
+    validateSourceBinding(binding);
+    return { binding, sourceUri: locator };
   }
   if (isGitUrl(source)) {
-    const hash = source.lastIndexOf('#');
+    const hash = source.indexOf('#');
     const rawLocator = hash === -1 ? source : source.slice(0, hash);
-    const ref = validatedRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
+    const ref = validateGitRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
     const fetchLocator = withoutFragment(rawLocator);
     const locator = credentialFreeLocator(fetchLocator);
     const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
     return { binding, sourceUri: formatSourceBinding(binding), fetchLocator };
   }
-  const shorthand = /^([^/\s#]+)\/([^/\s#]+?)(?:#([^\s#]+))?$/u.exec(source);
+  const shorthand = /^([^/\s#]+)\/([^/\s#]+?)(?:#([\s\S]*))?$/u.exec(source);
   if (shorthand !== null) {
     const owner = shorthand[1]!;
     const repository = shorthand[2]!.endsWith('.git') ? shorthand[2]! : `${shorthand[2]!}.git`;
-    const ref = validatedRef(shorthand[3] ?? 'HEAD');
+    const ref = validateGitRef(shorthand[3] ?? 'HEAD');
     const locator = `https://github.com/${owner}/${repository}`;
     const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
     return { binding, sourceUri: formatSourceBinding(binding), fetchLocator: locator };
   }
   const locator = resolve(source);
-  return { binding: { kind: 'local', locator }, sourceUri: locator };
+  const binding: SourceBinding = { kind: 'local', locator };
+  validateSourceBinding(binding);
+  return { binding, sourceUri: locator };
 }
 
 function formatSourceBinding(binding: SourceBinding): string {
@@ -242,20 +248,14 @@ function withoutFragment(locator: string): string {
 }
 
 function credentialFreeLocator(locator: string): string {
-  if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
+  const scheme = /^(http|https|ssh|git):\/\//u.exec(locator)?.[1];
+  if (scheme === undefined) return locator;
   const value = new URL(locator);
-  value.username = '';
+  if (scheme !== 'ssh') value.username = '';
   value.password = '';
   value.search = '';
   value.hash = '';
   return value.toString();
-}
-
-function validatedRef(ref: string): string {
-  if (ref === '' || /[\u0000-\u0020\u007f]/u.test(ref) || ref.startsWith('-') || ref.includes('..') || ref.includes('@{') || /[~^:?*\\[]/u.test(ref)) {
-    throw new Error(`Invalid git ref: ${ref}`);
-  }
-  return ref;
 }
 
 function resolveRemoteRevision(fetchLocator: string, ref: string, displayLocator: string): string {

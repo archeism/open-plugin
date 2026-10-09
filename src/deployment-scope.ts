@@ -1,5 +1,6 @@
-import { isAbsolute, resolve } from 'node:path';
-import type { SourceBinding } from './source-reference';
+import { validateSourceBinding, validateStableIdentityString, type SourceBinding } from './source-reference';
+
+export { validateSourceBinding } from './source-reference';
 
 declare const Bun: {
   CryptoHasher: new (algorithm: 'sha256') => {
@@ -46,79 +47,8 @@ export function createDeploymentScopeIdentity(source: SourceBinding, target: Tar
   };
 }
 
-export function validateSourceBinding(source: SourceBinding): void {
-  validateIdentityField(source.locator, 'Source locator');
-  if (source.kind === 'local') {
-    if (!isAbsolute(source.locator) || resolve(source.locator) !== source.locator) throw new Error('Local Source locator must be a canonical absolute path');
-    return;
-  }
-  if (source.kind !== 'git') throw new Error('Deployment scope Source binding kind must be local or git');
-  validateIdentityField(source.ref, 'Source ref');
-  validateGitLocator(source.locator);
-}
-
-function validateGitLocator(locator: string): void {
-  if (locator.includes('%')) invalidGitLocator();
-  if (locator.startsWith('git@')) {
-    validateScpGitLocator(locator);
-    return;
-  }
-
-  const scheme = /^(http|https|ssh|git):\/\//u.exec(locator)?.[1];
-  if (scheme === undefined) invalidGitLocator();
-  let url: InstanceType<typeof URL>;
-  try {
-    url = new URL(locator);
-  } catch {
-    invalidGitLocator();
-  }
-  if (locator.includes('?') || locator.includes('#')) invalidGitLocator();
-
-  const authority = locator.slice(locator.indexOf('//') + 2).split('/', 1)[0]!;
-  const at = authority.lastIndexOf('@');
-  const userInfo = at === -1 ? undefined : authority.slice(0, at);
-  const host = at === -1 ? authority : authority.slice(at + 1);
-  if (host === '') invalidGitLocator();
-  if (scheme === 'ssh') {
-    if (userInfo !== undefined && (userInfo === '' || userInfo.includes(':'))) invalidGitLocator();
-  } else if (userInfo !== undefined) invalidGitLocator();
-  if (url.toString() !== locator) invalidGitLocator();
-}
-
-function validateScpGitLocator(locator: string): void {
-  const match = /^git@([a-z0-9.-]+):(.+)$/u.exec(locator);
-  if (match === null) invalidGitLocator();
-  const host = match[1]!;
-  const path = match[2]!;
-  if (
-    host.split('.').some(label => !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label))
-    || path.startsWith('/')
-    || path.endsWith('/')
-    || path.includes('\\')
-    || /[\s?#]/u.test(path)
-    || path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
-  ) invalidGitLocator();
-}
-
-function invalidGitLocator(): never {
-  throw new Error('Deployment scope Source binding must use a credential-free canonical git locator');
-}
-
 function validateIdentityField(value: string, label: string): void {
-  if (!isWellFormedUtf16(value)) throw new Error(`Deployment scope ${label} must be well-formed UTF-16`);
-  if (value === '' || value.trim() !== value || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error(`Deployment scope ${label} must be a non-empty stable value`);
-}
-
-function isWellFormedUtf16(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false;
-  }
-  return true;
+  validateStableIdentityString(value, `Deployment scope ${label}`);
 }
 
 function frame(hash: InstanceType<typeof Bun.CryptoHasher>, bytes: Uint8Array): void {

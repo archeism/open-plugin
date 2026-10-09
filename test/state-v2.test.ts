@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDeploymentScopeIdentity, type TargetIdentity } from '../src/deployment-scope';
+import { normalizeSource } from '../src/source';
 import {
   hasRetirementAuthority,
   readLifecycleState,
@@ -144,6 +145,10 @@ function rebindFixtureSource(state: LifecycleStateV2, source: SourceBinding): vo
 
 function rebindFixtureIdentity(state: LifecycleStateV2, source: SourceBinding, target: TargetIdentity): void {
   const id = createDeploymentScopeIdentity(source, target).id;
+  setFixtureIdentity(state, source, target, id);
+}
+
+function setFixtureIdentity(state: LifecycleStateV2, source: SourceBinding, target: TargetIdentity, id: string): void {
   state.scopes[0]!.id = id;
   state.scopes[0]!.source = source;
   state.scopes[0]!.target = target;
@@ -686,6 +691,64 @@ describe('state v2 public reader and writer', () => {
     }
   });
 
+  test('projects canonical remote transports and refs through the public Source parser unchanged', () => {
+    for (const locator of [
+      'http://example.invalid/owner/repo.git',
+      'https://example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/repo.git',
+      'git://example.invalid/owner/repo.git',
+      'git@example.invalid:owner/repo.git',
+    ]) {
+      for (const ref of [
+        'HEAD',
+        'feature/release',
+        'v1.2.3',
+        '0123456789abcdef0123456789abcdef01234567',
+      ]) {
+        const { file } = tempStateFile();
+        const value = stateFixture();
+        const source: SourceBinding = { kind: 'git', locator, ref };
+        rebindFixtureSource(value, source);
+        writeLifecycleState(value, { globalPreflight: 'succeeded' }, file);
+        expect(readLifecycleState(file).state.scopes[0]?.source).toEqual(source);
+        const projection = readState(file)[0]!.source;
+        const expected = ref === 'HEAD' ? locator : locator + '#' + ref;
+        expect(projection).toBe(expected);
+        expect(normalizeSource(projection)).toBe(expected);
+      }
+    }
+  });
+
+  test('rejects every non-canonical Git ref before creating state', () => {
+    // Fixed pre-validation IDs make these complete documents, proving rejection
+    // happens at the public writer boundary rather than at an unrelated ID check.
+    const cases = [
+      ['feature#evil', 'scope-v1-7bc315dfb4def57ab53c4e17f0a8267c5bb0a28384965a689ad0178155f6ee1e'],
+      ['-bad', 'scope-v1-eb80d444b33c5e9d165a0c2df08ff6e6e4720189d1265a7c592c167fdb6e34e2'],
+      ['bad..ref', 'scope-v1-beab613c0728e7baed5fba4382f3878346de3cdd31823783e9d1eee5a1467b9c'],
+      ['bad@{ref', 'scope-v1-1e0bd06a4f61439680be2506e43284e46a4da0ec3959174d99da2d42b007b3cf'],
+      ['bad~ref', 'scope-v1-157dd2849012131e4b5d0be581b15b589d56a7750e4d7cd9348f2553a2be4078'],
+      ['bad^ref', 'scope-v1-048c5a26d21f300b86232188e155c4ad0eb1e166d21a0a0012f87ff405605ac5'],
+      ['bad:ref', 'scope-v1-1173d20651ad0625ccec93d548232445eecc3b7db080b9d22d7a5045f55cf506'],
+      ['bad?ref', 'scope-v1-6817f0b17120c468d9686ffadfd6cb455958f6b060bd9bc2e0f8e7e75044505b'],
+      ['bad*ref', 'scope-v1-f35036a6a988ae8d8908ea55416f4b819b0b64a8ec7421b4ac0ff9f77f7f46f1'],
+      ['bad\\ref', 'scope-v1-1f44be616664e67eb5038f9f1358fc649dfe267434bfd739d7503d092d8cfe70'],
+      ['bad[ref', 'scope-v1-bfabd664c265072ae10fa5a876bba6fe65d1064380f24e2381518c74c35513c5'],
+    ] as const;
+
+    for (const [ref, id] of cases) {
+      const { file } = tempStateFile();
+      const value = stateFixture();
+      const source: SourceBinding = { kind: 'git', locator: 'https://example.invalid/owner/repo.git', ref };
+      setFixtureIdentity(value, source, fixtureTarget, id);
+      expectThrow(
+        () => writeLifecycleState(value, { globalPreflight: 'succeeded' }, file),
+        'Invalid git ref',
+      );
+      expect(existsSync(file)).toBe(false);
+    }
+  });
+
   test('never persists password, query, fragment, or malformed SCP Source locators', () => {
     const locators = [
       'https://alice@example.invalid/owner/repo.git',
@@ -918,6 +981,34 @@ describe('state v2 public reader and writer', () => {
     const binding: SourceBinding = { kind: 'git', locator: 'https://github.com/acme/plugins.git', ref: 'release' };
     expect(loaded.state.scopes[0]?.source).toEqual(binding);
     expect(loaded.state.scopes[0]?.id).toBe(createDeploymentScopeIdentity(binding, { kind: 'codex', instance: 'default' }).id);
+  });
+
+  test('rejects non-canonical Git refs while importing legacy state', () => {
+    const { file } = tempStateFile();
+    for (const ref of [
+      'feature#evil',
+      '-bad',
+      'bad..ref',
+      'bad@{ref',
+      'bad~ref',
+      'bad^ref',
+      'bad:ref',
+      'bad?ref',
+      'bad*ref',
+      'bad\\ref',
+      'bad[ref',
+    ]) {
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        installs: [{
+          host: 'codex',
+          id: 'demo@personal',
+          source: 'https://example.invalid/owner/repo.git#' + ref,
+          sourceSha: 'abc123',
+        }],
+      }));
+      expectThrow(() => readLifecycleState(file), 'Invalid git ref');
+    }
   });
 
   test('never downgrades an existing v2 document through the legacy writer', () => {

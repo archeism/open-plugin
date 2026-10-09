@@ -9,7 +9,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { stateFile } from './paths';
-import { readLifecycleState, validateLifecycleState, type InstallRecord, type LifecycleStateV2 } from './state';
+import { readLifecycleState, validateLegacyInstallRecords, validateLifecycleState, type InstallRecord, type LifecycleStateV2 } from './state';
 
 export interface LifecycleStateWriteAuthorization {
   /** Callers may persist accepted intent only after command-global preflight. */
@@ -19,6 +19,7 @@ export interface LifecycleStateWriteAuthorization {
 export function writeState(records: InstallRecord[], file: string = stateFile()): void {
   const existing = readLifecycleState(file);
   if (existing.sourceVersion === 2) throw new Error('refusing to downgrade state.json version 2 through the legacy writer');
+  validateLegacyInstallRecords(records);
   atomicWrite(file, JSON.stringify({ version: 1, installs: records }, null, 2));
 }
 

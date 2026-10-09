@@ -236,6 +236,8 @@ describe('doctor · git-URL sources', () => {
   test('isGitUrl matches exactly the prefixes add treats as remote', () => {
     expect(isGitUrl('https://example.com/market.git')).toBe(true);
     expect(isGitUrl('http://example.com/market.git')).toBe(true);
+    expect(isGitUrl('ssh://git@example.com/owner/market.git')).toBe(true);
+    expect(isGitUrl('git://example.com/owner/market.git')).toBe(true);
     expect(isGitUrl('git@example.com:owner/market.git')).toBe(true);
     expect(isGitUrl('file:///tmp/market')).toBe(false);
     expect(isGitUrl('/tmp/checkout')).toBe(false);

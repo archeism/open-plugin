@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readState } from '../src/state';
@@ -57,6 +57,50 @@ describe('state ledger failures', () => {
     expect(readState(file)[0]?.installedFingerprint).toBe('native-bytes');
     writeFileSync(file, JSON.stringify({ version: 1, installs: [{ host: 'codex', id: 'x', source: '/x', sourceSha: 's', installedFingerprint: 7 }] }));
     expectThrow(() => readState(file), 'installedFingerprint must be a string');
+  });
+
+  test('legacy reader and writer reject non-canonical Source refs without mutation', () => {
+    const cases = [
+      ['feature#evil', 'Invalid git ref'],
+      ['-bad', 'Invalid git ref'],
+      ['bad..ref', 'Invalid git ref'],
+      ['bad@{ref', 'Invalid git ref'],
+      ['bad~ref', 'Invalid git ref'],
+      ['bad^ref', 'Invalid git ref'],
+      ['bad:ref', 'Invalid git ref'],
+      ['bad?ref', 'Invalid git ref'],
+      ['bad*ref', 'Invalid git ref'],
+      ['bad\\ref', 'Invalid git ref'],
+      ['bad[ref', 'Invalid git ref'],
+      ['bad\uD800ref', 'well-formed UTF-16'],
+    ] as const;
+
+    for (const [ref, message] of cases) {
+      const root = mkdtempSync(join(tmpdir(), 'plgnz-state-ref-'));
+      const file = join(root, 'state.json');
+      const record = {
+        host: 'codex',
+        id: 'x',
+        source: 'https://example.invalid/owner/repo.git#' + ref,
+        sourceSha: 's',
+      };
+      expectThrow(() => writeState([record], file), message);
+      expect(existsSync(file)).toBe(false);
+      writeFileSync(file, JSON.stringify({ version: 1, installs: [record] }));
+      expectThrow(() => readState(file), message);
+    }
+
+    const root = mkdtempSync(join(tmpdir(), 'plgnz-state-ref-existing-'));
+    const file = join(root, 'state.json');
+    writeState([{ host: 'codex', id: 'x', source: '/source', sourceSha: 's' }], file);
+    const before = readFileSync(file, 'utf8');
+    expectThrow(() => writeState([{
+      host: 'codex',
+      id: 'x',
+      source: 'https://example.invalid/owner/repo.git#feature#evil',
+      sourceSha: 's',
+    }], file), 'Invalid git ref');
+    expect(readFileSync(file, 'utf8')).toBe(before);
   });
 });
 

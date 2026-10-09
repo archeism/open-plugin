@@ -34,6 +34,80 @@ describe('resolveSource', () => {
     expect(normalizeSource('../plugin')).toBe(resolve('../plugin'));
   });
 
+  test('rejects every ref that cannot survive the public Source projection injectively', () => {
+    const locator = 'https://example.invalid/owner/repo.git';
+    for (const ref of [
+      'feature#evil',
+      '-bad',
+      'bad..ref',
+      'bad@{ref',
+      'bad~ref',
+      'bad^ref',
+      'bad:ref',
+      'bad?ref',
+      'bad*ref',
+      'bad\\ref',
+      'bad[ref',
+    ]) {
+      expectThrow(() => normalizeSource(locator + '#' + ref), 'Invalid git ref');
+    }
+    expectThrow(() => normalizeSource('owner/repo#feature#evil'), 'Invalid git ref');
+    for (const ref of ['', 'bad ref', 'bad\u0001ref', 'bad\u007Fref']) {
+      expectThrow(() => normalizeSource('owner/repo#' + ref), 'Invalid git ref');
+    }
+    expectThrow(() => normalizeSource(locator + '#bad\uD800ref'), 'well-formed UTF-16');
+  });
+
+  test('uses durable identity text rules for refs parsed from public Sources', () => {
+    const locator = 'https://example.invalid/owner/repo.git';
+    for (const ref of [
+      'a\u0085b',
+      '\u00A0branch',
+      'branch\u00A0',
+      '\u1680branch',
+      'branch\u2000',
+      '\u202Fbranch',
+      'branch\u205F',
+      '\u3000branch',
+      'branch\uFEFF',
+    ]) expectThrow(() => normalizeSource(locator + '#' + ref), 'stable value');
+  });
+
+  test('round-trips canonical remote transports with HEAD, branch, tag, and full-SHA refs', () => {
+    for (const locator of [
+      'http://example.invalid/owner/repo.git',
+      'https://example.invalid/owner/repo.git',
+      'ssh://git@example.invalid/owner/repo.git',
+      'git://example.invalid/owner/repo.git',
+      'git@example.invalid:owner/repo.git',
+    ]) {
+      for (const projection of [
+        locator,
+        locator + '#feature/release',
+        locator + '#v1.2.3',
+        locator + '#0123456789abcdef0123456789abcdef01234567',
+      ]) expect(normalizeSource(projection)).toBe(projection);
+    }
+  });
+
+  test('keeps URL transport credentials and query data out of canonical Source projections', () => {
+    expect(normalizeSource('https://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
+      .toBe('https://example.invalid/owner/repo.git#main');
+    expect(normalizeSource('ssh://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
+      .toBe('ssh://alice@example.invalid/owner/repo.git#main');
+    expect(normalizeSource('git://alice:secret@example.invalid/owner/repo.git?token=synthetic#main'))
+      .toBe('git://example.invalid/owner/repo.git#main');
+  });
+
+  test('never produces a remote Source projection rejected by canonical scope identity', () => {
+    for (const source of [
+      'https://example.invalid/owner/repo%2F.git#main',
+      'ssh://alice%3Asecret@example.invalid/owner/repo.git#main',
+      'git@example.invalid:owner/repo.git?token=synthetic#main',
+      'git@EXAMPLE.invalid:owner/repo.git#main',
+    ]) expectThrow(() => normalizeSource(source), 'credential-free canonical git locator');
+  });
+
   test('normalizes a relative local root and fingerprints its bytes', () => {
     const root = mkdtempSync(join(tmpdir(), 'plgnz-source-'));
     plugin(root);

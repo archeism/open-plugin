@@ -243,6 +243,11 @@ export function readState(file: string = stateFile()): InstallRecord[] {
   throw new Error(`Unsupported state.json version: ${String(root['version'])}`);
 }
 
+/** Pure v1 row validation shared by the compatibility reader and writer. */
+export function validateLegacyInstallRecords(value: unknown): InstallRecord[] {
+  return parseV1({ version: 1, installs: value });
+}
+
 /** Validate and return the exact state value for writer and reader parity. */
 export function validateLifecycleState(value: unknown): LifecycleStateV2 {
   return validateLifecycleStateDocument(value, 1);
@@ -320,6 +325,7 @@ function parseV1(root: Record<string, unknown>): InstallRecord[] {
   exactFields(root, ['version', 'installs'], 'root');
   const installs = array(root['installs'], 'installs').map((value, index) => parseV1Install(value, index));
   unique(installs.map(record => `${record.host}\u0000${record.id}`), 'version 1 host/plugin identity');
+  for (const record of installs) legacySourceBinding(record.source);
   return installs;
 }
 
@@ -744,7 +750,7 @@ function validateTombstone(value: unknown, label: string): TombstoneRecord {
 
 function legacySourceBinding(source: string): PersistedSourceBinding {
   if (isLegacyGitSource(source)) {
-    const fragment = source.lastIndexOf('#');
+    const fragment = source.indexOf('#');
     const binding: PersistedSourceBinding = fragment === -1
       ? { kind: 'git', locator: source, ref: 'HEAD' }
       : { kind: 'git', locator: source.slice(0, fragment), ref: source.slice(fragment + 1) };
