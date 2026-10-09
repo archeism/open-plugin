@@ -4,7 +4,7 @@ import { join, basename, isAbsolute, relative, resolve } from 'node:path';
 import { cacheRoot } from './paths';
 import { isGitUrl } from './exec';
 import { fingerprintTree } from './fingerprint';
-import type { SourceBinding, SourceSnapshotReference } from './source-reference';
+import { validateGitRef, validateSourceBinding, validateStableIdentityString, type SourceBinding, type SourceSnapshotReference } from './source-reference';
 
 export type { SourceBinding, SourceSnapshotReference } from './source-reference';
 
@@ -206,56 +206,54 @@ interface ParsedSource {
 function parseSource(source: string): ParsedSource {
   if (source.startsWith('./') || source.startsWith('../') || isAbsolute(source)) {
     const locator = resolve(source);
-    return { binding: { kind: 'local', locator }, sourceUri: locator };
+    const binding: SourceBinding = { kind: 'local', locator };
+    validateSourceBinding(binding);
+    return { binding, sourceUri: locator };
   }
   if (isGitUrl(source)) {
-    const hash = source.lastIndexOf('#');
+    const hash = source.indexOf('#');
     const rawLocator = hash === -1 ? source : source.slice(0, hash);
-    const ref = validatedRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
-    const fetchLocator = withoutFragment(rawLocator);
-    const locator = credentialFreeLocator(fetchLocator);
+    const ref = validateGitRef(hash === -1 ? 'HEAD' : source.slice(hash + 1));
+    const fetchLocator = rawLocator;
+    const locator = credentialFreeHttpLocator(rawLocator);
     const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
     return { binding, sourceUri: formatSourceBinding(binding), fetchLocator };
   }
-  const shorthand = /^([^/\s#]+)\/([^/\s#]+?)(?:#([^\s#]+))?$/u.exec(source);
+  const shorthand = /^([^/\s#]+)\/([^/\s#]+?)(?:#([\s\S]*))?$/u.exec(source);
   if (shorthand !== null) {
     const owner = shorthand[1]!;
     const repository = shorthand[2]!.endsWith('.git') ? shorthand[2]! : `${shorthand[2]!}.git`;
-    const ref = validatedRef(shorthand[3] ?? 'HEAD');
+    const ref = validateGitRef(shorthand[3] ?? 'HEAD');
     const locator = `https://github.com/${owner}/${repository}`;
     const binding: SourceBinding = { kind: 'git', locator, ref };
+    validateSourceBinding(binding);
     return { binding, sourceUri: formatSourceBinding(binding), fetchLocator: locator };
   }
   const locator = resolve(source);
-  return { binding: { kind: 'local', locator }, sourceUri: locator };
+  const binding: SourceBinding = { kind: 'local', locator };
+  validateSourceBinding(binding);
+  return { binding, sourceUri: locator };
 }
 
 function formatSourceBinding(binding: SourceBinding): string {
   return binding.kind === 'git' && binding.ref !== 'HEAD' ? `${binding.locator}#${binding.ref}` : binding.locator;
 }
 
-function withoutFragment(locator: string): string {
+function credentialFreeHttpLocator(locator: string): string {
   if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
-  const value = new URL(locator);
-  value.hash = '';
-  return value.toString();
-}
-
-function credentialFreeLocator(locator: string): string {
-  if (!locator.startsWith('http://') && !locator.startsWith('https://')) return locator;
-  const value = new URL(locator);
-  value.username = '';
-  value.password = '';
-  value.search = '';
-  value.hash = '';
-  return value.toString();
-}
-
-function validatedRef(ref: string): string {
-  if (ref === '' || /[\u0000-\u0020\u007f]/u.test(ref) || ref.startsWith('-') || ref.includes('..') || ref.includes('@{') || /[~^:?*\\[]/u.test(ref)) {
-    throw new Error(`Invalid git ref: ${ref}`);
-  }
-  return ref;
+  validateStableIdentityString(locator, 'Raw HTTP(S) Source locator');
+  if (locator.includes('\\')) throw new Error('Raw HTTP(S) Source locator must not contain backslashes');
+  const match = /^(https?:\/\/)([^/?#]*)([\s\S]*)$/u.exec(locator);
+  if (match === null) return locator;
+  const authority = match[2]!;
+  const at = authority.lastIndexOf('@');
+  if (at === -1) return locator;
+  if (authority.indexOf('@') !== at) throw new Error('Raw HTTP(S) Source locator must not contain multiple literal @ characters');
+  const userinfo = authority.slice(0, at);
+  validateStableIdentityString(userinfo, 'Raw HTTP(S) Source locator userinfo');
+  if (userinfo.includes(' ')) throw new Error('Raw HTTP(S) Source locator userinfo must not contain spaces');
+  return `${match[1]!}${authority.slice(at + 1)}${match[3]!}`;
 }
 
 function resolveRemoteRevision(fetchLocator: string, ref: string, displayLocator: string): string {

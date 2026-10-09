@@ -75,7 +75,11 @@ export function gitHead(dir: string): string | null {
  * cannot drift apart.
  */
 export function isGitUrl(source: string): boolean {
-  return source.startsWith('http://') || source.startsWith('https://') || source.startsWith('git@');
+  return source.startsWith('http://')
+    || source.startsWith('https://')
+    || source.startsWith('ssh://')
+    || source.startsWith('git://')
+    || source.startsWith('git@');
 }
 
 /** Current HEAD sha of a git remote via `git ls-remote`, or null when unreachable. */

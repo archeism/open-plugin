@@ -1,5 +1,6 @@
-import { isAbsolute, resolve } from 'node:path';
-import type { SourceBinding } from './source-reference';
+import { validateSourceBinding, validateStableIdentityString, type SourceBinding } from './source-reference';
+
+export { validateSourceBinding } from './source-reference';
 
 declare const Bun: {
   CryptoHasher: new (algorithm: 'sha256') => {
@@ -46,23 +47,8 @@ export function createDeploymentScopeIdentity(source: SourceBinding, target: Tar
   };
 }
 
-function validateSourceBinding(source: SourceBinding): void {
-  validateIdentityField(source.locator, 'Source locator');
-  if (source.kind === 'local') {
-    if (!isAbsolute(source.locator) || resolve(source.locator) !== source.locator) throw new Error('Local Source locator must be a canonical absolute path');
-    return;
-  }
-  validateIdentityField(source.ref, 'Source ref');
-  if (source.locator.startsWith('http://') || source.locator.startsWith('https://')) {
-    const locator = new URL(source.locator);
-    if (locator.username !== '' || locator.password !== '' || locator.search !== '' || locator.hash !== '') {
-      throw new Error('Deployment scope Source binding must be credential-free');
-    }
-  }
-}
-
 function validateIdentityField(value: string, label: string): void {
-  if (value === '' || value.trim() !== value || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error(`Deployment scope ${label} must be a non-empty stable value`);
+  validateStableIdentityString(value, `Deployment scope ${label}`);
 }
 
 function frame(hash: InstanceType<typeof Bun.CryptoHasher>, bytes: Uint8Array): void {
