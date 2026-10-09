@@ -60,6 +60,7 @@ declare module 'node:os' {
 
 /** Minimal surface of Bun's test runner used by this repo's tests. */
 declare module 'bun:test' {
+  export function afterAll(fn: () => void | Promise<void>): void;
   export function describe(name: string, fn: () => void): void;
   export function it(name: string, fn: () => void | Promise<void>): void;
   export const test: typeof it;
@@ -88,6 +89,16 @@ declare const process: {
 declare const console: {
   log(...args: unknown[]): void;
   error(...args: unknown[]): void;
+};
+
+declare const URL: {
+  new(input: string): {
+    username: string;
+    password: string;
+    search: string;
+    hash: string;
+    toString(): string;
+  };
 };
 
 interface ImportMeta {

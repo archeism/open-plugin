@@ -15,10 +15,20 @@ declare const TextEncoder: {
 };
 
 export function fingerprintTree(root: string): string {
+  return fingerprint(root, false);
+}
+
+/** Source proof excludes repository metadata that is not distributed to hosts. */
+export function fingerprintSourceTree(root: string): string {
+  return fingerprint(root, true);
+}
+
+function fingerprint(root: string, ignoreGitMetadata: boolean): string {
   if (lstatSync(root).isSymbolicLink()) throw new Error('cannot fingerprint symlink: .');
   const hash = new Bun.CryptoHasher('sha256');
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir).sort()) {
+      if (ignoreGitMetadata && entry === '.git') continue;
       const path = join(dir, entry);
       const relative = prefix === '' ? entry : `${prefix}/${entry}`;
       const stat = lstatSync(path);
