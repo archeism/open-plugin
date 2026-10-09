@@ -36,6 +36,9 @@ export function spawnSync(command: readonly string[], options: SpawnOptions = {}
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.timeout === undefined ? {} : { timeout: options.timeout, killSignal: 'SIGKILL' as const }),
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Bun caps nothing; Node's 1 MiB default ENOBUFS-kills large doctor
+    // output. 64 MiB covers practical CLI payloads with headroom.
+    maxBuffer: 64 * 1024 * 1024,
     encoding: 'buffer',
   } as never) as { status: number | null; stdout?: Uint8Array; stderr?: Uint8Array };
   return {

@@ -16,8 +16,11 @@ if env PATH="$STRICT" sh -c 'command -v bun' >/dev/null 2>&1; then echo "bun on 
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
-"$NPM_BIN" pack --ignore-scripts >/dev/null
-TARBALL="$(ls plugnz-*.tgz | tail -1)"
+# Pack into the smoke's temp dir and take the exact filename npm prints —
+# a stale sibling tarball must never shadow the fresh one.
+PACK_OUTPUT="$("$NPM_BIN" pack --pack-destination "$T" --ignore-scripts 2>/dev/null | tail -1)"
+TARBALL="$T/${PACK_OUTPUT##*/}"
+test -f "$TARBALL"
 env PATH="$STRICT" "$NPM_BIN" install --prefix "$T/prefix" --no-save "$TARBALL" >/dev/null
 BIN="$T/prefix/node_modules/.bin/plugnz"
 test -x "$BIN"
