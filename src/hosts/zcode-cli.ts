@@ -9,6 +9,9 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { homeRoot, zcodeCliConfigRoot, zcodeCliRoot, zcodeStorageRoot } from '../paths';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const zcodeCliTargetProfile = singleInstanceTargetProfile('zcode-cli');
 
 declare const Bun: any;
 declare const TextDecoder: any;

@@ -20,6 +20,9 @@ import { join } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { claudeCodeRoot, homeRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const claudeCodeTargetProfile = singleInstanceTargetProfile('claude-code');
 
 /** Where a plugin copy declares MCP servers (spec `mcp.json`, plus the `npx plugins` `.mcp.json` twin). */
 export function mcpCandidates(): PluginMcpCandidate[] {

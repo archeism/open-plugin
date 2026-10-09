@@ -22,6 +22,9 @@ import { join } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { cursorRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const cursorTargetProfile = singleInstanceTargetProfile('cursor');
 
 export function localDir(): string {
   return join(cursorRoot(), 'plugins', 'local');

@@ -11,6 +11,13 @@ import { isAbsolute, join, relative } from 'node:path';
 import { createDeploymentScopeIdentity, validateSourceBinding, type TargetIdentity } from './deployment-scope';
 import { stateFile } from './paths';
 import type { SourceBinding } from './source-reference';
+import {
+  parsePersistedTargetIdentity,
+  TargetIdentityValidationError,
+  type PersistedTargetIdentity,
+} from './target-identity';
+
+export type { PersistedTargetIdentity } from './target-identity';
 
 declare const Bun: {
   CryptoHasher: new (algorithm: 'sha256') => {
@@ -23,11 +30,6 @@ export type DeploymentScopeId = string;
 
 /** Public compatibility alias for the canonical Source-domain type. */
 export type PersistedSourceBinding = SourceBinding;
-
-export interface PersistedTargetIdentity extends TargetIdentity {
-  /** Adapter-owned, bounded scalar context. Secret-looking keys are refused. */
-  context?: Record<string, string | number | boolean>;
-}
 
 export interface DesiredPackageRecord {
   packageId: string;
@@ -211,9 +213,6 @@ export interface InstallRecord {
 }
 
 const V1_RECORD_FIELDS = new Set(['host', 'id', 'source', 'sourceSha', 'installedAt', 'pins', 'fingerprint', 'sourceDir', 'installedFingerprint', 'ownership', 'pending']);
-const SECRET_CONTEXT_KEY = /(secret|token|password|credential|authorization|api[-_.]?key|private[-_.]?key)/iu;
-const ABSOLUTE_URL = /^[a-z][a-z0-9+.-]*:\/\//iu;
-
 /** A verified creation or adoption proof is necessary, but not sufficient, for pruning. */
 export function hasRetirementAuthority(activation: Pick<ActivationRecord, 'ownership'>): boolean {
   return activation.ownership.kind === 'created' || activation.ownership.kind === 'adopted';
@@ -490,21 +489,12 @@ function validateSource(value: unknown, label: string): PersistedSourceBinding {
 }
 
 function validateTarget(value: unknown, label: string): PersistedTargetIdentity {
-  const rec = asObject(value, label);
-  exactFields(rec, ['kind', 'instance', 'context'], 'target identity');
-  requiredString(rec['kind'], `${label}.kind`);
-  requiredString(rec['instance'], `${label}.instance`);
-  if (rec['context'] !== undefined) {
-    const context = asObject(rec['context'], `${label}.context`);
-    for (const [key, entry] of Object.entries(context)) {
-      if (!/^[a-z0-9][a-z0-9._-]*$/iu.test(key)) invalid(`${label}.context has invalid key '${key}'`);
-      if (SECRET_CONTEXT_KEY.test(key)) invalid(`secret-bearing target context key '${key}' is not permitted`);
-      if (typeof entry !== 'string' && typeof entry !== 'number' && typeof entry !== 'boolean') invalid(`${label}.context.${key} must be a scalar`);
-      if (typeof entry === 'number' && !Number.isFinite(entry)) invalid(`${label}.context.${key} must be finite`);
-      if (typeof entry === 'string') assertCredentialFree(entry, `${label}.context.${key}`);
-    }
+  try {
+    return parsePersistedTargetIdentity(value, label);
+  } catch (error) {
+    if (error instanceof TargetIdentityValidationError) invalid(error.message);
+    throw error;
   }
-  return value as PersistedTargetIdentity;
 }
 
 function validateDesired(value: unknown, label: string): DesiredGenerationRecord {
@@ -921,11 +911,6 @@ function unique(values: readonly string[], label: string): void {
     if (seen.has(value)) invalid(`duplicate ${label}: ${value}`);
     seen.add(value);
   }
-}
-
-function assertCredentialFree(value: string, label: string): void {
-  const authority = ABSOLUTE_URL.test(value) ? value.slice(value.indexOf('//') + 2).split(/[/?#]/u, 1)[0] : undefined;
-  if (authority?.includes('@') === true || /[?&](?:access_?token|token|password|secret|api_?key|credential)=/iu.test(value)) invalid(`${label} must not contain credentials`);
 }
 
 function removeUndefined(record: InstallRecord): InstallRecord {

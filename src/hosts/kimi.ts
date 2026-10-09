@@ -24,6 +24,9 @@ import { parse as parseToml } from 'smol-toml';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { kimiRoot } from '../paths';
 import { collectPluginServers, readJson, type PluginMcpCandidate, type RawServerDef } from '../mcp';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const kimiTargetProfile = singleInstanceTargetProfile('kimi');
 
 declare const Bun: any;
 declare const TextDecoder: any;

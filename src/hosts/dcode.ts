@@ -9,6 +9,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
+import { singleInstanceTargetProfile } from '../target-profile';
+
+export const dcodeTargetProfile = singleInstanceTargetProfile('dcode');
 
 export function dcodeRoot(): string {
   const explicit = process.env['OPEN_PLUGIN_DCODE_ROOT'];

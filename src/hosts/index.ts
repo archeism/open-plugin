@@ -10,16 +10,30 @@
  * fails if a writer creeps back into it.
  */
 import type { HostReader } from '../host';
-import { claudeCode } from './claude-code';
-import { codex } from './codex';
-import { kimi } from './kimi';
-import { cursor } from './cursor';
-import { omp } from './omp';
+import type { TargetProfile } from '../target-profile';
+import { claudeCode, claudeCodeTargetProfile } from './claude-code';
+import { codex, codexTargetProfile } from './codex';
+import { kimi, kimiTargetProfile } from './kimi';
+import { cursor, cursorTargetProfile } from './cursor';
+import { omp, ompTargetProfile } from './omp';
 import { pi } from './pi';
-import { dcode } from './dcode';
+import { dcode, dcodeTargetProfile } from './dcode';
 import { opencode } from './opencode';
-import { grok } from './grok';
-import { zcodeCli } from './zcode-cli';
-import { hermes } from './hermes';
+import { grok, grokTargetProfile } from './grok';
+import { zcodeCli, zcodeCliTargetProfile } from './zcode-cli';
+import { hermes, hermesTargetProfile } from './hermes';
 
 export const hosts: HostReader[] = [claudeCode, codex, kimi, cursor, omp, hermes, pi, dcode, opencode, grok, zcodeCli];
+
+/** Pure lifecycle target contracts for active native mutation routes. */
+export const targetProfiles = [
+  claudeCodeTargetProfile,
+  codexTargetProfile,
+  kimiTargetProfile,
+  cursorTargetProfile,
+  ompTargetProfile,
+  dcodeTargetProfile,
+  grokTargetProfile,
+  zcodeCliTargetProfile,
+  hermesTargetProfile,
+] as const satisfies readonly TargetProfile[];
