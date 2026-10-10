@@ -8,10 +8,14 @@ set -eu
 cd "$(dirname "$0")/.."
 NODE_DIR="$(dirname "$(command -v node)")"
 STRICT="/usr/bin:/bin:$NODE_DIR"
-# npm may be a logging shim on this machine; use nvm's real npm when present.
+# npm may be a logging shim on this machine; use nvm's real npm when present,
+# else the resolved absolute npm (CI runners have no nvm). npx resolves the
+# same way so the launcher leg works everywhere.
 NPM_BIN="$(command -v npm)"
+NPX_BIN="$(command -v npx)"
 NVM_BIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort | tail -1 || true)"
-if [ -n "$NVM_BIN" ] && [ -x "$NVM_BIN/npm" ]; then NPM_BIN="$NVM_BIN/npm"; STRICT="/usr/bin:/bin:$NVM_BIN"; fi
+if [ -n "$NVM_BIN" ] && [ -x "$NVM_BIN/npm" ]; then NPM_BIN="$NVM_BIN/npm"; NPX_BIN="$NVM_BIN/npx"; STRICT="/usr/bin:/bin:$NVM_BIN"; fi
+test -x "$NPX_BIN" || { echo "no npx resolved"; exit 1; }
 if env PATH="$STRICT" sh -c 'command -v bun' >/dev/null 2>&1; then echo "bun on PATH — smoke invalid"; exit 1; fi
 
 T="$(mktemp -d)"
@@ -37,7 +41,7 @@ echo "$EXPECTED" | grep -q '"name":"plugnz"'
 echo "== npx launcher (bun absent) =="
 # Real npx, not the .bin path: resolves the installed package's bin through
 # npm's launcher under the bun-free PATH.
-test "$(cd "$T/prefix" && env PATH="$STRICT" "$NVM_BIN/npx" --no-install plugnz --version --json)" = "$EXPECTED"
+test "$(cd "$T/prefix" && env PATH="$STRICT" "$NPX_BIN" --no-install plugnz --version --json)" = "$EXPECTED"
 echo "ok: npx launcher byte-equal"
 
 echo "== bunx launcher =="
