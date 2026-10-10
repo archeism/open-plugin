@@ -10,12 +10,24 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse as parseToml } from 'smol-toml';
-import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
-import { readPluginManifest, type PluginSource, type ResolvedSource } from '../source';
-import { codexHome } from '../paths';
-import { codex, configFile, mcpCandidates } from './codex';
-import { pinPluginMcpFiles } from '../mcp-write';
+import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
 import { projectPluginForCodex } from '../conversion';
+import { fingerprintTree } from '../fingerprint';
+import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
+import type {
+  LifecycleHostDefinition,
+  NativeMutationScopeData,
+  NativeProjectionData,
+  NativeProjectionRequest,
+  TargetInstallationData,
+  TargetInventoryData,
+} from '../lifecycle-host';
+import { createLifecycleHostAdapter } from '../lifecycle-runtime';
+import { pinPluginMcpFiles } from '../mcp-write';
+import { codexHome } from '../paths';
+import { PACKAGE_SEMANTICS, type PackageSemantic } from '../semantic-inventory';
+import { readPluginManifest, type PluginSource, type ResolvedSource } from '../source';
+import { codex, configFile, mcpCandidates, probeCodexVersion } from './codex';
 
 const OWNERSHIP = '.plgnz-install.json';
 
@@ -403,6 +415,198 @@ function wins(left: string, right: string): boolean {
     return false;
   }
   return left > right;
+}
+
+/**
+ * Catalog binding is the native-upgrade gate. A branch or tag is unbound.
+ * A full 40-character object id is the only ref Codex treats as already resolved.
+ */
+type CodexCatalogBinding =
+  | { readonly kind: 'sha-bound'; readonly marketplace: string; readonly sha: string; readonly source: string }
+  | { readonly kind: 'unbound'; readonly marketplace: string }
+  | { readonly kind: 'absent'; readonly marketplace: string };
+
+const CODEX_ROUTE_VERSION = '0.162.0';
+
+const codexEvidenceProfiles: readonly CapabilityEvidenceProfile[] = [
+  codexRouteProfile('native', ['docs/research/native-plugin-update-capabilities-2026-10-09.md']),
+  codexRouteProfile('managed', ['docs/hosts/codex.md']),
+];
+
+const codexLifecycleDefinition = {
+  id: 'codex',
+  evidenceProfiles: codexEvidenceProfiles,
+  probeVersion: async () => probeCodexVersion(),
+  observeTarget: async (target): Promise<TargetInventoryData> => ({
+    target,
+    installations: codex.listInstalled().map(installationRecord),
+  }),
+  observeNativeMutationScope: async (request): Promise<NativeMutationScopeData> => {
+    const marketplace = marketplaceOf(request.nativeId);
+    if (marketplace === null) return { kind: 'unavailable' };
+    const affected = request.targetObservation.installations
+      .map((installation) => installation.nativeId)
+      .filter((nativeId) => marketplaceOf(nativeId) === marketplace);
+    const [first, ...rest] = affected;
+    if (first === undefined) return { kind: 'unavailable' };
+    return { kind: 'bounded', mode: 'marketplace-wide', affectedNativeIds: [first, ...rest] };
+  },
+  observeNativeProjection: async (request): Promise<NativeProjectionData> => nativeProjection(request),
+  revalidateTargetPrecondition: async () => {
+    throw new Error('codex lifecycle precondition is not routed yet');
+  },
+  stageActivation: async () => {
+    throw new Error('codex lifecycle staging is not routed yet');
+  },
+  applyLifecycleDirectives: async () => {
+    throw new Error('codex lifecycle directives are not routed yet');
+  },
+  applyPins: async () => {
+    throw new Error('codex lifecycle pins are not routed yet');
+  },
+  captureActivationPreparation: async () => {
+    throw new Error('codex lifecycle activation capture is not routed yet');
+  },
+  captureDisablePreparation: async () => {
+    throw new Error('codex lifecycle disable capture is not routed yet');
+  },
+  captureRetirementPreparation: async () => {
+    throw new Error('codex lifecycle retirement capture is not routed yet');
+  },
+  apply: async () => {
+    throw new Error('codex lifecycle apply is not routed yet');
+  },
+  disable: async () => {
+    throw new Error('codex lifecycle disable is not routed yet');
+  },
+  retire: async () => {
+    throw new Error('codex lifecycle retire is not routed yet');
+  },
+  readback: async () => {
+    throw new Error('codex lifecycle readback is not routed yet');
+  },
+  rollback: async () => {
+    throw new Error('codex lifecycle rollback is not routed yet');
+  },
+  cleanup: async () => {
+    throw new Error('codex lifecycle cleanup is not routed yet');
+  },
+} satisfies LifecycleHostDefinition;
+
+export const codexLifecycle = createLifecycleHostAdapter(codexLifecycleDefinition);
+
+function codexRouteProfile(route: 'native' | 'managed', evidence: readonly string[]): CapabilityEvidenceProfile {
+  const supported = new Set<PackageSemantic>(['auto-update-control', 'readback', 'rollback', 'activation-reload']);
+  const semantics = {} as Record<PackageSemantic, CapabilityStatus>;
+  for (const semantic of PACKAGE_SEMANTICS) semantics[semantic] = supported.has(semantic) ? 'supported' : 'unsupported';
+  return createCapabilityEvidenceProfile({
+    host: 'codex',
+    detectedVersion: CODEX_ROUTE_VERSION,
+    sourceTypes: ['git', 'local'],
+    operations: ['update'],
+    route,
+    operationStatus: 'supported',
+    semantics,
+    evidence,
+  });
+}
+
+function installationRecord(plugin: InstalledPlugin): TargetInstallationData {
+  const owned = plugin.path === undefined ? null : readOwnership(plugin.path);
+  const ownership = owned?.pluginId === plugin.id
+    ? { kind: 'owned' as const, proof: 'created' as const, scopeId: `codex:${plugin.id}`, proofId: `marker:${plugin.id}` }
+    : { kind: 'unmanaged' as const };
+  if (plugin.path === undefined) {
+    return {
+      nativeId: plugin.id,
+      packageName: plugin.name,
+      ownership,
+      presence: 'absent',
+      enablement: plugin.enabled ? 'enabled' : 'disabled',
+      activation: 'inactive',
+      installedFingerprint: null,
+      installedVersion: plugin.version ?? null,
+      source: null,
+      contentRoots: [],
+    };
+  }
+  const installedFingerprint = fingerprintTree(plugin.path);
+  return {
+    nativeId: plugin.id,
+    packageName: plugin.name,
+    ownership,
+    presence: 'present',
+    enablement: plugin.enabled ? 'enabled' : 'disabled',
+    activation: plugin.enabled ? 'active' : 'inactive',
+    installedFingerprint,
+    installedVersion: plugin.version ?? null,
+    source: null,
+    contentRoots: [{ label: 'plugin', path: plugin.path, fingerprint: installedFingerprint }],
+  };
+}
+
+function nativeProjection(request: NativeProjectionRequest): NativeProjectionData {
+  if (!('snapshot' in request) || request.operation !== 'update') {
+    return { kind: 'requires-managed', reasonId: 'native-upgrade-update-only' };
+  }
+  const marketplace = marketplaceOf(request.snapshot.nativeId);
+  if (marketplace === null) return { kind: 'requires-managed', reasonId: 'catalog-absent' };
+  const binding = catalogBinding(marketplace);
+  const git = request.snapshot.nativeGit;
+  if (binding.kind === 'sha-bound' && git !== undefined && git.resolvedRevision === binding.sha && git.locator === binding.source) {
+    return { kind: 'equivalent', proofId: `codex-marketplace:${binding.marketplace}:${binding.sha}` };
+  }
+  return { kind: 'requires-managed', reasonId: catalogRefusal(binding, git) };
+}
+
+function catalogBinding(marketplace: string): CodexCatalogBinding {
+  const config = readConfigDocument();
+  const entry = table(table(config?.['marketplaces'])?.[marketplace]);
+  if (entry === null) return { kind: 'absent', marketplace };
+  const ref = typeof entry['ref_name'] === 'string' ? entry['ref_name'] : null;
+  const source = typeof entry['source'] === 'string' ? entry['source'] : null;
+  const sha = ref?.toLowerCase() ?? '';
+  if (source !== null && /^[0-9a-f]{40}$/u.test(sha)) return { kind: 'sha-bound', marketplace, sha, source };
+  return { kind: 'unbound', marketplace };
+}
+
+function catalogRefusal(
+  binding: CodexCatalogBinding,
+  git: { readonly resolvedRevision: string; readonly locator: string } | undefined,
+): string {
+  switch (binding.kind) {
+    case 'absent':
+      return 'catalog-absent';
+    case 'unbound':
+      return 'catalog-unbound';
+    case 'sha-bound':
+      if (git === undefined || git.resolvedRevision !== binding.sha) return 'catalog-sha-mismatch';
+      return 'catalog-source-mismatch';
+    default: {
+      const unreachable: never = binding;
+      throw new Error(`unreachable Codex catalog binding: ${String(unreachable)}`);
+    }
+  }
+}
+
+function marketplaceOf(nativeId: string): string | null {
+  const at = nativeId.indexOf('@');
+  if (at <= 0 || at === nativeId.length - 1) return null;
+  return nativeId.slice(at + 1);
+}
+
+function readConfigDocument(): Record<string, unknown> | null {
+  if (!existsSync(configFile())) return null;
+  try {
+    const parsed: unknown = parseToml(readFileSync(configFile(), 'utf8'));
+    return table(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function table(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function comparePrerelease(left: string, right: string): number {
