@@ -345,6 +345,45 @@ describe('codex native marketplace upgrade route', () => {
     });
   });
 
+  test('a command projection does not take the native marketplace upgrade', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.0.0', {
+        'commands/greet.md': '---\ndescription: Say hello\n---\nHello\n',
+      });
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('managed');
+      await codexLifecycle.apply(prepared);
+      expect(existsSync(join(home, '.codex/plugins/cache/demo-market/demo-plugin/1.0.0/skills/greet/SKILL.md'))).toBe(true);
+      expect(readFileSync(join(home, 'codex-invocations.log'), 'utf8').includes('marketplace upgrade')).toBe(false);
+    });
+  });
+
+  test('a native upgrade keeps a sibling ownership fingerprint from before the rewrite', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home);
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId, otherId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      installPlugin(home, 'other-plugin', otherId, true);
+      writeFiles(home, {
+        '.codex/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json': JSON.stringify({
+          source: sourceLocator,
+          pluginId: otherId,
+          fingerprint: 'sibling-prior',
+        }),
+        '.codex/upgrade-mode': 'strip-sibling\n',
+      });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+      const marker = JSON.parse(readFileSync(join(home, '.codex/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json'), 'utf8')) as { fingerprint?: string };
+      expect(marker.fingerprint).toBe('sibling-prior');
+    });
+  });
+
   test('marketplace checkout rollback stays unverified', async () => {
     expect(codexMarketplaceCheckoutRollback).toBe('unverified');
     await withCodexBinary(async (home) => {
@@ -408,6 +447,11 @@ if [ "$mode" = "rewrite-inplace" ]; then
 fi
 if [ "$mode" = "rewrite-new" ]; then
   copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.1.0"
+  printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
+  exit 0
+fi
+if [ "$mode" = "strip-sibling" ]; then
+  rm -f "$CODEX_HOME/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json"
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
@@ -492,11 +536,11 @@ async function selectedUpdate(
   });
 }
 
-function frozenSnapshot(home: string, version = '1.0.0'): FrozenPackageSnapshot & { readonly action: 'update' } {
+function frozenSnapshot(home: string, version = '1.0.0', extras: Record<string, string> = {}): FrozenPackageSnapshot & { readonly action: 'update' } {
   const snapshotRoot = join(home, 'source-snapshot');
   const packageRoot = join(snapshotRoot, 'packages', 'demo-plugin');
   mkdirSync(packageRoot, { recursive: true });
-  writeFiles(packageRoot, { 'plugin.json': `{"name":"demo-plugin","version":"${version}"}\n` });
+  writeFiles(packageRoot, { 'plugin.json': `{"name":"demo-plugin","version":"${version}"}\n`, ...extras });
   const packageFingerprint = fingerprintTree(packageRoot);
   const snapshot = createFrozenPackageSnapshot({
     operationId: 'update-demo-plugin',
