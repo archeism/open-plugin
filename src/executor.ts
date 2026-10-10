@@ -12,6 +12,7 @@ import {
 import { LifecycleHostPhaseError, createFrozenPackageSnapshot, createLifecyclePlanCoverage, createResolvedLifecyclePins } from './lifecycle-runtime';
 import type { LifecyclePlan, PlannerHost } from './planner';
 import { inventoryPackageSemantics, type PackageSemanticInventory } from './semantic-inventory';
+import { CryptoHasher } from './runtime';
 import { resolveSource, type FrozenSource, type PluginSource } from './source';
 import type { SourceBinding } from './source-reference';
 import { readLifecycleState, type DeploymentScopeRecord, type JournalEntryRecord, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
@@ -50,6 +51,8 @@ async function executeFrozen(
   now: string,
 ): Promise<ExecuteLifecycleResult> {
   const ledger = new Ledger(now);
+  const refusal = ledger.generationRefusal(plan);
+  if (refusal !== null) return refusalReport(plan, refusal);
   const outcomes: LifecycleOperationOutcome[] = [];
   let stopped: LifecycleReason | null = null;
   for (const row of plan.operations) {
@@ -112,9 +115,18 @@ async function runInstall(
   if (host === undefined) {
     return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.package}' has no host adapter`));
   }
-  const prepared = await prepareInstall(plan, operation, host, nativeId);
+  let prepared: Awaited<ReturnType<typeof prepareInstall>>;
+  try {
+    prepared = await prepareInstall(plan, operation, host, nativeId);
+  } catch (error) {
+    return stop(operation, thrownReason(error));
+  }
   if (prepared.kind === 'refused') return stop(operation, prepared.reason);
-  ledger.acceptInstall(plan, operation);
+  try {
+    ledger.acceptInstall(plan, operation);
+  } catch (error) {
+    return stop(operation, thrownReason(error));
+  }
   try {
     await host.adapter.stageActivation({
       selection: prepared.selection,
@@ -122,10 +134,12 @@ async function runInstall(
       pins: prepared.pins,
     });
   } catch (error) {
-    const reason = error instanceof LifecycleHostPhaseError
-      ? error.reason
-      : createLifecycleReason('internal', 'internal.defect', unknownErrorDiagnostic(error));
-    return stop(operation, reason);
+    return stop(operation, thrownReason(error));
+  }
+  try {
+    ledger.markStagedUnactivated(plan, operation);
+  } catch (error) {
+    return stop(operation, thrownReason(error));
   }
   return stop(operation, createLifecycleReason(
     'internal',
@@ -272,9 +286,22 @@ function sourceArgument(source: SourceBinding): string {
 
 class Ledger {
   private state: LifecycleStateV2;
+  private baselineGeneration: number;
 
   constructor(private readonly now: string) {
-    this.state = readLifecycleState().state;
+    const loaded = readLifecycleState();
+    this.state = loaded.state;
+    this.baselineGeneration = loaded.state.stateGeneration;
+  }
+
+  generationRefusal(plan: FrozenPlan): LifecycleReason | null {
+    if (this.state.attempts.some((attempt) => attempt.id === plan.attemptId)) return null;
+    if (attemptIdForGeneration(plan, this.baselineGeneration) === plan.attemptId) return null;
+    return createLifecycleReason(
+      'internal',
+      'internal.invariant',
+      `plan '${plan.attemptId}' does not match state generation ${this.baselineGeneration}`,
+    );
   }
 
   acceptInstall(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
@@ -309,8 +336,31 @@ class Ledger {
     this.save();
   }
 
+  markStagedUnactivated(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    const existing = this.state.attempts.find((attempt) => attempt.id === plan.attemptId);
+    if (existing === undefined) return;
+    const attempt: LifecycleAttemptRecord = {
+      ...existing,
+      phase: 'failed',
+      mutationStarted: false,
+      journal: existing.journal.map((row) => row.operationId === operation.operationId
+        ? { ...row, state: 'not-attempted', updatedAt: this.now }
+        : row),
+      updatedAt: this.now,
+    };
+    this.state = {
+      ...this.state,
+      attempts: this.state.attempts.map((row) => row.id === attempt.id ? attempt : row),
+    };
+    this.save();
+  }
+
   private mergedScopes(plan: FrozenPlan, attemptId: string): DeploymentScopeRecord[] {
-    const replacements = new Map(plan.scopes.map((planned) => [planned.scope.id, this.scope(planned, attemptId)]));
+    const replacements = new Map<string, DeploymentScopeRecord>();
+    for (const planned of plan.scopes) {
+      const next = this.recordedScope(planned, attemptId);
+      if (next !== null) replacements.set(planned.scope.id, next);
+    }
     const merged: DeploymentScopeRecord[] = [];
     const replaced = new Set<string>();
     for (const existing of this.state.scopes) {
@@ -330,30 +380,49 @@ class Ledger {
     return merged;
   }
 
-  private scope(planned: FrozenPlan['scopes'][number], attemptId: string): DeploymentScopeRecord {
-    if (planned.desired === null || planned.selectorMode === 'retired') {
-      throw new Error(`scope '${planned.scope.id}' is not an active desired scope`);
-    }
+  private recordedScope(planned: FrozenPlan['scopes'][number], attemptId: string): DeploymentScopeRecord | null {
+    if (planned.desired === null || planned.selectorMode === 'retired') return null;
+    const existing = this.state.scopes.find((scope) => scope.id === planned.scope.id);
+    if (existing !== undefined && existing.authority !== 'authoritative') return existing;
     const selectorMode = planned.selectorMode;
+    const target = { kind: planned.scope.target.kind, instance: planned.scope.target.instance };
+    if (existing === undefined) {
+      return {
+        id: planned.scope.id,
+        source: planned.scope.source,
+        target,
+        authority: 'authoritative',
+        lifecycle: 'active',
+        selectorMode,
+        desired: planned.desired,
+        lastAttemptId: attemptId,
+        createdAt: this.now,
+        updatedAt: this.now,
+      };
+    }
     return {
-      id: planned.scope.id,
+      ...existing,
       source: planned.scope.source,
-      target: { kind: planned.scope.target.kind, instance: planned.scope.target.instance },
-      authority: 'authoritative',
+      target,
+      authority: existing.authority,
       lifecycle: 'active',
       selectorMode,
       desired: planned.desired,
       lastAttemptId: attemptId,
-      createdAt: this.now,
+      createdAt: existing.createdAt,
       updatedAt: this.now,
     };
   }
 
   private save(): void {
     const previous = readLifecycleState();
+    if (previous.state.stateGeneration !== this.baselineGeneration) {
+      throw new Error(`state generation moved from ${this.baselineGeneration} to ${previous.state.stateGeneration}`);
+    }
     const stateGeneration = previous.sourceVersion === 2 ? previous.state.stateGeneration + 1 : 1;
     const next = { ...this.state, stateGeneration };
     writeLifecycleState(next, { globalPreflight: 'succeeded' });
+    this.baselineGeneration = stateGeneration;
     this.state = next;
   }
 }
@@ -393,6 +462,61 @@ function notAttempted(operation: LifecyclePlanOperation, stopped: LifecycleReaso
 
 function refused(reason: LifecycleReason): { readonly kind: 'refused'; readonly reason: LifecycleReason } {
   return { kind: 'refused', reason };
+}
+
+function thrownReason(error: unknown): LifecycleReason {
+  if (error instanceof LifecycleHostPhaseError) return error.reason;
+  return createLifecycleReason('internal', 'internal.defect', unknownErrorDiagnostic(error));
+}
+
+function refusalReport(plan: FrozenPlan, reason: LifecycleReason): ExecuteLifecycleResult {
+  const [first, ...rest] = plan.operations;
+  if (first === undefined) {
+    return finish(parseLifecycleReport({
+      schemaVersion: 1,
+      command: plan.report.command,
+      plan: plan.report.plan,
+      outcomes: [],
+      summary: {
+        result: 'incomplete',
+        terminalPhase: 'apply',
+        mutationStarted: false,
+        changed: false,
+        failureCategory: reason.category,
+        reason,
+        recoveryId: null,
+        readbackId: null,
+      },
+    }));
+  }
+  const outcomes = [stop(first.operation, reason).outcome, ...rest.map((row) => notAttempted(row.operation, reason))];
+  return finish(parseLifecycleReport({
+    schemaVersion: 1,
+    command: plan.report.command,
+    plan: plan.report.plan,
+    outcomes,
+    summary: summaryFor(outcomes),
+  }));
+}
+
+function attemptIdForGeneration(plan: FrozenPlan, generation: number): string {
+  return `attempt-v1-${digest([String(generation), ...plan.scopes.flatMap((planned) => scopeIdentity(planned))])}`;
+}
+
+function scopeIdentity(planned: FrozenPlan['scopes'][number]): readonly string[] {
+  if (planned.desired === null || planned.selectorMode === 'retired') return ['retire-source', planned.scope.id];
+  return ['sync', planned.scope.id, planned.desired.sourceFingerprint, ...planned.desired.packages.map((pkg) => pkg.packageId)];
+}
+
+function digest(parts: readonly string[]): string {
+  const hash = new CryptoHasher('sha256');
+  for (const part of parts) {
+    hash.update(String(part.length));
+    hash.update('\0');
+    hash.update(part);
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 function summaryFor(outcomes: readonly LifecycleOperationOutcome[]): LifecycleReport['summary'] {

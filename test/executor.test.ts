@@ -173,6 +173,251 @@ describe('lifecycle executor', () => {
       expect(loaded.state.attempts.some((attempt) => attempt.id === plan.attemptId)).toBe(true);
     });
   });
+
+  test('a retire-source scope mixed with an install returns a report', async () => {
+    const root = temp('mixed-retire');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const retiredRoot = realpathSync(mkdirTemp(join(root, 'retired')));
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+    const createdAt = '2020-01-01T00:00:00.000Z';
+    const source = { kind: 'local' as const, locator: retiredRoot };
+    const target = { kind: 'hermes', instance: 'default' };
+    const retired: DeploymentScopeRecord = {
+      id: createDeploymentScopeIdentity(source, target).id,
+      source,
+      target,
+      authority: 'legacy-import',
+      lifecycle: 'active',
+      selectorMode: 'legacy-unknown',
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    await withHome(home, async () => {
+      writeLifecycleState({
+        version: 2,
+        stateGeneration: 1,
+        scopes: [retired],
+        activations: [],
+        attempts: [],
+        tombstones: [],
+      }, { globalPreflight: 'succeeded' });
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([
+          { operation: 'retire-source', scopeId: retired.id, target },
+          syncEntry(alpha, 'codex'),
+        ]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      codex.fake.failPhase = 'stage';
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(executed.exitCode).toBe(1);
+      expect(loaded.state.scopes.find((scope) => scope.id === retired.id)).toEqual(retired);
+      expect(loaded.state.attempts.some((attempt) => attempt.id === plan.attemptId)).toBe(true);
+    });
+  });
+
+  test('a prepare failure becomes a failed outcome and does not journal', async () => {
+    const root = temp('prepare-throw');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const eventsBefore = codex.fake.events.length;
+      codex.fake.failPhase = 'inventory';
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(loaded.state.stateGeneration).toBe(0);
+      expect(loaded.state.attempts).toEqual([]);
+      expect(codex.fake.events.slice(eventsBefore).includes('stage')).toBe(false);
+      expect(executed.exitCode).toBe(1);
+      expect(executed.report.outcomes[0]?.reason).toEqual({
+        category: 'internal',
+        code: 'internal.defect',
+        diagnostic: 'inventory: injected fake lifecycle failure',
+        capabilityId: null,
+        evidenceId: null,
+      });
+    });
+  });
+
+  test('source drift is refused before a journal write', async () => {
+    const root = temp('drift');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const eventsBefore = codex.fake.events.length;
+      writeFileSync(join(alpha, 'skills', 'a', 'SKILL.md'), '# changed\n');
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(loaded.state.stateGeneration).toBe(0);
+      expect(loaded.state.attempts).toEqual([]);
+      expect(codex.fake.events.slice(eventsBefore).includes('stage')).toBe(false);
+      expect(executed.exitCode).toBe(1);
+      expect(executed.report.outcomes[0]?.reason?.diagnostic).toBe("install 'alpha' source bytes drifted from the frozen snapshot");
+    });
+  });
+
+  test('a route change is refused before a journal write', async () => {
+    const root = temp('route-change');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const eventsBefore = codex.fake.events.length;
+      codex.fake.version = '9.9.9';
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(loaded.state.stateGeneration).toBe(0);
+      expect(loaded.state.attempts).toEqual([]);
+      expect(codex.fake.events.slice(eventsBefore).includes('stage')).toBe(false);
+      expect(executed.exitCode).toBe(1);
+      expect(executed.report.outcomes[0]?.reason?.diagnostic).toBe("install 'alpha' kept frozen route 'managed'");
+    });
+  });
+
+  test('a changed state generation is refused and does not write', async () => {
+    const root = temp('generation');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const unrelatedRoot = realpathSync(mkdirTemp(join(root, 'unrelated')));
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+    const createdAt = '2020-01-01T00:00:00.000Z';
+    const source = { kind: 'local' as const, locator: unrelatedRoot };
+    const target = { kind: 'hermes', instance: 'default' };
+    const unrelated: DeploymentScopeRecord = {
+      id: createDeploymentScopeIdentity(source, target).id,
+      source,
+      target,
+      authority: 'legacy-import',
+      lifecycle: 'active',
+      selectorMode: 'legacy-unknown',
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      writeLifecycleState({
+        version: 2,
+        stateGeneration: 1,
+        scopes: [unrelated],
+        activations: [],
+        attempts: [],
+        tombstones: [],
+      }, { globalPreflight: 'succeeded' });
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(loaded.state.stateGeneration).toBe(1);
+      expect(loaded.state.attempts).toEqual([]);
+      expect(loaded.state.scopes).toEqual([unrelated]);
+      expect(executed.exitCode).toBe(1);
+      expect(executed.report.outcomes[0]?.reason?.diagnostic).toBe(
+        `plan '${plan.attemptId}' does not match state generation 1`,
+      );
+    });
+  });
+
+  test('a staged install does not leave a pending journal, and the same attempt can run again', async () => {
+    const root = temp('stage-success');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const install = plan.operations.find((row) => row.operation.package === 'alpha');
+      if (install === undefined) throw new Error('expected an install operation');
+      const before = codex.fake.hostMutationState();
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      const attempt = loaded.state.attempts.find((row) => row.id === plan.attemptId);
+      expect(loaded.state.attempts).toHaveLength(1);
+      expect(attempt?.phase).toBe('failed');
+      expect(attempt?.mutationStarted).toBe(false);
+      expect(attempt?.journal).toEqual([{
+        operationId: install.operation.operationId,
+        scopeId: install.operation.scope.id,
+        packageId: 'alpha',
+        nativeId: 'alpha',
+        action: 'install',
+        state: 'not-attempted',
+        startedAt: now,
+        updatedAt: now,
+      }]);
+      expect(codex.fake.events.includes('stage')).toBe(true);
+      expect(codex.fake.events.includes('managed:apply')).toBe(false);
+      expect(codex.fake.hostMutationState()).toBe(before);
+      expect(executed.exitCode).toBe(1);
+      expect(executed.report.outcomes[0]?.reason?.diagnostic).toBe(
+        `install '${install.operation.operationId}' was staged and not activated`,
+      );
+
+      const again = await executeLifecycle({ plan, hosts: [codex.planner], now });
+      const reloaded = readLifecycleState();
+      const replayed = reloaded.state.attempts.filter((row) => row.id === plan.attemptId);
+      expect(replayed).toHaveLength(1);
+      expect(replayed[0]?.journal).toHaveLength(1);
+      expect(replayed[0]?.journal[0]?.state).toBe('not-attempted');
+      expect(replayed[0]?.mutationStarted).toBe(false);
+      expect(codex.fake.hostMutationState()).toBe(before);
+      expect(again.exitCode).toBe(1);
+    });
+  });
 });
 
 function temp(label: string): string {
