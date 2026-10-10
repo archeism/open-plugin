@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { bytesToText, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
 import { parseLifecycleReport } from '../src/lifecycle-report';
 
@@ -95,6 +96,123 @@ describe('public lifecycle commands', () => {
         },
       });
       expect(bytesToText(result.stores.cursor.before.files['.keep']!)).toBe('');
+    });
+  });
+
+  test('scopes --json lists an empty ledger without writing', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const result = harness.run(['scopes', '--json']);
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        inventory: JSON.parse(result.stdout),
+        stateWritten: result.state.after !== undefined,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        inventory: { stateGeneration: 0, scopes: [] },
+        stateWritten: false,
+      });
+    });
+  });
+
+  test('scopes reports an unknown scope id without writing', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const missing = `scope-v1-${'a'.repeat(64)}`;
+      const result = harness.run(['scopes', missing, '--json']);
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        stdout: result.stdout,
+        stateWritten: result.state.after !== undefined,
+      }).toEqual({
+        exitCode: 2,
+        stderr: `unknown deployment scope '${missing}'\n`,
+        stdout: '',
+        stateWritten: false,
+      });
+    });
+  });
+
+  test('retire-source of an unrecorded source is a usage report and writes nothing', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('missing-scope', {
+        'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
+      });
+      const result = harness.run(['retire-source', source, '--target', 'cursor', '--dry-run', '--json']);
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      expect({
+        exitCode: result.exitCode,
+        command: report.command.name,
+        dryRun: report.command.dryRun,
+        plan: report.plan,
+        outcomes: report.outcomes,
+        summary: report.summary,
+        stateWritten: result.state.after !== undefined,
+        cursorAfter: result.stores.cursor.after,
+      }).toEqual({
+        exitCode: 2,
+        command: 'retire-source',
+        dryRun: true,
+        plan: [],
+        outcomes: [],
+        summary: {
+          result: 'usage-error',
+          terminalPhase: 'parse',
+          mutationStarted: false,
+          changed: false,
+          failureCategory: 'usage',
+          reason: {
+            category: 'usage',
+            code: 'usage.invalid-selection',
+            diagnostic: `unknown deployment scope '${source}'`,
+            capabilityId: null,
+            evidenceId: null,
+          },
+          recoveryId: null,
+          readbackId: null,
+        },
+        stateWritten: false,
+        cursorAfter: result.stores.cursor.before,
+      });
+    });
+  });
+
+  test('sync --manifest rejects a manifest with no entries before planning writes', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const manifest = join(harness.source('batch', { 'manifest.json': '{"schemaVersion":1}\n' }), 'manifest.json');
+      harness.writeHome({ '.cursor/.keep': '' });
+      const result = harness.run(['sync', '--manifest', manifest, '--json']);
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      expect({
+        exitCode: result.exitCode,
+        command: report.command.name,
+        plan: report.plan,
+        summary: report.summary,
+        stateWritten: result.state.after !== undefined,
+      }).toEqual({
+        exitCode: 2,
+        command: 'sync',
+        plan: [],
+        summary: {
+          result: 'usage-error',
+          terminalPhase: 'parse',
+          mutationStarted: false,
+          changed: false,
+          failureCategory: 'usage',
+          reason: {
+            category: 'usage',
+            code: 'usage.invalid-argument',
+            diagnostic: 'sync manifest entries must be a non-empty array',
+            capabilityId: null,
+            evidenceId: null,
+          },
+          recoveryId: null,
+          readbackId: null,
+        },
+        stateWritten: false,
+      });
     });
   });
 });

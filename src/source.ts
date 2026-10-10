@@ -203,6 +203,10 @@ interface ParsedSource {
   fetchLocator?: string;
 }
 
+export function sourceBindingForArgument(source: string): SourceBinding {
+  return parseSource(source).binding;
+}
+
 function parseSource(source: string): ParsedSource {
   if (source.startsWith('./') || source.startsWith('../') || isAbsolute(source)) {
     const locator = resolve(source);

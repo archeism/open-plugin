@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { runDoctor, formatFinding, type DoctorFinding } from './doctor';
 import { hosts } from './hosts';
 import { cleanupWriters, writers } from './hosts/writers';
-import { resolveSource, type PluginSource, type SourceBinding } from './source';
+import { resolveSource, sourceBindingForArgument, type PluginSource, type SourceBinding } from './source';
 import { runFrozenLifecycle } from './lifecycle-command';
 import { lifecyclePlannerHosts } from './lifecycle-hosts';
+import { isScopeId, projectScopeInventory, renderScopeInventory, sameSourceBinding } from './scope-inventory';
 import { parseSyncManifest, SyncManifestValidationError } from './sync-manifest';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
 import { retirementTombstone } from './owned-activation';
@@ -50,7 +52,10 @@ verbs:
   list                              list installed plugins per host
   remove <plugin>                   remove an installed plugin
   sync <source> --target <host>…    reconcile each source × target scope from the frozen plan
-                                    [--plugin <name>…] [--dry-run]
+                                    [--instance <id>] [--plugin <name>…] [--dry-run]
+  sync --manifest <file>            reconcile every entry in a batch manifest [--dry-run]
+  retire-source <source-or-scope>   end one recorded scope [--target <host>] [--instance <id>] [--dry-run]
+  scopes [source-or-scope]          read recorded scopes [--target <host>] [--instance <id>] [--json]
   targets [--all]                   list detected agent hosts; --all includes frozen consumer profiles
 
 mutation output:
@@ -65,11 +70,13 @@ interface VerbFlags {
   all: boolean;
   dryRun: boolean;
   adoptExisting: boolean;
+  instance: string | undefined;
+  manifest: string | undefined;
   errors: string[];
 }
 
 function parseFlags(args: string[]): VerbFlags {
-  const flags: VerbFlags = { positionals: [], targets: [], plugins: [], all: false, dryRun: false, adoptExisting: false, errors: [] };
+  const flags: VerbFlags = { positionals: [], targets: [], plugins: [], all: false, dryRun: false, adoptExisting: false, instance: undefined, manifest: undefined, errors: [] };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--target' || arg === '-t') {
@@ -90,6 +97,20 @@ function parseFlags(args: string[]): VerbFlags {
       flags.dryRun = true;
     } else if (arg === '--adopt-existing') {
       flags.adoptExisting = true;
+    } else if (arg === '--instance') {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith('-')) {
+        if (flags.instance !== undefined) flags.errors.push('--instance accepts one value');
+        flags.instance = value;
+        i++;
+      } else flags.errors.push('--instance requires a value');
+    } else if (arg === '--manifest') {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith('-')) {
+        if (flags.manifest !== undefined) flags.errors.push('--manifest accepts one value');
+        flags.manifest = value;
+        i++;
+      } else flags.errors.push('--manifest requires a value');
     } else if (arg !== undefined && arg.startsWith('-')) {
       flags.errors.push(`unknown option '${arg}'`);
     } else if (arg !== undefined) {
@@ -107,13 +128,15 @@ function selectPlugins<T extends { name: string }>(plugins: readonly T[], reques
   return { selected: requested.length === 0 ? [...plugins] : requested.map((name) => known.get(name)!) };
 }
 
-function rejectDisallowed(flags: VerbFlags, allowed: ReadonlySet<'target' | 'plugin' | 'all' | 'dryRun' | 'adoptExisting'>): string | undefined {
+function rejectDisallowed(flags: VerbFlags, allowed: ReadonlySet<'target' | 'plugin' | 'all' | 'dryRun' | 'adoptExisting' | 'instance' | 'manifest'>): string | undefined {
   if (flags.errors.length > 0) return flags.errors.join('; ');
   if (flags.targets.length > 0 && !allowed.has('target')) return '--target is not supported by this verb';
   if (flags.plugins.length > 0 && !allowed.has('plugin')) return '--plugin is only supported by add';
   if (flags.all && !allowed.has('all')) return '--all is not supported by this verb';
   if (flags.dryRun && !allowed.has('dryRun')) return '--dry-run is not supported by this verb';
   if (flags.adoptExisting && !allowed.has('adoptExisting')) return '--adopt-existing is only supported by add';
+  if (flags.instance !== undefined && !allowed.has('instance')) return '--instance is not supported by this verb';
+  if (flags.manifest !== undefined && !allowed.has('manifest')) return '--manifest is only supported by sync';
   return undefined;
 }
 
@@ -604,8 +627,14 @@ function renderLifecycleReport(report: LifecycleReport): string {
 
 async function runSync(argv: string[], json: boolean): Promise<number> {
   const flags = parseFlags(argv);
-  const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting']));
+  const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting', 'instance', 'manifest']));
   if (disallowed !== undefined) return emitValidatedReport(usageReport('sync', flags.dryRun, disallowed), json);
+  if (flags.manifest !== undefined) {
+    if (flags.positionals.length > 0 || flags.targets.length > 0 || flags.plugins.length > 0 || flags.adoptExisting || flags.instance !== undefined) {
+      return emitValidatedReport(usageReport('sync', flags.dryRun, 'sync --manifest accepts only --dry-run'), json);
+    }
+    return runSyncManifest(flags.manifest, flags.dryRun, json);
+  }
   if (flags.positionals.length !== 1) return emitValidatedReport(usageReport('sync', flags.dryRun, 'sync requires one source'), json);
   if (flags.targets.length === 0) return emitValidatedReport(usageReport('sync', flags.dryRun, 'sync requires at least one --target'), json);
   if (flags.adoptExisting && flags.plugins.length === 0) {
@@ -614,37 +643,157 @@ async function runSync(argv: string[], json: boolean): Promise<number> {
   const source = flags.positionals[0]!;
   let binding: SourceBinding;
   try {
-    binding = resolveSource(source).snapshot.binding;
+    binding = sourceBindingForArgument(source);
   } catch (error) {
     return emitValidatedReport(usageReport('sync', flags.dryRun, unknownErrorDiagnostic(error)), json);
   }
+  const instance = flags.instance ?? 'default';
+  return executeManifest({
+    schemaVersion: 1,
+    entries: flags.targets.map((kind) => ({
+      operation: 'sync',
+      source: binding,
+      target: { kind, instance },
+      ...(flags.plugins.length === 0 ? {} : {
+        selectors: flags.plugins.map((packageName) => ({ package: packageName, adoptExisting: flags.adoptExisting })),
+      }),
+    })),
+  }, flags.dryRun, json);
+}
+
+async function runSyncManifest(manifestPath: string, dryRun: boolean, json: boolean): Promise<number> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    return emitValidatedReport(usageReport('sync', dryRun, unknownErrorDiagnostic(error)), json);
+  }
+  return executeManifest(parsed, dryRun, json);
+}
+
+async function runRetireSource(argv: string[], json: boolean): Promise<number> {
+  const flags = parseFlags(argv);
+  const disallowed = rejectDisallowed(flags, new Set(['target', 'dryRun', 'instance']));
+  if (disallowed !== undefined) return emitValidatedReport(usageReport('retire-source', flags.dryRun, disallowed), json);
+  if (flags.positionals.length !== 1) return emitValidatedReport(usageReport('retire-source', flags.dryRun, 'retire-source requires one source or scope id'), json);
+  if (flags.targets.length === 0) return emitValidatedReport(usageReport('retire-source', flags.dryRun, 'retire-source requires at least one --target'), json);
+  const selector = flags.positionals[0]!;
+  const instance = flags.instance ?? 'default';
+  let loaded;
+  try {
+    loaded = readLifecycleState();
+  } catch (error) {
+    return emitValidatedReport(reportFor('retire-source', flags.dryRun, [], [], {
+      result: 'incomplete',
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      reason: reason('internal', 'internal.corrupt-state', unknownErrorDiagnostic(error)),
+    }), json);
+  }
+  const recorded = recordedScopes(loaded.state.scopes, selector, flags.targets, instance);
+  if (typeof recorded === 'string') return emitValidatedReport(usageReport('retire-source', flags.dryRun, recorded, 'usage.invalid-selection'), json);
+  return executeManifest({
+    schemaVersion: 1,
+    entries: recorded.map((scope) => ({
+      operation: 'retire-source',
+      scopeId: scope.id,
+      target: { kind: scope.target.kind, instance: scope.target.instance },
+    })),
+  }, flags.dryRun, json);
+}
+
+function recordedScopes(
+  scopes: ReturnType<typeof readLifecycleState>['state']['scopes'],
+  selector: string,
+  targets: readonly string[],
+  instance: string,
+): typeof scopes | string {
+  let binding: SourceBinding | undefined;
+  if (!isScopeId(selector)) {
+    try {
+      binding = sourceBindingForArgument(selector);
+    } catch (error) {
+      return unknownErrorDiagnostic(error);
+    }
+  }
+  const matches = scopes.filter((scope) => {
+    if (!targets.includes(scope.target.kind) || scope.target.instance !== instance) return false;
+    if (binding !== undefined) return sameSourceBinding(scope.source, binding);
+    return scope.id === selector;
+  });
+  if (matches.length === 0) return `unknown deployment scope '${selector}'`;
+  return matches;
+}
+
+function runScopes(argv: string[], json: boolean): number {
+  const flags = parseFlags(argv);
+  const disallowed = rejectDisallowed(flags, new Set(['target', 'instance']));
+  if (disallowed !== undefined) {
+    console.error(`plugnz scopes: ${disallowed}`);
+    return 2;
+  }
+  if (flags.positionals.length > 1) {
+    console.error('plugnz scopes: scopes accepts one source or scope id');
+    return 2;
+  }
+  let loaded;
+  try {
+    loaded = readLifecycleState();
+  } catch (error) {
+    console.error(unknownErrorDiagnostic(error));
+    return 1;
+  }
+  const selector = flags.positionals[0];
+  let source: SourceBinding | undefined;
+  let scopeId: string | undefined;
+  if (selector !== undefined && isScopeId(selector)) scopeId = selector;
+  else if (selector !== undefined) {
+    try {
+      source = sourceBindingForArgument(selector);
+    } catch (error) {
+      console.error(unknownErrorDiagnostic(error));
+      return 2;
+    }
+  }
+  const inventory = projectScopeInventory(loaded.state, {
+    ...(scopeId === undefined ? {} : { scopeId }),
+    ...(source === undefined ? {} : { source }),
+    targetKinds: flags.targets,
+    ...(flags.instance === undefined ? {} : { instance: flags.instance }),
+  });
+  if (selector !== undefined && inventory.scopes.length === 0) {
+    console.error(`unknown deployment scope '${selector}'`);
+    return 2;
+  }
+  console.log(json ? JSON.stringify(inventory, null, 2) : renderScopeInventory(inventory));
+  return 0;
+}
+
+async function executeManifest(value: unknown, dryRun: boolean, json: boolean): Promise<number> {
   let manifest;
   try {
-    manifest = parseSyncManifest({
-      schemaVersion: 1,
-      entries: flags.targets.map((kind) => ({
-        operation: 'sync',
-        source: binding,
-        target: { kind, instance: 'default' },
-        ...(flags.plugins.length === 0 ? {} : {
-          selectors: flags.plugins.map((packageName) => ({ package: packageName, adoptExisting: flags.adoptExisting })),
-        }),
-      })),
-    });
+    manifest = parseSyncManifest(value);
   } catch (error) {
     if (error instanceof SyncManifestValidationError) {
-      return emitValidatedReport(usageReport('sync', flags.dryRun, error.reason.diagnostic, error.reason.code), json);
+      const command = manifestCommand(value);
+      return emitValidatedReport(usageReport(command, dryRun, error.reason.diagnostic, error.reason.code), json);
     }
     throw error;
   }
-  const now = new Date().toISOString();
   const executed = await runFrozenLifecycle({
     manifest,
-    dryRun: flags.dryRun,
+    dryRun,
     hosts: lifecyclePlannerHosts,
-    now,
+    now: new Date().toISOString(),
   });
   return emitValidatedReport(executed.report, json);
+}
+
+function manifestCommand(value: unknown): 'sync' | 'retire-source' {
+  if (typeof value !== 'object' || value === null || !('entries' in value) || !Array.isArray(value.entries)) return 'sync';
+  return value.entries.every((entry) => typeof entry === 'object' && entry !== null && 'operation' in entry && entry.operation === 'retire-source')
+    ? 'retire-source'
+    : 'sync';
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -1719,6 +1868,8 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (verb === 'sync') return runSync(args.slice(1), wantsJson);
+  if (verb === 'retire-source') return runRetireSource(args.slice(1), wantsJson);
+  if (verb === 'scopes') return runScopes(args.slice(1), wantsJson);
 
   fail(`plugnz: unknown verb '${verb}'\n\n${USAGE}`, 2);
 }
