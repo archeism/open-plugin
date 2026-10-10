@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { bytesToText, snapshotTree, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
 import { createDeploymentScopeIdentity } from '../src/deployment-scope';
@@ -1028,6 +1028,69 @@ describe('public lifecycle commands', () => {
         stderr: '',
         installed: null,
         sourceB: alphaB,
+      });
+    });
+  });
+
+  test('scenario 8 legacy migration cannot prune before revalidation and an interruption stays recoverable', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const alphaJson = '{"name":"alpha","version":"1.0.0","description":"alpha"}\n';
+      const staleJson = '{"name":"stale","version":"1.0.0","description":"legacy"}\n';
+      const source = harness.source('scenario-8', {
+        'plugin.json': alphaJson,
+        'skills/alpha/SKILL.md': '---\nname: alpha\ndescription: alpha\n---\n\nAlpha.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const statePath = join(harness.home, 'state.json');
+      const stalePath = join(cursorStore, 'plugins', 'local', 'stale', 'plugin.json');
+      mkdirSync(join(cursorStore, 'plugins', 'local', 'stale'), { recursive: true });
+      writeFileSync(stalePath, staleJson);
+      writeFileSync(statePath, JSON.stringify({
+        version: 1,
+        installs: [{ host: 'cursor', id: 'stale', source, sourceSha: 'legacy' }],
+      }));
+
+      const migrated = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const migratedReport = parseLifecycleReport(JSON.parse(migrated.stdout));
+      expect({
+        exitCode: migrated.exitCode,
+        stderr: migrated.stderr,
+        retired: migratedReport.plan.filter((operation) => operation.action === 'retire-orphan').map((operation) => operation.package),
+        stale: readFileSync(stalePath, 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        retired: [],
+        stale: staleJson,
+      });
+
+      const alphaPath = join(cursorStore, 'plugins', 'local', 'alpha', 'plugin.json');
+      const alphaBefore = readFileSync(alphaPath, 'utf8');
+      writeFileSync(statePath, JSON.stringify({
+        version: 1,
+        installs: [{ host: 'cursor', id: 'alpha', source, sourceSha: 'legacy', pending: 'install' }],
+      }));
+      const interrupted = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const interruptedReport = parseLifecycleReport(JSON.parse(interrupted.stdout));
+      expect({
+        exitCode: interrupted.exitCode,
+        stderr: interrupted.stderr,
+        code: interruptedReport.summary.reason?.code ?? null,
+        diagnostic: interruptedReport.summary.reason?.diagnostic ?? '',
+        mutationStarted: interruptedReport.summary.mutationStarted,
+        alpha: readFileSync(alphaPath, 'utf8'),
+        stale: readFileSync(stalePath, 'utf8'),
+      }).toEqual({
+        exitCode: 1,
+        stderr: '',
+        code: 'internal.invariant',
+        diagnostic: "package 'alpha' has pending install work that requires recovery before planning",
+        mutationStarted: false,
+        alpha: alphaBefore,
+        stale: staleJson,
       });
     });
   });
