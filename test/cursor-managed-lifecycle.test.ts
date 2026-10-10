@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fingerprintTree } from '../src/fingerprint';
-import type { LifecycleReadbackObservation, SelectedRouteDecision } from '../src/lifecycle-host';
+import type { LifecycleReadbackObservation, SelectedLifecycleRoute, SelectedRouteDecision } from '../src/lifecycle-host';
 import {
   createFrozenPackageSnapshot,
   createLifecyclePlanCoverage,
@@ -63,11 +63,12 @@ describe('cursor managed local projection', () => {
         'resources/value.txt': 'one\n',
         '.mcp.json': '{"mcpServers":{"demo":{"command":"demo-tool","args":[]}}}\n',
       });
+      const packageFingerprint = fingerprintTree(packageRoot);
       const plugin: PluginSource = {
         dir: packageRoot,
         name: packageName,
         version: '1.2.0',
-        contentFingerprint: fingerprintTree(packageRoot),
+        contentFingerprint: packageFingerprint,
       };
       const inventory = inventoryPackageSemantics(plugin);
       const snapshot = createFrozenPackageSnapshot({
@@ -84,7 +85,7 @@ describe('cursor managed local projection', () => {
         packageRoot,
         relativePackagePath: 'plugins/demo-plugin',
         snapshotFingerprint: fingerprintTree(snapshotRoot),
-        packageFingerprint: plugin.contentFingerprint,
+        packageFingerprint,
         inventory,
       });
       const pins = createResolvedLifecyclePins([{ server: 'demo', executable: pinExecutable }]);
@@ -100,7 +101,7 @@ describe('cursor managed local projection', () => {
         nativeId,
         sourceType: 'local',
       });
-      expect(nativeScope).toMatchObject({ kind: 'unavailable' });
+      expect(nativeScope.kind).toBe('unavailable');
       const nativeProjection = await cursorManagedLifecycle.observeNativeProjection({
         targetObservation: observed,
         operation: 'install',
@@ -134,8 +135,9 @@ describe('cursor managed local projection', () => {
         snapshot,
         pins,
       });
-      expect(decision.kind).toBe('selected');
-      if (decision.kind !== 'selected') throw new Error(decision.gaps.map((gap) => gap.diagnostic).join('\n'));
+      if (decision.kind !== 'selected' || decision.route !== 'managed') {
+        throw new Error(decision.kind === 'capability-gap' ? decision.gaps.map((gap) => gap.diagnostic).join('\n') : 'install route was not managed');
+      }
       expect(decision.route).toBe('managed');
 
       const staged = await cursorManagedLifecycle.stageActivation({ selection: decision, snapshot, pins });
@@ -244,7 +246,7 @@ describe('cursor managed local projection', () => {
       expect(cursorManagedLifecycle.verify(retired.handle, retiredObservation).phase).toBe('verified');
       expect(existsSync(pluginDir)).toBe(false);
       expect(retiredObservation.presence).toBe('absent');
-      expect(retiredObservation.installedFingerprint).toBeNull();
+      expect(retiredObservation.installedFingerprint).toBe(null);
       expect(readFileSync(join(dataDir, 'note.txt'), 'utf8')).toBe(pluginData);
       expect(readFileSync(join(metadataDir, 'note.txt'), 'utf8')).toBe(inactiveMetadata);
       expect(readFileSync(join(cursorRoot, 'mcp.json'), 'utf8')).toBe(userMcp);
@@ -264,7 +266,7 @@ describe('cursor managed local projection', () => {
 
 function recordedActivation(
   observation: LifecycleReadbackObservation,
-  decision: SelectedRouteDecision<'managed', 'install'>,
+  decision: SelectedRouteDecision<SelectedLifecycleRoute, 'install'>,
 ) {
   if (observation.installedFingerprint === null) throw new Error('installed projection has no fingerprint');
   return createRecordedOwnedActivation({
