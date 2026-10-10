@@ -358,9 +358,136 @@ describe('claude-code lifecycle route', () => {
       expect(installed.directiveIds).toContain('claude-code.auto-update');
     });
   });
+
+  test('preparation leaves marketplace auto-update unchanged until apply', async () => {
+    await withClaude(async (root) => {
+      seedMarketplace(root, true);
+      const host = createClaudeCodeLifecycleHost();
+      await plan(host, updateSnapshot(root, 'prepare-only', '1.2.0', '7'.repeat(40), 'install'));
+      expect(marketplaceAutoUpdate(root)).toBe(true);
+      expect(settingsAutoUpdate(root)).toBe(true);
+    });
+  });
+
+  test('rollback restores this plugin only and keeps a sibling edit', async () => {
+    await withClaude(async (root) => {
+      seedMarketplace(root, true);
+      const registry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
+        plugins: Record<string, Array<{ version: string }>>;
+      };
+      registry.plugins['other@market'] = [{
+        scope: 'user',
+        installPath: '/tmp/other',
+        version: '0.1.0',
+        gitCommitSha: 'a'.repeat(40),
+      }];
+      writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(registry)}\n`);
+      const host = createClaudeCodeLifecycleHost();
+      const installed = await activate(host, updateSnapshot(root, 'sibling', '1.2.0', '8'.repeat(40), 'install'));
+      const settings = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')) as {
+        theme: string;
+        enabledPlugins: Record<string, boolean>;
+      };
+      settings.theme = 'light';
+      settings.enabledPlugins['third@market'] = true;
+      writeFileSync(join(root, 'settings.json'), `${JSON.stringify(settings)}\n`);
+      registry.plugins['other@market'][0]!.version = '0.2.0';
+      const liveRegistry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
+        plugins: Record<string, Array<{ version: string }>>;
+      };
+      liveRegistry.plugins['other@market'][0]!.version = '0.2.0';
+      writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(liveRegistry)}\n`);
+
+      await host.rollback(installed.handle);
+
+      const restoredSettings = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')) as {
+        theme: string;
+        enabledPlugins: Record<string, boolean>;
+        extraKnownMarketplaces: { market: { autoUpdate?: boolean } };
+      };
+      const restoredRegistry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
+        plugins: Record<string, Array<{ version: string }>>;
+      };
+      expect(restoredSettings.theme).toBe('light');
+      expect(restoredSettings.enabledPlugins['third@market']).toBe(true);
+      expect(restoredRegistry.plugins['other@market']?.[0]?.version).toBe('0.2.0');
+      expect(restoredRegistry.plugins['demo@market']).toBeUndefined();
+      expect(marketplaceAutoUpdate(root)).toBe(true);
+      expect(restoredSettings.extraKnownMarketplaces.market.autoUpdate).toBe(true);
+    });
+  });
+
+  test('leaves marketplace auto-update on when another plugin shares it', async () => {
+    await withClaude(async (root) => {
+      seedMarketplace(root, true);
+      const registry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
+        plugins: Record<string, unknown[]>;
+      };
+      registry.plugins['other@market'] = [{
+        scope: 'user',
+        installPath: '/tmp/other',
+        version: '0.1.0',
+        gitCommitSha: 'b'.repeat(40),
+      }];
+      writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(registry)}\n`);
+      const host = createClaudeCodeLifecycleHost();
+      await activate(host, updateSnapshot(root, 'shared-market', '1.2.0', '9'.repeat(40), 'install'));
+      expect(marketplaceAutoUpdate(root)).toBe(true);
+      expect(settingsAutoUpdate(root)).toBe(true);
+    });
+  });
+
+  test('apply refuses when the Claude version changes after planning', async () => {
+    await withClaude(async (root) => {
+      const host = createClaudeCodeLifecycleHost();
+      const planned = await plan(host, updateSnapshot(root, 'drift', '1.2.0', 'c'.repeat(40), 'install'));
+      binary(root, '9.9.9 (Claude Code)\n');
+      let message = '';
+      try {
+        await host.apply(planned.prepared);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message.includes('refusing mutation')).toBe(true);
+      expect(await host.probeVersion(claudeTarget)).toEqual({
+        kind: 'detected',
+        version: '2.1.295',
+        probeId: 'claude-code-cli-2.1.295',
+      });
+    });
+  });
 });
 
-async function activate(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
+function seedMarketplace(root: string, autoUpdate: boolean): void {
+  mkdirSync(join(root, 'plugins'), { recursive: true });
+  writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify({ version: 2, plugins: {} })}\n`);
+  writeFileSync(join(root, 'plugins/known_marketplaces.json'), `${JSON.stringify({
+    market: { source: { source: 'github', repo: 'example/plugins' }, installLocation: '/tmp/market', autoUpdate },
+  })}\n`);
+  writeFileSync(join(root, 'settings.json'), `${JSON.stringify({
+    theme: 'dark',
+    enabledPlugins: {},
+    extraKnownMarketplaces: {
+      market: { source: { source: 'github', repo: 'example/plugins' }, autoUpdate },
+    },
+  })}\n`);
+}
+
+function marketplaceAutoUpdate(root: string): boolean | undefined {
+  const parsed = JSON.parse(readFileSync(join(root, 'plugins/known_marketplaces.json'), 'utf8')) as {
+    market: { autoUpdate?: boolean };
+  };
+  return parsed.market.autoUpdate;
+}
+
+function settingsAutoUpdate(root: string): boolean | undefined {
+  const parsed = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')) as {
+    extraKnownMarketplaces: { market: { autoUpdate?: boolean } };
+  };
+  return parsed.extraKnownMarketplaces.market.autoUpdate;
+}
+
+async function plan(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
   const version = await host.probeVersion(claudeTarget);
   const observed = await host.observeTarget(claudeTarget);
   const pins = createResolvedLifecyclePins([]);
@@ -406,8 +533,13 @@ async function activate(host: LifecycleHostAdapter, snapshot: FrozenPackageSnaps
   const directed = await host.applyLifecycleDirectives(staged);
   const pinned = await host.applyPins(directed);
   const prepared = await host.sealActivation(pinned);
-  const receipt = await host.apply(prepared);
-  return { ...receipt, directiveIds: directed.directiveIds };
+  return { prepared, directiveIds: directed.directiveIds };
+}
+
+async function activate(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
+  const planned = await plan(host, snapshot, operation);
+  const receipt = await host.apply(planned.prepared);
+  return { ...receipt, directiveIds: planned.directiveIds };
 }
 
 async function retire(
