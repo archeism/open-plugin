@@ -3,6 +3,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
+import type { TargetVersionObservation } from '../lifecycle-host';
 import { grokRoot } from '../paths';
 import { collectPluginServers } from '../mcp';
 import { singleInstanceTargetProfile } from '../target-profile';
@@ -12,7 +13,26 @@ import { which } from '../runtime';
 export const grokTargetProfile = singleInstanceTargetProfile('grok');
 
 export const MARKER = '.plgnz-install.json';
-export type GrokOwnership = { source: string; pluginId: string; fingerprint: string; nativeFingerprint?: string };
+export type GrokOwnership = {
+  source: string;
+  pluginId: string;
+  fingerprint: string;
+  nativeFingerprint?: string;
+  scopeId?: string;
+  sourceType?: string;
+  immutableRevision?: string;
+};
+
+export function parseGrokVersionOutput(output: string, status: number | null): TargetVersionObservation {
+  if (status === null) return { kind: 'unknown' };
+  const line = output.split(/\r?\n/u).map((entry) => entry.trim()).find((entry) => entry.startsWith('grok '));
+  const match = line === undefined ? null : /^grok (\d+\.\d+\.\d+)(?: \(([0-9A-Za-z]+)\))?$/u.exec(line);
+  if (match === null || status !== 0) return status === 0 ? { kind: 'unparseable' } : { kind: 'unknown' };
+  const version = match[1];
+  if (version === undefined) return { kind: 'unparseable' };
+  const build = match[2];
+  return { kind: 'detected', version, probeId: build === undefined ? `grok:${version}` : `grok:${version}:${build}` };
+}
 type Repo = { path?: unknown; plugins?: unknown; kind?: unknown; marketplace?: unknown };
 
 export function registryFile(): string { return join(grokRoot(), 'installed-plugins', 'registry.json'); }

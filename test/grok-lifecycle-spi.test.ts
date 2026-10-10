@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -242,7 +243,17 @@ describe('Grok lifecycle SPI', () => {
       await adapter.apply(installed);
       const active = join(home, '.grok', 'installed-plugins', 'demo-native', 'resources', 'value.txt');
       expect(readFileSync(active, 'utf8')).toBe('one\n');
-      adapter.verify(installed.handle, await adapter.readback(installed.handle));
+      const installedReadback = await adapter.readback(installed.handle);
+      adapter.verify(installed.handle, installedReadback);
+      expect(installedReadback.transition).toEqual({ requirement: 'reload', status: 'effective' });
+      const inspect = spawnSync(process.env.OPEN_PLUGIN_GROK_BIN ?? '', ['inspect', '--json'], {
+        env: { ...process.env, HOME: home, GROK_HOME: join(home, '.grok') },
+        encoding: 'utf8',
+      });
+      expect(inspect.status).toBe(0);
+      expect(JSON.parse(inspect.stdout)).toEqual({
+        plugins: [{ name: 'demo', path: join(home, '.grok', 'installed-plugins', 'demo-native'), enabled: true }],
+      });
 
       const marker = join(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))[0].source.path, '.plgnz-install.json');
       const markerBefore = readFileSync(marker, 'utf8');
@@ -255,7 +266,7 @@ describe('Grok lifecycle SPI', () => {
         bytes: 'two\n',
       }));
       const error = await failure(adapter.apply(update));
-      expect(error).toBeInstanceOf(LifecycleHostPhaseError);
+      expect(error instanceof LifecycleHostPhaseError).toBe(true);
       if (!(error instanceof LifecycleHostPhaseError)) return;
       expect(error.phase).toBe('apply');
       expect(error.mutationStarted).toBe(true);
@@ -267,7 +278,7 @@ describe('Grok lifecycle SPI', () => {
       expect(readFileSync(marker, 'utf8')).toBe(markerBefore);
       const added = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').slice(logBefore.length);
       expect(added).toContain('plugin update demo');
-      expect(added).not.toContain('plugin install');
+      expect(added.includes('plugin install')).toBe(false);
       expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo@catalog']);
     });
   });
@@ -308,11 +319,11 @@ describe('Grok lifecycle SPI', () => {
         bytes: 'fresh\n',
       }));
       const error = await failure(adapter.apply(prepared));
-      expect(error).toBeInstanceOf(LifecycleHostPhaseError);
+      expect(error instanceof LifecycleHostPhaseError).toBe(true);
       expect(readFileSync(join(installed, 'resources', 'value.txt'), 'utf8')).toBe('stale-installed\n');
       expect(readFileSync(join(source, 'resources', 'value.txt'), 'utf8')).toBe('stale-source\n');
       expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo']);
-      expect(readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8')).not.toContain('plugin install');
+      expect(readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').includes('plugin install')).toBe(false);
     });
   });
 });
