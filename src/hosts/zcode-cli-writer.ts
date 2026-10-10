@@ -1,6 +1,6 @@
 /** Official ZCode CLI marketplace writer. */
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
 import { normalizeCommandTree } from '../conversion';
@@ -277,20 +277,25 @@ function zcodeSemantics(overrides: Partial<Record<PackageSemantic, CapabilitySta
   return { ...unsupported, ...overrides };
 }
 
-function zcodeRetireProfile(route: 'native' | 'managed', retention: CapabilityStatus): CapabilityEvidenceProfile {
+function zcodeRetireProfile(
+  route: 'native' | 'managed',
+  operationStatus: CapabilityStatus,
+  lifecycle: CapabilityStatus,
+  retention: CapabilityStatus,
+): CapabilityEvidenceProfile {
   return createCapabilityEvidenceProfile({
     host: 'zcode-cli',
     detectedVersion: ZCODE_PROVEN_VERSION,
     sourceTypes: ['local', 'git'],
     operations: ['retire'],
     route,
-    operationStatus: 'supported',
+    operationStatus,
     semantics: zcodeSemantics({
-      retirement: 'supported',
+      retirement: operationStatus,
       'retention-safety': retention,
-      readback: 'supported',
-      rollback: 'supported',
-      'activation-reload': 'supported',
+      readback: lifecycle,
+      rollback: lifecycle,
+      'activation-reload': lifecycle,
     }),
     evidence: [...ZCODE_EVIDENCE],
   });
@@ -298,8 +303,8 @@ function zcodeRetireProfile(route: 'native' | 'managed', retention: CapabilitySt
 
 /** Native uninstall deletes plugin data and options. Managed retirement is the retention-safe route. */
 export const zcodeCliEvidenceProfiles: readonly CapabilityEvidenceProfile[] = Object.freeze([
-  zcodeRetireProfile('native', 'unsupported'),
-  zcodeRetireProfile('managed', 'supported'),
+  zcodeRetireProfile('native', 'unsupported', 'unsupported', 'unsupported'),
+  zcodeRetireProfile('managed', 'supported', 'supported', 'supported'),
 ]);
 
 function assertZcodeTarget(target: LifecycleTargetIdentity): void {
@@ -444,7 +449,10 @@ function readbackFor(
 
 function retirementSnapshot(attemptId: string, operationId: string, nativeId: string): string {
   const dir = join(zcodeCliRoot(), 'plgnz-lifecycle', attemptId, operationId);
-  rmSync(dir, { recursive: true, force: true });
+  if (existsSync(dir)) {
+    if (!statSync(dir).isDirectory()) throw new Error(`ZCode rollback snapshot already exists and is not a directory: ${dir}`);
+    return dir;
+  }
   mkdirSync(dir, { recursive: true });
   const row = nativeById(nativeId);
   const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
@@ -457,9 +465,21 @@ function retirementSnapshot(attemptId: string, operationId: string, nativeId: st
   return dir;
 }
 
+function canonicalExistingPath(path: string): string {
+  const missing: string[] = [];
+  let current = path;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) throw new Error(`ZCode path does not exist: ${path}`);
+    missing.push(basename(current));
+    current = parent;
+  }
+  return join(realpathSync(current), ...missing.reverse());
+}
+
 function isCacheInstallPath(path: string): boolean {
-  const cache = resolve(join(zcodeCliRoot(), 'plugins', 'cache'));
-  const target = resolve(path);
+  const cache = canonicalExistingPath(join(zcodeCliRoot(), 'plugins', 'cache'));
+  const target = canonicalExistingPath(path);
   return target.startsWith(`${cache}/`);
 }
 
@@ -484,6 +504,62 @@ function removeEnabledFlag(nativeId: string): void {
   if (!Object.hasOwn(value['plugins']['enabledPlugins'], nativeId)) return;
   delete value['plugins']['enabledPlugins'][nativeId];
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function snapshotRegistryRow(file: string, nativeId: string): Record<string, unknown> | undefined {
+  if (!existsSync(file)) return undefined;
+  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!isObject(value) || !Array.isArray(value['plugins'])) throw new Error(`Official ZCode registry snapshot is unsupported: ${file}`);
+  const rows = value['plugins'].filter((row) => isObject(row) && row['id'] === nativeId);
+  if (rows.length > 1) throw new Error(`Official ZCode registry snapshot is ambiguous: ${nativeId}`);
+  return rows[0];
+}
+
+function restoreRegistryPlugin(nativeId: string, snapshotFile: string): void {
+  const saved = snapshotRegistryRow(snapshotFile, nativeId);
+  const file = zcodeRegistryFile();
+  if (!existsSync(file) && saved === undefined) return;
+  const live: unknown = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, plugins: [] };
+  if (!isObject(live) || !Array.isArray(live['plugins'])) throw new Error(`Official ZCode registry is unsupported: ${file}`);
+  const plugins = live['plugins'].filter((row) => !isObject(row) || row['id'] !== nativeId);
+  if (saved !== undefined) plugins.push(saved);
+  live['plugins'] = plugins;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(live, null, 2)}\n`);
+}
+
+function configSection(config: Record<string, unknown>, key: 'enabledPlugins' | 'options'): Record<string, unknown> {
+  const plugins = isObject(config['plugins']) ? config['plugins'] : {};
+  config['plugins'] = plugins;
+  const section = isObject(plugins[key]) ? plugins[key] : {};
+  plugins[key] = section;
+  return section;
+}
+
+function restorePluginConfig(nativeId: string, snapshotFile: string): void {
+  const file = join(zcodeCliConfigRoot(), 'config.json');
+  const snapshot = existsSync(snapshotFile) ? readConfigObjectFrom(snapshotFile) : null;
+  const live = existsSync(file) ? readConfigObject() : {};
+  if (live === null) throw new Error(`Official ZCode config is unsupported: ${file}`);
+  const savedPlugins = snapshot !== null && isObject(snapshot['plugins']) ? snapshot['plugins'] : undefined;
+  const savedEnabled = savedPlugins !== undefined && isObject(savedPlugins['enabledPlugins']) ? savedPlugins['enabledPlugins'][nativeId] : undefined;
+  const savedOptions = savedPlugins !== undefined && isObject(savedPlugins['options']) && Object.hasOwn(savedPlugins['options'], nativeId)
+    ? savedPlugins['options'][nativeId]
+    : undefined;
+  const enabled = configSection(live, 'enabledPlugins');
+  if (typeof savedEnabled === 'boolean') enabled[nativeId] = savedEnabled;
+  else delete enabled[nativeId];
+  const options = configSection(live, 'options');
+  if (savedOptions === undefined) delete options[nativeId];
+  else options[nativeId] = savedOptions;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(live, null, 2)}\n`);
+}
+
+function readConfigObjectFrom(file: string): Record<string, unknown> | null {
+  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!isObject(value)) throw new Error(`Official ZCode config is unsupported: ${file}`);
+  return value;
 }
 
 function notInSlice(): Promise<never> {
@@ -536,6 +612,7 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
   apply: notInSlice,
   disable: notInSlice,
   retire: async (prepared) => {
+    if (prepared.handle.route !== 'managed') throw new Error('Official ZCode retire is managed; native uninstall deletes retained plugin data');
     const nativeId = prepared.handle.nativeId;
     const row = nativeById(nativeId);
     const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
@@ -553,13 +630,16 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
   ),
   rollback: async (handle) => {
     const dir = handle.rollbackReference;
-    const registry = join(dir, 'installed_plugins.json');
-    const config = join(dir, 'config.json');
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error('ZCode rollback snapshot is missing');
     const installPath = existsSync(join(dir, 'install-path.txt')) ? readFileSync(join(dir, 'install-path.txt'), 'utf8') : '';
-    if (existsSync(registry)) cpSync(registry, zcodeRegistryFile());
-    if (existsSync(config)) cpSync(config, join(zcodeCliConfigRoot(), 'config.json'));
     const cache = join(dir, 'cache');
-    if (installPath.length > 0 && isCacheInstallPath(installPath) && existsSync(cache)) {
+    const cachePresent = existsSync(cache);
+    if (installPath.length > 0 && !cachePresent) throw new Error('ZCode rollback cache copy is missing');
+    if (installPath.length === 0 && cachePresent) throw new Error('ZCode rollback cache copy has no install path');
+    if (installPath.length > 0 && !isCacheInstallPath(installPath)) throw new Error('ZCode rollback cache path is outside the native cache');
+    restoreRegistryPlugin(handle.nativeId, join(dir, 'installed_plugins.json'));
+    restorePluginConfig(handle.nativeId, join(dir, 'config.json'));
+    if (installPath.length > 0) {
       rmSync(installPath, { recursive: true, force: true });
       mkdirSync(dirname(installPath), { recursive: true });
       cpSync(cache, installPath, { recursive: true });

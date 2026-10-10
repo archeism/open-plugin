@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLifecyclePlanCoverage, createRecordedOwnedActivation } from '../src/lifecycle-runtime';
@@ -182,9 +182,13 @@ describe('ZCode CLI retirement route', () => {
       expect(decision.kind).toBe('selected');
       if (decision.kind !== 'selected') return;
       const managed = zcodeCliEvidenceProfiles.find((profile) => profile.route === 'managed' && profile.operations.includes('retire'));
+      const native = zcodeCliEvidenceProfiles.find((profile) => profile.route === 'native' && profile.operations.includes('retire'));
       expect(decision.route).toBe('managed');
       expect(decision.detectedVersion).toBe('0.16.9');
       expect(decision.evidenceId).toBe(managed?.evidenceId);
+      expect(native?.operationStatus).toBe('unsupported');
+      expect(native?.semantics['activation-reload']).toBe('unsupported');
+      expect(managed?.semantics['activation-reload']).toBe('supported');
 
       const prepared = await zcodeCliLifecycle.prepareRetirement({
         operationId,
@@ -215,5 +219,198 @@ describe('ZCode CLI retirement route', () => {
       });
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+const OTHER = 'other@plgnz-aaaaaaaaaaaaaaaa';
+
+async function withLinkedHome(run: (home: string, cliRoot: string) => Promise<void>): Promise<void> {
+  const real = mkdtempSync(join(tmpdir(), 'plgnz-zcode-real-'));
+  const linkParent = mkdtempSync(join(tmpdir(), 'plgnz-zcode-link-'));
+  const home = join(linkParent, 'home');
+  symlinkSync(real, home);
+  const cliRoot = join(home, '.zcode', 'cli');
+  const binary = join(home, 'zcode');
+  const keys = ['OPEN_PLUGIN_HOME', 'OPEN_PLUGIN_ZCODE_CLI_BIN', 'ZCODE_STORAGE_DIR'] as const;
+  const prior = keys.map((key) => process.env[key]);
+  const originalCwd = process.cwd();
+  process.env.OPEN_PLUGIN_HOME = home;
+  process.env.OPEN_PLUGIN_ZCODE_CLI_BIN = binary;
+  process.env.ZCODE_STORAGE_DIR = join(home, '.zcode');
+  try {
+    process.chdir(home);
+    mkdirSync(cliRoot, { recursive: true });
+    officialFake(binary);
+    seedPlugin(cliRoot, DEMO, 'plgnz-0123456789abcdef', 'kept-session\n', 'kept');
+    seedPlugin(cliRoot, SCRATCH, 'plgnz-fedcba9876543210', 'scratch-session\n', 'scratch');
+    await run(home, cliRoot);
+  } finally {
+    process.chdir(originalCwd);
+    keys.forEach((key, index) => {
+      if (prior[index] === undefined) delete process.env[key];
+      else process.env[key] = prior[index];
+    });
+    rmSync(real, { recursive: true, force: true });
+    rmSync(linkParent, { recursive: true, force: true });
+  }
+}
+
+async function prepareDemoRetirement() {
+  const target = { kind: 'zcode-cli', instance: 'default' } as const;
+  const version = await zcodeCliLifecycle.probeVersion(target);
+  const observed = await zcodeCliLifecycle.observeTarget(target);
+  const installation = observed.installations.find((row) => row.nativeId === DEMO);
+  if (installation === undefined || installation.ownership.kind !== 'owned' || installation.installedFingerprint === null || installation.installedVersion === null) {
+    throw new Error('seeded ZCode install was not observed as an owned present activation');
+  }
+  const operationId = 'op-retire-demo';
+  const attemptId = 'attempt-retire-demo';
+  const activation = createRecordedOwnedActivation({
+    scopeId: 'scope-demo',
+    target,
+    packageName: 'demo',
+    nativeId: DEMO,
+    sourceType: 'local',
+    sourceRevision: 'local-demo-revision',
+    sourceLocator: null,
+    installedVersion: installation.installedVersion,
+    route: 'native',
+    evidenceId: 'seed-evidence',
+    ownership: { kind: 'created', proofId: installation.ownership.proofId },
+    activation: 'active',
+    enablement: 'enabled',
+    installedFingerprint: installation.installedFingerprint,
+    contentRoots: installation.contentRoots,
+  });
+  const nativeScope = await zcodeCliLifecycle.observeNativeMutationScope({
+    targetObservation: observed,
+    operation: 'retire',
+    packageName: 'demo',
+    nativeId: DEMO,
+    sourceType: 'local',
+  });
+  const nativeProjection = await zcodeCliLifecycle.observeNativeProjection({
+    targetObservation: observed,
+    operation: 'retire',
+    operationId,
+    attemptId,
+    activation,
+  });
+  const decision = zcodeCliLifecycle.decideRoute({
+    target,
+    operation: 'retire',
+    operationId,
+    attemptId,
+    scopeId: 'scope-demo',
+    packageName: 'demo',
+    nativeId: DEMO,
+    version,
+    sourceType: 'local',
+    targetObservation: observed,
+    nativeScope,
+    nativeProjection,
+    planCoverage: createLifecyclePlanCoverage(observed, [{
+      nativeId: DEMO,
+      operationId,
+      operation: 'retire',
+      mutationGroupId: 'group-retire-demo',
+      authorization: 'observed-owned',
+    }]),
+    activation,
+  });
+  if (decision.kind !== 'selected') throw new Error(`expected a selected retirement route, got ${decision.kind}`);
+  const prepared = await zcodeCliLifecycle.prepareRetirement({
+    operationId,
+    attemptId,
+    action: 'remove',
+    selection: decision,
+    activation,
+  });
+  return { prepared, installation, decision, activation, operationId, attemptId, observed };
+}
+
+describe('ZCode CLI retirement rollback', () => {
+  test('restores only this plugin through a symlinked home and keeps a sibling edit', async () => {
+    await withLinkedHome(async (_home, cliRoot) => {
+      const { prepared, installation } = await prepareDemoRetirement();
+      await zcodeCliLifecycle.retire(prepared);
+      const configPath = join(cliRoot, 'config.json');
+      const registryPath = join(cliRoot, 'plugins', 'installed_plugins.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      config.plugins.options[SCRATCH] = { theme: 'later' };
+      config.plugins.enabledPlugins[SCRATCH] = false;
+      config.plugins.options[DEMO] = { theme: 'mutated-after-snapshot' };
+      writeFileSync(configPath, JSON.stringify(config));
+      const otherPath = join(cliRoot, 'plugins', 'cache', 'plgnz-aaaaaaaaaaaaaaaa', 'other', '1.0.0');
+      mkdirSync(otherPath, { recursive: true });
+      writeFileSync(join(otherPath, 'plugin.json'), '{"name":"other","version":"1.0.0"}\n');
+      const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
+      registry.plugins.push({ id: OTHER, name: 'other', marketplace: 'plgnz-aaaaaaaaaaaaaaaa', version: '1.0.0', installPath: otherPath, scope: 'user' });
+      writeFileSync(registryPath, JSON.stringify(registry));
+      const rolled = await zcodeCliLifecycle.rollback(prepared.handle);
+      const observation = await zcodeCliLifecycle.readback(prepared.handle);
+      zcodeCliLifecycle.verifyRollback(prepared.handle, observation);
+      expect(rolled.changed).toBe(true);
+
+      const installPath = installation.contentRoots[0]?.path ?? '';
+      expect(readFileSync(join(installPath, 'plugin.json'), 'utf8')).toBe('{"name":"demo","version":"1.0.0"}\n');
+      const after = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(after.plugins.options[DEMO]).toEqual({ theme: 'kept' });
+      expect(after.plugins.enabledPlugins[DEMO]).toBe(true);
+      expect(after.plugins.options[SCRATCH]).toEqual({ theme: 'later' });
+      expect(after.plugins.enabledPlugins[SCRATCH]).toBe(false);
+      const rows = JSON.parse(readFileSync(registryPath, 'utf8')).plugins as Array<{ id: string }>;
+      expect(rows.some((row) => row.id === DEMO)).toBe(true);
+      expect(rows.some((row) => row.id === OTHER)).toBe(true);
+      expect(readFileSync(join(cliRoot, 'plugins', 'data', DEMO, 'session.txt'), 'utf8')).toBe('kept-session\n');
+    });
+  });
+
+  test('fails when the snapshot or its cache copy is missing', async () => {
+    await withLinkedHome(async () => {
+      const missingSnapshot = await prepareDemoRetirement();
+      rmSync(missingSnapshot.prepared.handle.rollbackReference, { recursive: true, force: true });
+      let snapshotError: Error | undefined;
+      try {
+        await zcodeCliLifecycle.rollback(missingSnapshot.prepared.handle);
+      } catch (error) {
+        snapshotError = error as Error;
+      }
+      expect(snapshotError?.message ?? '').toContain('ZCode rollback snapshot is missing');
+
+      const missingCache = await prepareDemoRetirement();
+      await zcodeCliLifecycle.retire(missingCache.prepared);
+      rmSync(join(missingCache.prepared.handle.rollbackReference, 'cache'), { recursive: true, force: true });
+      let cacheError: Error | undefined;
+      try {
+        await zcodeCliLifecycle.rollback(missingCache.prepared.handle);
+      } catch (error) {
+        cacheError = error as Error;
+      }
+      expect(cacheError?.message ?? '').toContain('ZCode rollback cache copy is missing');
+      const registry = JSON.parse(readFileSync(join(process.env.ZCODE_STORAGE_DIR ?? '', 'cli', 'plugins', 'installed_plugins.json'), 'utf8'));
+      expect(registry.plugins.some((row: { id: string }) => row.id === DEMO)).toBe(false);
+    });
+  });
+
+  test('keeps the first rollback snapshot when retirement is prepared again', async () => {
+    await withLinkedHome(async () => {
+      const first = await prepareDemoRetirement();
+      const sentinel = join(first.prepared.handle.rollbackReference, 'sentinel.txt');
+      writeFileSync(sentinel, 'first');
+      const second = await zcodeCliLifecycle.prepareRetirement({
+        operationId: first.operationId,
+        attemptId: first.attemptId,
+        action: 'remove',
+        selection: first.decision,
+        activation: first.activation,
+      });
+      expect(readFileSync(sentinel, 'utf8')).toBe('first');
+      expect(second.handle.rollbackReference).toBe(first.prepared.handle.rollbackReference);
+      await zcodeCliLifecycle.retire(second);
+      expect(existsSync(join(first.prepared.handle.rollbackReference, 'cache'))).toBe(true);
+      const observation = await zcodeCliLifecycle.readback(second.handle);
+      zcodeCliLifecycle.verify(second.handle, observation);
+    });
   });
 });
