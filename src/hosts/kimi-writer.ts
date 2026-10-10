@@ -2,8 +2,18 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile } from '../capability-evidence';
+import { fingerprintTree } from '../fingerprint';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome, RemoveOptions } from '../host';
+import type {
+  LifecycleHostDefinition,
+  NativeMutationScopeData,
+  NativeProjectionData,
+  TargetInstallationData,
+  TargetVersionObservation,
+} from '../lifecycle-host';
 import type { PluginSource, ResolvedSource } from '../source';
+import type { CapabilityOperation, PackageSemantic } from '../semantic-inventory';
 import { normalizeCommandSources } from '../conversion';
 import { kimi, mcpCandidates, pluginsDir } from './kimi';
 import { pinPluginMcpFiles } from '../mcp-write';
@@ -263,3 +273,191 @@ async function withKimiServer(home: string, binary: string, operation: (request:
   }
 }
 function curlJson(url: string, method = 'GET', token?: string, body?: unknown): Record<string, unknown> { const args = ['--noproxy', '*', '--silent', '--show-error', '--max-time', '2', '--request', method, ...(token === undefined ? [] : ['--header', `Authorization: Bearer ${token}`]), ...(body === undefined ? [] : ['--header', 'Content-Type: application/json', '--data', JSON.stringify(body)]), url]; const result = bunShapedSpawnSync(['curl', ...args], { stdout: 'pipe', stderr: 'pipe' }); const text = new TextDecoder().decode(result.stdout); if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr).trim() || `curl exit ${result.exitCode}`); try { const value: unknown = JSON.parse(text); if (!isObject(value)) throw new Error('must be an object'); return value; } catch (error) { throw new Error(`Kimi returned invalid JSON: ${(error as Error).message}`); } }
+
+const KIMI_GATED_VERSION = '2.0.1';
+const KIMI_SCOPE = 'kimi:default';
+const KIMI_UPDATE_MECHANISM = { kind: 'interactive-marketplace-updater' } as const;
+const KIMI_RETIRE_MECHANISM = { kind: 'native-remove' } as const;
+const KIMI_RETIRE_SEMANTICS = new Set<PackageSemantic>(['retirement', 'retention-safety', 'readback', 'rollback', 'activation-reload']);
+
+const kimiUpdateProfile = {
+  host: 'kimi',
+  detectedVersion: KIMI_GATED_VERSION,
+  sourceTypes: ['local', 'git'],
+  operations: ['update'],
+  operationStatus: 'unsupported',
+  semantics: kimiSemantics(new Set<PackageSemantic>()),
+  evidence: ['docs/hosts/kimi.md'],
+} as const;
+
+export const kimiLifecycle: LifecycleHostDefinition = {
+  id: 'kimi',
+  evidenceProfiles: [
+    createCapabilityEvidenceProfile({ ...kimiUpdateProfile, route: 'native' }),
+    createCapabilityEvidenceProfile({ ...kimiUpdateProfile, route: 'managed' }),
+    createCapabilityEvidenceProfile({
+      host: 'kimi',
+      detectedVersion: KIMI_GATED_VERSION,
+      sourceTypes: ['local', 'git'],
+      operations: ['retire'],
+      route: 'native',
+      operationStatus: 'supported',
+      semantics: kimiSemantics(KIMI_RETIRE_SEMANTICS),
+      evidence: ['docs/evidence/kimi-public-lifecycle-20260922.json'],
+    }),
+  ],
+  probeVersion: async () => probeKimiBinary(),
+  observeTarget: async (target) => ({
+    target,
+    installations: target.kind === 'kimi' && target.instance === 'default' ? readKimiInstallations() : [],
+  }),
+  observeNativeMutationScope: async (request) => kimiMutationScope(request.operation, request.nativeId),
+  observeNativeProjection: async (request) => kimiProjection(request.operation),
+  revalidateTargetPrecondition: async () => unexposed('revalidate'),
+  stageActivation: async () => unexposed('stage'),
+  applyLifecycleDirectives: async () => unexposed('directives'),
+  applyPins: async () => unexposed('pins'),
+  captureActivationPreparation: async () => unexposed('activation-capture'),
+  captureDisablePreparation: async () => unexposed('disable-capture'),
+  captureRetirementPreparation: async () => unexposed('retirement-capture'),
+  apply: async () => unexposed('apply'),
+  disable: async () => unexposed('disable'),
+  retire: async () => unexposed('retire'),
+  readback: async () => unexposed('readback'),
+  rollback: async () => unexposed('rollback'),
+  cleanup: async () => unexposed('cleanup'),
+};
+
+function probeKimiBinary(): TargetVersionObservation {
+  const binary = process.env['OPEN_PLUGIN_KIMI_BIN'];
+  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
+  const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
+  const version = new TextDecoder().decode(result.stdout).trim();
+  const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);
+  if (result.exitCode !== 0 || match === null || Number(match[1]) === 0) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `kimi-bin:${version}` };
+}
+
+function readKimiInstallations(): TargetInstallationData[] {
+  return kimi.listInstalled().map((plugin): TargetInstallationData => {
+    if (plugin.path === undefined) {
+      return {
+        nativeId: plugin.id,
+        packageName: plugin.name,
+        ownership: { kind: 'unmanaged' },
+        presence: 'absent',
+        enablement: 'unknown',
+        activation: 'unknown',
+        installedFingerprint: null,
+        installedVersion: null,
+        source: null,
+        contentRoots: [],
+      };
+    }
+    const marker = readOwnership(plugin.path);
+    const digest = fingerprintTree(plugin.path);
+    const owned = marker !== null && marker.pluginId === plugin.id;
+    const enabled = plugin.enabled !== false;
+    return {
+      nativeId: plugin.id,
+      packageName: plugin.name,
+      ownership: owned
+        ? { kind: 'owned', proof: 'created', scopeId: KIMI_SCOPE, proofId: `marker:${marker.pluginId}` }
+        : { kind: 'unmanaged' },
+      presence: 'present',
+      enablement: enabled ? 'enabled' : 'disabled',
+      activation: enabled ? 'active' : 'inactive',
+      installedFingerprint: digest,
+      installedVersion: null,
+      source: owned ? { type: 'local', immutableRevision: marker.fingerprint, locator: null } : null,
+      contentRoots: [{ label: 'managed', path: plugin.path, fingerprint: digest }],
+    };
+  });
+}
+
+function kimiMutationScope(operation: CapabilityOperation, nativeId: string): NativeMutationScopeData {
+  switch (operation) {
+    case 'update':
+      return updateScope();
+    case 'retire':
+      return retireScope(nativeId);
+    case 'install':
+    case 'disable':
+      return { kind: 'unavailable' };
+    default: {
+      const unreachable: never = operation;
+      return unreachable;
+    }
+  }
+}
+
+function updateScope(): NativeMutationScopeData {
+  switch (KIMI_UPDATE_MECHANISM.kind) {
+    case 'interactive-marketplace-updater':
+      return { kind: 'unavailable' };
+    default: {
+      const unreachable: never = KIMI_UPDATE_MECHANISM.kind;
+      return unreachable;
+    }
+  }
+}
+
+function retireScope(nativeId: string): NativeMutationScopeData {
+  switch (KIMI_RETIRE_MECHANISM.kind) {
+    case 'native-remove': {
+      const owned = readKimiInstallations().some((row) => row.nativeId === nativeId && row.ownership.kind === 'owned');
+      return owned
+        ? { kind: 'bounded', mode: 'exact-package', affectedNativeIds: [nativeId] }
+        : { kind: 'unavailable' };
+    }
+    default: {
+      const unreachable: never = KIMI_RETIRE_MECHANISM.kind;
+      return unreachable;
+    }
+  }
+}
+
+function kimiProjection(operation: CapabilityOperation): NativeProjectionData {
+  switch (operation) {
+    case 'update':
+      return { kind: 'unverified', reasonId: KIMI_UPDATE_MECHANISM.kind };
+    case 'retire':
+      return { kind: 'equivalent', proofId: 'kimi-native-remove' };
+    case 'install':
+    case 'disable':
+      return { kind: 'unverified', reasonId: 'kimi-operation-ungated' };
+    default: {
+      const unreachable: never = operation;
+      return unreachable;
+    }
+  }
+}
+
+function kimiSemantics(supported: ReadonlySet<PackageSemantic>): CapabilityEvidenceProfile['semantics'] {
+  return {
+    'ordinary-skills': statusFor('ordinary-skills', supported),
+    mcp: statusFor('mcp', supported),
+    hooks: statusFor('hooks', supported),
+    commands: statusFor('commands', supported),
+    agents: statusFor('agents', supported),
+    'model-invocation-control': statusFor('model-invocation-control', supported),
+    'user-invocation-control': statusFor('user-invocation-control', supported),
+    'auto-update-control': statusFor('auto-update-control', supported),
+    resources: statusFor('resources', supported),
+    'permissions-preprocessing': statusFor('permissions-preprocessing', supported),
+    retirement: statusFor('retirement', supported),
+    'retention-safety': statusFor('retention-safety', supported),
+    readback: statusFor('readback', supported),
+    rollback: statusFor('rollback', supported),
+    'activation-reload': statusFor('activation-reload', supported),
+    'reversible-disable': statusFor('reversible-disable', supported),
+  };
+}
+
+function statusFor(semantic: PackageSemantic, supported: ReadonlySet<PackageSemantic>): 'supported' | 'unsupported' {
+  return supported.has(semantic) ? 'supported' : 'unsupported';
+}
+
+function unexposed(phase: string): never {
+  throw new Error(`Kimi lifecycle ${phase} is not exposed through the automation route yet`);
+}
