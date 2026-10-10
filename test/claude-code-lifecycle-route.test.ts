@@ -375,7 +375,7 @@ describe('claude-code lifecycle route', () => {
       const registry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
         plugins: Record<string, Array<{ scope: string; installPath: string; version: string; gitCommitSha: string }>>;
       };
-      registry.plugins['other@market'] = [{
+      registry.plugins['other@elsewhere'] = [{
         scope: 'user',
         installPath: '/tmp/other',
         version: '0.1.0',
@@ -394,10 +394,16 @@ describe('claude-code lifecycle route', () => {
       const liveRegistry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
         plugins: Record<string, Array<{ version: string }>>;
       };
-      const sibling = liveRegistry.plugins['other@market']?.[0];
+      const sibling = liveRegistry.plugins['other@elsewhere']?.[0];
       if (sibling === undefined) throw new Error('sibling Claude registry row disappeared');
       sibling.version = '0.2.0';
       writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(liveRegistry)}\n`);
+      const markets = JSON.parse(readFileSync(join(root, 'plugins/known_marketplaces.json'), 'utf8')) as {
+        market: { autoUpdate?: boolean };
+        elsewhere?: { note?: string; autoUpdate?: boolean };
+      };
+      markets.elsewhere = { autoUpdate: false, note: 'kept' };
+      writeFileSync(join(root, 'plugins/known_marketplaces.json'), `${JSON.stringify(markets)}\n`);
 
       await host.rollback(installed.handle);
 
@@ -409,16 +415,22 @@ describe('claude-code lifecycle route', () => {
       const restoredRegistry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
         plugins: Record<string, Array<{ version: string }>>;
       };
+      const restoredMarkets = JSON.parse(readFileSync(join(root, 'plugins/known_marketplaces.json'), 'utf8')) as {
+        market: { autoUpdate?: boolean };
+        elsewhere?: { note?: string; autoUpdate?: boolean };
+      };
       expect(restoredSettings.theme).toBe('light');
       expect(restoredSettings.enabledPlugins['third@market']).toBe(true);
-      expect(restoredRegistry.plugins['other@market']?.[0]?.version).toBe('0.2.0');
+      expect(restoredRegistry.plugins['other@elsewhere']?.[0]?.version).toBe('0.2.0');
       expect(restoredRegistry.plugins['demo@market']).toBeUndefined();
       expect(marketplaceAutoUpdate(root)).toBe(true);
+      expect(restoredMarkets.elsewhere?.note).toBe('kept');
+      expect(restoredMarkets.elsewhere?.autoUpdate).toBe(false);
       expect(restoredSettings.extraKnownMarketplaces.market.autoUpdate).toBe(true);
     });
   });
 
-  test('leaves marketplace auto-update on when another plugin shares it', async () => {
+  test('gaps auto-update control when another plugin shares the marketplace', async () => {
     await withClaude(async (root) => {
       seedMarketplace(root, true);
       const registry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
@@ -432,9 +444,13 @@ describe('claude-code lifecycle route', () => {
       }];
       writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(registry)}\n`);
       const host = createClaudeCodeLifecycleHost();
-      await activate(host, updateSnapshot(root, 'shared-market', '1.2.0', '9'.repeat(40), 'install'));
+      const decision = await decideActivation(host, updateSnapshot(root, 'shared-market', '1.2.0', '9'.repeat(40), 'install'));
+      expect(decision.kind).toBe('capability-gap');
+      if (decision.kind !== 'capability-gap') throw new Error('expected an auto-update capability gap');
+      expect(decision.gaps.some((gap) => gap.capabilityId === 'auto-update-control' && gap.code === 'capability.unsupported')).toBe(true);
       expect(marketplaceAutoUpdate(root)).toBe(true);
       expect(settingsAutoUpdate(root)).toBe(true);
+      expect(existsSync(join(root, 'plugins/cache/market/demo'))).toBe(false);
     });
   });
 
@@ -488,7 +504,7 @@ function settingsAutoUpdate(root: string): boolean | undefined {
   return parsed.extraKnownMarketplaces.market.autoUpdate;
 }
 
-async function plan(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
+async function decideActivation(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
   const version = await host.probeVersion(claudeTarget);
   const observed = await host.observeTarget(claudeTarget);
   const pins = createResolvedLifecyclePins([]);
@@ -498,7 +514,7 @@ async function plan(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot,
     snapshot,
     pins,
   });
-  const decision = host.decideRoute({
+  return host.decideRoute({
     target: claudeTarget,
     operationId: snapshot.operationId,
     attemptId: snapshot.attemptId,
@@ -527,9 +543,14 @@ async function plan(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot,
     snapshot,
     pins,
   });
+}
+
+async function plan(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot, operation: 'install' | 'update' = 'install') {
+  const decision = await decideActivation(host, snapshot, operation);
   if (decision.kind !== 'selected' || decision.route !== 'managed') {
     throw new Error(`expected managed ${operation}, got ${decision.kind}`);
   }
+  const pins = createResolvedLifecyclePins([]);
   const staged = await host.stageActivation({ selection: decision, snapshot, pins });
   const directed = await host.applyLifecycleDirectives(staged);
   const pinned = await host.applyPins(directed);
