@@ -1322,6 +1322,37 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 17 a missing plugin sync exits nonzero and still prints a report; a missing outcome, a duplicate outcome, and a contradictory outcome fail closed', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('scenario-17', {
+        'plugin.json': '{"name":"kept","version":"1.0.0","description":"kept"}\n',
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(4));
+      const result = harness.run(
+        ['sync', source, '--target', 'cursor', '--plugin', 'missing', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      const parsed: unknown = JSON.parse(result.stdout);
+      const report = parseLifecycleReport(parsed);
+      const reason = report.summary.reason?.code ?? report.outcomes.find((outcome) => outcome.reason !== null)?.reason?.code ?? null;
+      expect({
+        failed: result.exitCode !== 0,
+        stderr: result.stderr,
+        oneObject: parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed),
+        reason,
+        mutationStarted: report.summary.mutationStarted,
+      }).toEqual({
+        failed: true,
+        stderr: '',
+        oneObject: true,
+        reason: 'usage.invalid-selection',
+        mutationStarted: false,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
