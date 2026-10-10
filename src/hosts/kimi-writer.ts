@@ -146,6 +146,20 @@ function readRegistry(path: string): Registry {
   return raw as Registry;
 }
 function restore(path: string, value: string | undefined): void { if (value === undefined) rmSync(path, { force: true }); else writeFileSync(path, value); }
+function restoreRegistryRow(registryFile: string, id: string, reference: string): void {
+  const rowFile = join(reference, 'registry.row.json');
+  const priorRow = existsSync(rowFile) ? parseJson(rowFile, 'Kimi registry row') : undefined;
+  if (priorRow !== undefined && priorRow.id !== id) throw new Error(`Kimi rollback row is not ${id}`);
+  const live = existsSync(registryFile) ? readRegistry(registryFile) : { version: 1 as const, plugins: [] };
+  const plugins = live.plugins.filter((row) => row.id !== id);
+  if (priorRow !== undefined) plugins.push(priorRow);
+  if (plugins.length === 0 && existsSync(join(reference, 'registry.absent'))) {
+    rmSync(registryFile, { force: true });
+    return;
+  }
+  if (!existsSync(registryFile) && plugins.length === 0) return;
+  writeFileSync(registryFile, JSON.stringify({ version: 1, plugins }));
+}
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
 function stagePlugin(source: string, stage: string, expectedName: string): void {
@@ -300,7 +314,15 @@ const KIMI_SCOPE = 'kimi:default';
 const KIMI_UPDATE_MECHANISM = { kind: 'interactive-marketplace-updater' } as const;
 const KIMI_RETIRE_MECHANISM = { kind: 'native-remove' } as const;
 const KIMI_RETIRE_SEMANTICS = new Set<PackageSemantic>(['retirement', 'retention-safety', 'readback', 'rollback', 'activation-reload']);
-const KIMI_INSTALL_SEMANTICS = new Set<PackageSemantic>(['readback', 'rollback', 'activation-reload', 'auto-update-control']);
+const KIMI_INSTALL_SEMANTICS = new Set<PackageSemantic>([
+  'ordinary-skills',
+  'mcp',
+  'commands',
+  'readback',
+  'rollback',
+  'activation-reload',
+  'auto-update-control',
+]);
 const KIMI_NEW_SESSION: ActivationTransitionObservation = { requirement: 'restart', status: 'effective' };
 const KIMI_NO_SESSION: ActivationTransitionObservation = { requirement: 'none', status: 'effective' };
 const KIMI_RETENTION: LifecycleReadbackData['retention'] = {
@@ -331,7 +353,11 @@ export const kimiLifecycle: LifecycleHostDefinition = {
       route: 'native',
       operationStatus: 'supported',
       semantics: kimiSemantics(KIMI_INSTALL_SEMANTICS),
-      evidence: ['docs/evidence/kimi-public-lifecycle-20260922.json', 'docs/hosts/kimi.md'],
+      evidence: [
+        'docs/evidence/kimi-native-loader-20260922.json',
+        'docs/evidence/kimi-public-lifecycle-20260922.json',
+        'docs/hosts/kimi.md',
+      ],
     }),
     createCapabilityEvidenceProfile({
       host: 'kimi',
@@ -405,8 +431,10 @@ export const kimiLifecycle: LifecycleHostDefinition = {
     const registryFile = join(pluginsDir(), 'installed.json');
     assertKimiManaged(projection.packageName, managed, registryFile);
     if (existsSync(managed)) cpSync(managed, join(rollbackReference, 'managed'), { recursive: true });
-    if (existsSync(registryFile)) writeFileSync(join(rollbackReference, 'registry.json'), readFileSync(registryFile, 'utf8'));
-    else writeFileSync(join(rollbackReference, 'registry.absent'), '');
+    const priorRow = existsSync(registryFile) ? readRegistry(registryFile).plugins.find((row) => row.id === projection.packageName) : undefined;
+    if (priorRow === undefined) {
+      if (!existsSync(registryFile)) writeFileSync(join(rollbackReference, 'registry.absent'), '');
+    } else writeFileSync(join(rollbackReference, 'registry.row.json'), JSON.stringify(priorRow));
     return {
       prior,
       expected: {
@@ -464,8 +492,7 @@ export const kimiLifecycle: LifecycleHostDefinition = {
     rmSync(managed, { recursive: true, force: true });
     const backup = join(reference, 'managed');
     if (existsSync(backup)) cpSync(backup, managed, { recursive: true });
-    if (existsSync(join(reference, 'registry.absent'))) rmSync(registryFile, { force: true });
-    else writeFileSync(registryFile, readFileSync(join(reference, 'registry.json'), 'utf8'));
+    restoreRegistryRow(registryFile, id, reference);
     return { receiptId: `kimi-rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
   },
   cleanup: async (reference) => {
