@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fingerprintTree } from '../src/fingerprint';
 import { hermesCommandCompanionId, hermesPluginDataNamespace } from '../src/hermes-identity';
+import { yamlParse, yamlStringify } from '../src/yaml';
 import { listHermesInstance } from '../src/hosts/hermes';
 import { hermesLifecycle } from '../src/hosts/hermes-writer';
 import type { SelectedRouteDecision } from '../src/lifecycle-host';
@@ -52,6 +53,7 @@ function freezePackage(sandbox: string, target: PersistedTargetIdentity, guide: 
   scopeId: string;
   nativeId: string;
   action: 'install' | 'update';
+  revision?: string;
 }) {
   const snapshotRoot = join(sandbox, 'snapshots', input.attemptId);
   const packageRoot = join(snapshotRoot, 'packages', PACKAGE);
@@ -83,7 +85,7 @@ function freezePackage(sandbox: string, target: PersistedTargetIdentity, guide: 
     packageName: PACKAGE,
     nativeId: input.nativeId,
     sourceType: 'local',
-    immutableRevision: REVISION,
+    immutableRevision: input.revision ?? REVISION,
     snapshotRoot,
     packageRoot,
     relativePackagePath: `packages/${PACKAGE}`,
@@ -103,6 +105,7 @@ async function activate(target: PersistedTargetIdentity, sandbox: string, guide:
   scopeId: string;
   nativeId: string;
   action: 'install' | 'update';
+  revision?: string;
 }) {
   const snapshot = freezePackage(sandbox, target, guide, input);
   const version = await hermesLifecycle.probeVersion(target);
@@ -185,6 +188,7 @@ describe('Hermes managed lifecycle route', () => {
       });
 
       expect(workInstall.decision.route).toBe('managed');
+      expect(workInstall.decision.detectedVersion).toBe('portable-surface');
       expect(workInstall.nativeProjection.kind).toBe('requires-managed');
       expect(workInstall.nativeProjection.kind === 'requires-managed' ? workInstall.nativeProjection.reasonId : undefined).toBe('pinned-sha');
       expect(personalInstall.decision.route).toBe('managed');
@@ -246,11 +250,23 @@ describe('Hermes managed lifecycle route', () => {
       scopeId: 'scope-work',
       nativeId: 'demo-plugin@work',
       action: 'update',
+      revision: 'local-revision-2',
     });
     expect(updated.receipt.changed).toBe(true);
     expect(readFileSync(join(packageDir, 'references/guide.md'), 'utf8')).toBe('version two\n');
+    expect(JSON.parse(readFileSync(join(packageDir, '.plgnz-install.json'), 'utf8')).sourceRevision).toBe('local-revision-2');
     expect(readFileSync(dataFile, 'utf8')).toBe('{"kept":true}\n');
     expect(existsSync(companionDir)).toBe(true);
+
+    const configPath = join(root, 'config.yaml');
+    const live = yamlParse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    live['model'] = 'sibling';
+    const plugins = live['plugins'] as Record<string, unknown>;
+    plugins['enabled'] = [...(plugins['enabled'] as string[]), 'other-plugin'];
+    const entries = plugins['entries'] as Record<string, unknown>;
+    entries['other-plugin'] = { settings: { value: 'sibling' } };
+    entries[PACKAGE] = { settings: { value: 'stolen' } };
+    writeFileSync(configPath, yamlStringify(live));
 
     await hermesLifecycle.rollback(updated.prepared.handle);
     const rolled = await hermesLifecycle.readback(updated.prepared.handle);
@@ -258,6 +274,15 @@ describe('Hermes managed lifecycle route', () => {
     expect(readFileSync(join(packageDir, 'references/guide.md'), 'utf8')).toBe('version one\n');
     expect(readFileSync(join(companionDir, '__init__.py'), 'utf8')).toContain('ctx.register_command');
     expect(readFileSync(dataFile, 'utf8')).toBe('{"kept":true}\n');
+    const restored = yamlParse(readFileSync(configPath, 'utf8')) as {
+      model?: string;
+      plugins?: { enabled?: string[]; entries?: Record<string, { settings?: { value?: string } }> };
+    };
+    expect(restored.model).toBe('sibling');
+    expect(restored.plugins?.enabled).toContain('other-plugin');
+    expect(restored.plugins?.enabled).toContain(PACKAGE);
+    expect(restored.plugins?.entries?.['other-plugin']?.settings?.value).toBe('sibling');
+    expect(restored.plugins?.entries?.[PACKAGE]?.settings?.value).toBe('keep');
     await hermesLifecycle.cleanup(updated.prepared.handle, 'verified-rollback');
 
     const repeated = await activate(target, sandbox, 'version one\n', {
@@ -350,5 +375,20 @@ describe('Hermes managed lifecycle route', () => {
     expect(readback.enablement).toBe('disabled');
     expect(readback.route).toBe('managed');
     await hermesLifecycle.cleanup(prepared.handle, 'verified-commit');
+  });
+
+  test('treats a Hermes config mapping as a portable surface and refuses a non-mapping', async () => {
+    const sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'plgnz-hermes-surface-')));
+    homes.push(sandbox);
+    const root = join(sandbox, 'work');
+    prepareHome(root);
+    const target = targetFor('work', root);
+    const detected = await hermesLifecycle.probeVersion(target);
+    expect(detected.kind).toBe('detected');
+    expect(detected.kind === 'detected' ? detected.version : '').toBe('portable-surface');
+    expect(detected.kind === 'detected' ? detected.probeId : '').toBe('hermes-portable-surface');
+    writeFileSync(join(root, 'config.yaml'), ':\n  :\n');
+    const refused = await hermesLifecycle.probeVersion(target);
+    expect(refused.kind).toBe('unparseable');
   });
 });
