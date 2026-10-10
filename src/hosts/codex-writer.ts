@@ -719,20 +719,50 @@ function restampNativeUpgrade(prepared: PreparedActivationMutation): void {
       writeFileSync(join(destination, OWNERSHIP), marker);
     }
   }
-  const staged = readOwnership(prepared.stagingRoot);
-  const source = staged?.source ?? prepared.handle.sourceLocator ?? prepared.handle.sourceRevision;
   for (const nativeId of prepared.handle.affectedNativeIds) {
     if (nativeId === prepared.handle.nativeId) continue;
     const path = codex.listInstalled().find((plugin) => plugin.id === nativeId)?.path;
     if (path === undefined || !existsSync(path)) continue;
     const existing = readOwnership(path);
     if (existing?.pluginId === nativeId) continue;
+    const prior = priorInstallMarker(prepared, nativeId);
+    const ownedPrior = prior?.pluginId === nativeId ? prior : null;
     assertManagedPath(codexHome(), path);
     writeFileSync(join(path, OWNERSHIP), JSON.stringify({
-      source,
+      source: ownedPrior?.source ?? prepared.handle.sourceLocator ?? prepared.handle.sourceRevision,
       pluginId: nativeId,
-      fingerprint: existing?.fingerprint ?? staged?.fingerprint ?? '',
+      fingerprint: ownedPrior?.fingerprint ?? '',
     }));
+  }
+}
+
+function priorInstallMarker(
+  prepared: PreparedActivationMutation,
+  nativeId: string,
+): { source: string; pluginId: string; fingerprint: string } | null {
+  const bundle = rollbackBundle(prepared.handle.attemptId, prepared.handle.operationId);
+  const manifestPath = join(bundle, 'manifest.json');
+  if (!existsSync(manifestPath)) return null;
+  const manifest = parseRollbackManifest(readFileSync(manifestPath, 'utf8'));
+  const install = manifest.installs.find((item) => item.nativeId === nativeId);
+  if (install === undefined || !install.existed) return null;
+  return readOwnership(join(bundle, 'cache', install.saved));
+}
+
+function projectionMatchesPackage(packageRoot: string, packageName: string): boolean {
+  const root = mkdtempSync(join(tmpdir(), 'plgnz-codex-identity-'));
+  const stage = join(root, 'stage');
+  try {
+    mkdirSync(stage);
+    projectPluginForCodex(packageRoot, stage);
+    const version = pluginVersion(stage);
+    if (!validVersionSegment(version)) return false;
+    ensureNativeManifest(stage, packageName, version);
+    return sameTree(packageRoot, stage);
+  } catch {
+    return false;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -1127,6 +1157,9 @@ function nativeProjection(request: NativeProjectionRequest): NativeProjectionDat
   const binding = catalogBinding(marketplace);
   const git = request.snapshot.nativeGit;
   if (binding.kind === 'sha-bound' && git !== undefined && git.resolvedRevision === binding.sha && git.locator === binding.source) {
+    if (!projectionMatchesPackage(request.snapshot.packageRoot, request.snapshot.packageName)) {
+      return { kind: 'requires-managed', reasonId: 'projection-not-identity' };
+    }
     return { kind: 'equivalent', proofId: `codex-marketplace:${binding.marketplace}:${binding.sha}` };
   }
   return { kind: 'requires-managed', reasonId: catalogRefusal(binding, git) };

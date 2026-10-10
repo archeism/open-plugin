@@ -432,21 +432,21 @@ if [ "$mode" = "drop-sibling" ]; then
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
-stage=$(find "$CODEX_HOME/.plgnz-lifecycle" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-copy_stage() {
+package="$CODEX_HOME/../source-snapshot/packages/demo-plugin"
+copy_package() {
   dest="$1"
   rm -rf "$dest"
   mkdir -p "$dest"
-  cp -a "$stage"/. "$dest"/
+  cp -a "$package"/. "$dest"/
   rm -f "$dest/.plgnz-install.json"
 }
 if [ "$mode" = "rewrite-inplace" ]; then
-  copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.0.0"
+  copy_package "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.0.0"
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
 if [ "$mode" = "rewrite-new" ]; then
-  copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.1.0"
+  copy_package "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.1.0"
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
@@ -540,7 +540,16 @@ function frozenSnapshot(home: string, version = '1.0.0', extras: Record<string, 
   const snapshotRoot = join(home, 'source-snapshot');
   const packageRoot = join(snapshotRoot, 'packages', 'demo-plugin');
   mkdirSync(packageRoot, { recursive: true });
-  writeFiles(packageRoot, { 'plugin.json': `{"name":"demo-plugin","version":"${version}"}\n`, ...extras });
+  writeFiles(packageRoot, {
+    'plugin.json': `{"name":"demo-plugin","version":"${version}"}\n`,
+    '.codex-plugin/plugin.json': JSON.stringify({
+      name: 'demo-plugin',
+      version,
+      description: 'Plugin demo-plugin',
+      skills: './skills/',
+    }),
+    ...extras,
+  });
   const packageFingerprint = fingerprintTree(packageRoot);
   const snapshot = createFrozenPackageSnapshot({
     operationId: 'update-demo-plugin',
