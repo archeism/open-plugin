@@ -37,9 +37,12 @@ user-invocation control, and permission/preprocessing semantics. Frontmatter
 aliases and a Codex `agents/openai.yaml` sidecar remain distinct declarations;
 malformed or contradictory policy is invalid input rather than a capability
 gap. Unknown detected versions have no optimistic fallback profile.
-The legacy writer bridge still supplies the catalog's pinned observed version;
-actual runtime version discovery belongs to the lifecycle host SPI and must use
-the same profile lookup before activation.
+The writer probes `dcode --version` before activation. `OPEN_PLUGIN_DCODE_BIN`
+is exclusive. Otherwise the probe uses `dcode` on `PATH`. The banner
+`deepagents-code 0.1.83` selects the Managed profile. A missing binary, an
+unparseable banner, or any other release stays unverified and does not
+activate, unless that exact release has its own Managed evidence profile.
+The catalog version is not a probe.
 
 Hooks and MCP declarations remain in the staged package unchanged; the writer
 does not translate or drop them, and the native inventory accepts root

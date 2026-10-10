@@ -1,11 +1,9 @@
-/** Transactional writer for dcode's recorded native plugin state. */
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
-import { dcode, dcodeEnablementFile, dcodeRegistryFile, dcodeRoot, dcodeStateDir } from './dcode';
-import { findConsumerProfile } from '../consumer-profiles';
+import { dcode, dcodeEnablementFile, dcodeRegistryFile, dcodeRoot, dcodeStateDir, probeDcodeVersion } from './dcode';
 import { requirePackageSemantics } from '../capability-evidence';
 import { inventoryPackageSemantics } from '../semantic-inventory';
 
@@ -33,11 +31,10 @@ export const dcodeWriter: HostWriter = {
     const stage = mkdtempSync(join(tmpdir(), '.plgnz-dcode-stage-'));
     try {
       const manifestVersion = stagePlugin(plugin.dir, stage, plugin.name);
-      const profile = findConsumerProfile('dcode');
-      if (profile === undefined) throw new Error('dcode consumer profile is missing');
+      const observation = probeDcodeVersion();
       requirePackageSemantics({
         host: 'dcode',
-        detectedVersion: profile.version === 'unverified' ? undefined : profile.version,
+        detectedVersion: observation.kind === 'detected' ? observation.version : undefined,
         sourceType: resolved.isGit ? 'git' : 'local',
         operation: rowsFor(plugins[id]).length === 0 ? 'install' : 'update',
         route: 'managed',
@@ -125,5 +122,4 @@ function sameTree(left: string, right: string): boolean { if (!existsSync(right)
 function assertNoSymlinks(dir: string): void { for (const entry of readdirSync(dir)) { const file = join(dir, entry), st = lstatSync(file); if (st.isSymbolicLink()) throw new Error(`dcode plugin contains symlink: ${file}`); if (st.isDirectory()) assertNoSymlinks(file); } }
 function assertIdentity(value: string, label: string): void { if (!/^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/.test(value)) throw new Error(`invalid dcode ${label}`); }
 function assertUnder(root: string, path: string): void { const absoluteRoot = resolve(root), absolutePath = resolve(path); if (absolutePath === absoluteRoot || !absolutePath.startsWith(`${absoluteRoot}/`)) throw new Error(`dcode path escapes managed cache: ${path}`); }
-/** Reject links in the native root or any component beneath it before a write. */
 function assertManagedPath(path: string): void { const root = resolve(dcodeRoot()), target = resolve(path); if (target !== root && !target.startsWith(`${root}/`)) throw new Error(`dcode path escapes native root: ${path}`); let current = root; if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error(`dcode native path contains symlink: ${current}`); const relative = target.slice(root.length).replace(/^\//, ''); for (const part of relative ? relative.split('/') : []) { current = join(current, part); if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error(`dcode native path contains symlink: ${current}`); } }

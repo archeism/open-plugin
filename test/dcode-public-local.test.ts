@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoRoot, writeFiles } from './util';
@@ -21,7 +21,10 @@ test('public dcode local add returns the removable native id and leaves foreign 
     const enablement = join(native, '.state', 'plugin_state.json');
     writeFileSync(registry, JSON.stringify({ version: 2, plugins: { 'foreign@local': [{ installPath: foreign, version: 'local' }] } }));
     writeFileSync(enablement, JSON.stringify({ version: 1, enabledPlugins: { 'foreign@local': true } }));
-    const env = { ...process.env, HOME: home, OPEN_PLUGIN_HOME: home, OPEN_PLUGIN_DCODE_ROOT: native };
+    const binary = join(root, 'dcode');
+    writeFileSync(binary, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'deepagents-code 0.1.83' 'deepagents (SDK) 0.7.23'; exit 0; fi\nexit 91\n`);
+    chmodSync(binary, 0o755);
+    const env = { ...process.env, HOME: home, OPEN_PLUGIN_HOME: home, OPEN_PLUGIN_DCODE_ROOT: native, OPEN_PLUGIN_DCODE_BIN: binary };
     const cli = (...args: string[]) => {
       const outputFlag = args[0] === 'list' ? '--json' : '--legacy-json';
       const result = spawnSync(process.execPath, [join(repoRoot, 'bin/plgnz.mjs'), ...args, outputFlag], { cwd: empty, env, encoding: 'utf8' });
