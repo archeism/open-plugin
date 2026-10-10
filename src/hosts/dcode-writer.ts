@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
-import { dcode, dcode0183ManagedProfile, dcodeEnablementFile, dcodeRegistryFile, dcodeRoot, dcodeStateDir, dcodeVersionProfile, probeDcodeVersion } from './dcode';
+import { dcode, dcodeEnablementFile, dcodeRegistryFile, dcodeRoot, dcodeStateDir, probeDcodeVersion } from './dcode';
 import { requirePackageSemantics } from '../capability-evidence';
 import { inventoryPackageSemantics } from '../semantic-inventory';
 
@@ -31,13 +31,13 @@ export const dcodeWriter: HostWriter = {
     const stage = mkdtempSync(join(tmpdir(), '.plgnz-dcode-stage-'));
     try {
       const manifestVersion = stagePlugin(plugin.dir, stage, plugin.name);
-      const profile = dcodeVersionProfile(probeDcodeVersion());
+      const observation = probeDcodeVersion();
       requirePackageSemantics({
         host: 'dcode',
-        detectedVersion: profile.version ?? undefined,
+        detectedVersion: observation.kind === 'detected' ? observation.version : undefined,
         sourceType: resolved.isGit ? 'git' : 'local',
         operation: rowsFor(plugins[id]).length === 0 ? 'install' : 'update',
-        route: dcode0183ManagedProfile.route,
+        route: 'managed',
         inventory: inventoryPackageSemantics({ ...plugin, dir: stage, version: manifestVersion ?? plugin.version }),
       });
       assertPriorRows(plugins[id], id, cache, resolved.sourceUri, opts?.adoptExisting === true, plugin.name, manifestVersion);

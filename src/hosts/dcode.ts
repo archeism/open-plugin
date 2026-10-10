@@ -8,49 +8,12 @@ declare const TextDecoder: any;
 
 export const dcodeTargetProfile = singleInstanceTargetProfile('dcode');
 
-export const dcode0183ManagedProfile = {
-  version: '0.1.83',
-  route: 'managed',
-  capabilities: {
-    lifecycle: 'supported',
-    commands: 'unsupported',
-    agents: 'unsupported',
-    'model-invocation': 'unsupported',
-    'user-invocation': 'unsupported',
-    'auto-update': 'supported',
-    readback: 'supported',
-    rollback: 'supported',
-  },
-} as const;
-
-export type Dcode0183ManagedProfile = typeof dcode0183ManagedProfile;
-
-export type DcodeVersionProfile =
-  | Dcode0183ManagedProfile
-  | { readonly route: 'unverified'; readonly version: string | null };
-
 export type DcodeVersionObservation =
   | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
   | { readonly kind: 'unknown' }
   | { readonly kind: 'unparseable' };
 
 const DCODE_VERSION_LINE = /^deepagents-code (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/;
-
-export function dcodeVersionProfile(observation: DcodeVersionObservation): DcodeVersionProfile {
-  switch (observation.kind) {
-    case 'detected':
-      return observation.version === dcode0183ManagedProfile.version
-        ? dcode0183ManagedProfile
-        : { route: 'unverified', version: observation.version };
-    case 'unknown':
-    case 'unparseable':
-      return { route: 'unverified', version: null };
-    default: {
-      const unreachable: never = observation;
-      return unreachable;
-    }
-  }
-}
 
 export function probeDcodeVersion(): DcodeVersionObservation {
   const binary = dcodeBinary();
