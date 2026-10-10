@@ -15,6 +15,7 @@ import type {
   DurableLifecycleOperation,
   LifecycleHostAdapter,
   LifecycleHostDefinition,
+  LifecycleMutationAction,
   LifecycleReadbackData,
   NativeProjectionData,
   NativeProjectionRequest,
@@ -687,20 +688,21 @@ export function claudeRouteEvidence(
 }
 
 function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpdateContract[]): LifecycleHostDefinition {
-  const detected = observeClaudeCodeVersion();
+  const version = claudeVersionObservation(observeClaudeCodeVersion());
+  const detectedVersion = version.kind === 'detected' ? version.version : undefined;
   return {
     id: 'claude-code',
-    evidenceProfiles: claudeEvidenceProfiles(detected.kind === 'detected' ? detected.version : undefined, contracts),
-    probeVersion: async () => claudeVersionObservation(),
+    evidenceProfiles: claudeEvidenceProfiles(detectedVersion, contracts),
+    probeVersion: async () => version,
     observeTarget: async (target) => ({ target, installations: observeClaudeInstallations() }),
     observeNativeMutationScope: async (request) => ({
       kind: 'bounded',
       mode: 'exact-package',
       affectedNativeIds: [request.nativeId],
     }),
-    observeNativeProjection: async (request) => nativeProjection(contracts, request),
+    observeNativeProjection: async (request) => nativeProjection(contracts, request, detectedVersion),
     revalidateTargetPrecondition: async (handle) => ({
-      version: claudeVersionObservation(),
+      version,
       targetObservationId: createTargetInventoryObservation('claude-code', {
         target: handle.target,
         installations: observeClaudeInstallations(),
@@ -725,8 +727,10 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
         fingerprint: projection.snapshot.packageFingerprint,
         scopeId: projection.scopeId,
       }));
-      writeFileSync(join(projection.stagingRoot, '.plgnz-lifecycle.json'), JSON.stringify({ autoUpdate: false, route: projection.route }));
-      return ['claude-code.auto-update', 'claude-code.ownership'];
+      writeFileSync(join(projection.stagingRoot, '.plgnz-lifecycle.json'), JSON.stringify({ route: projection.route }));
+      return disableMarketplaceAutoUpdate(projection.nativeId)
+        ? ['claude-code.auto-update', 'claude-code.ownership']
+        : ['claude-code.ownership'];
     },
     applyPins: async (projection) => {
       pinPluginMcpFiles(projection.stagingRoot, mcpCandidates());
@@ -743,7 +747,7 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
           presence: 'present' as const,
           enablement: 'enabled' as const,
           activation: 'active' as const,
-          transition: effectiveTransition(),
+          transition: sessionRestart(),
           installedFingerprint: projectedFingerprint,
           contentRoots: [{ label: 'plugin', path: installPath, fingerprint: projectedFingerprint }],
         },
@@ -755,13 +759,13 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
       prior: claudeReadback(activationIdentity(request.activation), 'none'),
       rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId),
       rollbackCoverageOperationIds: [...request.selection.affectedOperationIds],
-      transition: effectiveTransition(),
+      transition: sessionRestart(),
     }),
     captureRetirementPreparation: async (request) => ({
       prior: claudeReadback(activationIdentity(request.activation), 'none'),
       rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId),
       rollbackCoverageOperationIds: [...request.selection.affectedOperationIds],
-      transition: effectiveTransition(),
+      transition: settledTransition(),
     }),
     apply: async (prepared) => {
       if (prepared.handle.route === 'native') throw new Error('claude-code native update is not invoked without a sandbox command');
@@ -776,10 +780,13 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
       setEnabled(prepared.handle, false, `claude-retire-${prepared.handle.operationId}`);
       return { receiptId: `claude-retire-${prepared.handle.operationId}`, changed: existed };
     },
-    readback: async (handle) => claudeReadback(
-      handle,
-      handle.action === 'remove' || handle.action === 'retire-orphan' ? handle.route : 'none',
-    ),
+    readback: async (handle) => {
+      const observed = claudeReadback(
+        handle,
+        handle.action === 'remove' || handle.action === 'retire-orphan' ? handle.route : 'none',
+      );
+      return { ...observed, transition: readbackTransition(handle, observed) };
+    },
     rollback: async (handle) => restoreRollback(handle),
     cleanup: async (reference) => {
       rmSync(lifecyclePath('.plgnz-lifecycle', reference.attemptId, reference.operationId), { recursive: true, force: true });
@@ -792,9 +799,9 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
 function nativeProjection(
   contracts: readonly ClaudeNativeRemoteUpdateContract[],
   request: NativeProjectionRequest,
+  detectedVersion: string | undefined,
 ): NativeProjectionData {
-  const detected = observeClaudeCodeVersion();
-  const evidence = claudeRouteEvidence(contracts, routeFacts(request, detected.kind === 'detected' ? detected.version : undefined));
+  const evidence = claudeRouteEvidence(contracts, routeFacts(request, detectedVersion));
   switch (evidence.route) {
     case 'native':
       return { kind: 'equivalent', proofId: evidence.proofId };
@@ -843,8 +850,7 @@ function exactPinnedSnapshot(facts: ClaudeRouteFacts): boolean {
     && installed.locator === git.locator;
 }
 
-function claudeVersionObservation(): TargetVersionObservation {
-  const observed = observeClaudeCodeVersion();
+function claudeVersionObservation(observed: ReturnType<typeof observeClaudeCodeVersion>): TargetVersionObservation {
   if (observed.kind === 'detected') return { kind: 'detected', version: observed.version, probeId: observed.probeId };
   return { kind: observed.kind };
 }
@@ -890,8 +896,25 @@ function claudeProfile(
   });
 }
 
+const CLAUDE_PROJECTED_SEMANTICS = new Set<PackageSemantic>([
+  'ordinary-skills',
+  'mcp',
+  'commands',
+  'auto-update-control',
+  'resources',
+  'retirement',
+  'retention-safety',
+  'readback',
+  'rollback',
+  'activation-reload',
+  'reversible-disable',
+]);
+
 function claudeSemantics(): Record<PackageSemantic, CapabilityStatus> {
-  return Object.fromEntries(PACKAGE_SEMANTICS.map((semantic) => [semantic, 'supported'])) as Record<PackageSemantic, CapabilityStatus>;
+  return Object.fromEntries(PACKAGE_SEMANTICS.map((semantic) => [
+    semantic,
+    CLAUDE_PROJECTED_SEMANTICS.has(semantic) ? 'supported' : 'unsupported',
+  ])) as Record<PackageSemantic, CapabilityStatus>;
 }
 
 function observeClaudeInstallations(): TargetInstallationData[] {
@@ -956,8 +979,45 @@ function gitLocator(source: string): string | undefined {
   }
 }
 
-function effectiveTransition(): LifecycleReadbackData['transition'] {
+function sessionRestart(): LifecycleReadbackData['transition'] {
+  return { requirement: 'restart', status: 'effective' };
+}
+
+function settledTransition(): LifecycleReadbackData['transition'] {
   return { requirement: 'none', status: 'effective' };
+}
+
+function readbackTransition(
+  handle: DurableLifecycleOperation,
+  observed: LifecycleReadbackData,
+): LifecycleReadbackData['transition'] {
+  if (sameReadbackState(observed, handle.expected)) return handle.expected.transition;
+  if (sameReadbackState(observed, handle.prior)) return handle.prior.transition;
+  return unmatchedTransition(handle.action);
+}
+
+function unmatchedTransition(action: LifecycleMutationAction): LifecycleReadbackData['transition'] {
+  switch (action) {
+    case 'install':
+    case 'update':
+    case 'route-migrate':
+    case 'disable-nonconforming':
+      return sessionRestart();
+    case 'remove':
+    case 'retire-orphan':
+      return settledTransition();
+    default: {
+      const unreachable: never = action;
+      return unreachable;
+    }
+  }
+}
+
+function sameReadbackState(observed: LifecycleReadbackData, target: LifecycleReadbackData): boolean {
+  return observed.presence === target.presence
+    && observed.enablement === target.enablement
+    && observed.activation === target.activation
+    && observed.installedFingerprint === target.installedFingerprint;
 }
 
 function activationIdentity(activation: {
@@ -986,7 +1046,7 @@ function claudeReadback(
       presence: 'absent',
       enablement: 'disabled',
       activation: 'inactive',
-      transition: effectiveTransition(),
+      transition: settledTransition(),
       installedFingerprint: null,
       contentRoots: [],
       retention,
@@ -1000,7 +1060,7 @@ function claudeReadback(
     presence: 'present',
     enablement: enabled ? 'enabled' : 'disabled',
     activation: enabled ? 'active' : 'inactive',
-    transition: effectiveTransition(),
+    transition: settledTransition(),
     installedFingerprint: digest,
     contentRoots: [{ label: 'plugin', path: installPath, fingerprint: digest }],
     retention,
@@ -1140,14 +1200,19 @@ function restoreRollback(handle: DurableLifecycleOperation): { receiptId: string
   const reference = handle.rollbackReference;
   const registryFile = join(pluginsDir(), 'installed_plugins.json');
   const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const appliedSlot = cacheSlot(handle.nativeId, slotVersion(handle.packageVersion, handle.sourceRevision));
   const savedPath = join(reference, 'install-path.txt');
-  const installPath = existsSync(savedPath)
-    ? readFileSync(savedPath, 'utf8')
-    : recordedInstallPath(handle.nativeId) ?? cacheSlot(handle.nativeId, slotVersion(handle.packageVersion, handle.sourceRevision));
+  const previousSlot = existsSync(savedPath) ? readFileSync(savedPath, 'utf8') : undefined;
+  if (previousSlot !== undefined && resolve(previousSlot) !== appliedSlot && !existsSync(appliedSlot)) {
+    throw new Error(`claude-code rollback cannot remove the updated cache slot: ${appliedSlot}`);
+  }
   const beforeRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
-  const beforeInstall = existsSync(installPath);
+  const beforeApplied = existsSync(appliedSlot) ? fingerprintTree(appliedSlot) : null;
+  const beforePrevious = previousSlot !== undefined && existsSync(previousSlot) ? fingerprintTree(previousSlot) : null;
   restoreOptional(registryFile, join(reference, 'registry.json'));
   restoreOptional(settingsFile, join(reference, 'settings.json'));
+  if (previousSlot !== undefined && resolve(previousSlot) !== appliedSlot) rmSync(appliedSlot, { recursive: true, force: true });
+  const installPath = previousSlot ?? recordedInstallPath(handle.nativeId) ?? appliedSlot;
   const backup = join(reference, 'install');
   rmSync(installPath, { recursive: true, force: true });
   if (existsSync(backup)) {
@@ -1155,8 +1220,45 @@ function restoreRollback(handle: DurableLifecycleOperation): { receiptId: string
     cpSync(backup, installPath, { recursive: true });
   }
   const afterRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
+  const afterApplied = existsSync(appliedSlot) ? fingerprintTree(appliedSlot) : null;
+  const afterPrevious = previousSlot !== undefined && existsSync(previousSlot) ? fingerprintTree(previousSlot) : null;
   return {
     receiptId: `claude-rollback-${handle.operationId}`,
-    changed: beforeRegistry !== afterRegistry || beforeInstall !== existsSync(installPath),
+    changed: beforeRegistry !== afterRegistry || beforeApplied !== afterApplied || beforePrevious !== afterPrevious,
   };
+}
+
+function disableMarketplaceAutoUpdate(nativeId: string): boolean {
+  const at = nativeId.indexOf('@');
+  if (at === -1) return false;
+  const marketplace = nativeId.slice(at + 1);
+  if (marketplace.length === 0) return false;
+  let wrote = false;
+  const marketplacesFile = join(pluginsDir(), 'known_marketplaces.json');
+  const marketplaces = readMarketplaces(marketplacesFile);
+  const current = marketplaces[marketplace];
+  if (typeof current === 'object' && current !== null && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>;
+    if (record['autoUpdate'] !== false) {
+      writeMarketplaces(marketplacesFile, { ...marketplaces, [marketplace]: { ...record, autoUpdate: false } });
+    }
+    wrote = true;
+  }
+  const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const settings = readSettings(settingsFile);
+  const extra = settings['extraKnownMarketplaces'];
+  if (typeof extra === 'object' && extra !== null && !Array.isArray(extra)) {
+    const entry = (extra as Record<string, unknown>)[marketplace];
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const record = entry as Record<string, unknown>;
+      if (record['autoUpdate'] !== false) {
+        writeSettings(settingsFile, {
+          ...settings,
+          extraKnownMarketplaces: { ...extra as Record<string, unknown>, [marketplace]: { ...record, autoUpdate: false } },
+        });
+      }
+      wrote = true;
+    }
+  }
+  return wrote;
 }

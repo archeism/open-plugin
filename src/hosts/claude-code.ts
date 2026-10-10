@@ -15,8 +15,8 @@
  * also writes a spec `mcp.json`; both are read, identical entries deduped —
  * spec §7.2.1 fixes the spec path as `mcp.json`).
  */
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { claudeCodeRoot, homeRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
@@ -55,8 +55,8 @@ export type ClaudeCodeVersionObservation =
 export function observeClaudeCodeVersion(
   env: Record<string, string | undefined> = process.env,
 ): ClaudeCodeVersionObservation {
-  const binary = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
-  if (!binary || !existsSync(binary)) return { kind: 'unknown' };
+  const binary = claudeBinary(env);
+  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
   try {
     const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
     if (result.exitCode !== 0) return { kind: 'unparseable' };
@@ -67,6 +67,24 @@ export function observeClaudeCodeVersion(
   } catch {
     return { kind: 'unknown' };
   }
+}
+
+function claudeBinary(env: Record<string, string | undefined>): string | undefined {
+  const explicit = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
+  if (explicit !== undefined) return explicit;
+  const pathEnv = env['PATH'];
+  if (pathEnv === undefined) return undefined;
+  for (const dir of pathEnv.split(delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, 'claude');
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
