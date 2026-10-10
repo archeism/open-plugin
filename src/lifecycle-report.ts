@@ -375,25 +375,26 @@ function assertOutcome(
     throw contradiction(`preflight refusal '${outcome['operationId']}' cannot claim a terminal resource or activation state`);
   }
   const containment = outcome['action'] === 'retain-prior' || outcome['action'] === 'disable-nonconforming';
+  const appliedDisablement = outcome['action'] === 'disable-nonconforming' && outcome['changed'] === true;
   if (containment) {
     const expectedResourceState = 'retained';
     const expectedActivationState = outcome['action'] === 'retain-prior'
       ? 'retained-prior'
-      : dryRun ? 'active-nonconforming' : 'inactive';
+      : appliedDisablement ? 'inactive' : 'active-nonconforming';
     if (outcome['result'] !== 'failed' || outcome['resourceState'] !== expectedResourceState || outcome['activationState'] !== expectedActivationState) {
       throw contradiction(`containment outcome '${outcome['operationId']}' must fail the desired operation while reporting its retained terminal state`);
     }
   }
-  if (outcome['action'] === 'disable-nonconforming' && outcome['changed'] !== !dryRun) {
-    throw contradiction(`disable-nonconforming outcome '${outcome['operationId']}' must truthfully report its containment mutation`);
+  if (appliedDisablement && dryRun) {
+    throw contradiction(`disable-nonconforming outcome '${outcome['operationId']}' cannot report a containment mutation on a dry run`);
   }
   if (isObject(reason) && reason['category'] === 'capability') {
     if (outcome['action'] !== 'not-attempted' && outcome['action'] !== 'retain-prior' && outcome['action'] !== 'disable-nonconforming') {
       throw contradiction(`capability outcome '${outcome['operationId']}' must use an explicit refusal or containment action`);
     }
     if (outcome['action'] === 'disable-nonconforming') {
-      if (outcome['changed'] !== !dryRun) {
-        throw contradiction(`capability disablement '${outcome['operationId']}' must truthfully describe whether containment was applied`);
+      if (appliedDisablement && dryRun) {
+        throw contradiction(`capability disablement '${outcome['operationId']}' cannot describe an applied containment mutation on a dry run`);
       }
     } else if (outcome['changed'] === true || outcome['resourceState'] === 'potentially-changed') {
       throw contradiction(`capability refusal '${outcome['operationId']}' cannot describe work that changed or may have changed`);
@@ -447,7 +448,8 @@ function assertSummary(summary: Record<string, unknown>, outcomes: readonly Reco
     (outcome['reason'] as Record<string, unknown>)['code'] === 'recovery.required');
   const readbackOutcomes = outcomes.filter((outcome) =>
     isObject(outcome['reason']) && outcome['reason']['category'] === 'readback');
-  const appliedDisablements = dryRun ? [] : outcomes.filter((outcome) => outcome['action'] === 'disable-nonconforming');
+  const appliedDisablements = outcomes.filter((outcome) =>
+    outcome['action'] === 'disable-nonconforming' && outcome['changed'] === true);
   const pairFailureCategories = new Set(outcomes
     .filter((outcome) => outcome['result'] !== 'succeeded')
     .map((outcome) => (outcome['reason'] as Record<string, unknown>)['category']));

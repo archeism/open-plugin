@@ -359,7 +359,7 @@ async function planSync(
       scope: item.scope,
       selectorMode: item.entry.selectors === undefined ? 'all' : 'explicit',
       desired: desiredGeneration(existing, item.frozen.snapshot.revision, item.frozen.snapshot.fingerprint, packages, validatedAt),
-      prune: blocks ? 'blocked' : 'planned',
+      prune: blocks || retirements.operations.some((row) => row.operation.action !== 'retire-orphan') ? 'blocked' : 'planned',
     },
     operations: [...classified.map((row) => row.operation), ...retirements.operations],
   };
@@ -445,7 +445,15 @@ async function planOmissions(
         `package '${activation.nativeId}' on ${item.entry.target.kind}/${item.entry.target.instance} is owned by scope '${installation.ownership.scopeId}'`,
       ));
     }
-    if (!hostRevalidated(installation, item.scope.id) || item.host === null || item.observation === null) continue;
+    if (!hostRevalidated(installation, item.scope.id) || item.host === null || item.observation === null) {
+      operations.push(notAttemptedRetirement(
+        operationIdentity('retirement', item.scope.id, activation.packageId, activation.nativeId, activation.sourceRevision ?? 'unrecorded'),
+        item.scope,
+        activation,
+        `ownership of '${activation.packageId}' was not revalidated`,
+      ));
+      continue;
+    }
     const retired = await selectRetirement(item.host, item.observation, item.scope, activation, attemptId, null);
     if (retired.kind === 'defect') return retired;
     operations.push(retired.operation);
@@ -491,7 +499,12 @@ async function planRetire(
   }
   return {
     kind: 'planned',
-    scope: { scope: item.scope, selectorMode: 'retired', desired: null, prune: operations.some((row) => row.operation.action === 'retire-orphan') ? 'planned' : 'blocked' },
+    scope: {
+      scope: item.scope,
+      selectorMode: 'retired',
+      desired: null,
+      prune: operations.length > 0 && operations.every((row) => row.operation.action === 'retire-orphan') ? 'planned' : 'blocked',
+    },
     operations,
   };
 }
@@ -740,7 +753,7 @@ function frozenPlan(
     seen.add(id);
     snapshots.push({ id, reference: item.frozen.snapshot });
   }
-  const outcomes = operations.map((row) => outcomeFor(row, input.dryRun));
+  const outcomes = operations.map((row) => outcomeFor(row));
   const failed = outcomes.filter((outcome) => outcome.result !== 'succeeded');
   const converged = failed.length === 0;
   const failureCategory = converged ? null : failed[0]?.reason?.category ?? 'internal';
@@ -763,7 +776,7 @@ function frozenPlan(
   return { kind: 'frozen', requestedDryRun: input.dryRun, attemptId, report, scopes, operations };
 }
 
-function outcomeFor(row: FrozenOperation, dryRun: boolean): LifecycleReport['outcomes'][number] {
+function outcomeFor(row: FrozenOperation): LifecycleReport['outcomes'][number] {
   const operation = row.operation;
   switch (operation.action) {
     case 'not-attempted':
@@ -775,8 +788,8 @@ function outcomeFor(row: FrozenOperation, dryRun: boolean): LifecycleReport['out
         ...operation,
         result: 'failed',
         resourceState: 'retained',
-        activationState: dryRun ? 'active-nonconforming' : 'inactive',
-        changed: !dryRun,
+        activationState: 'active-nonconforming',
+        changed: false,
         reason: row.reason,
       };
     case 'retire-orphan':

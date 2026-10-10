@@ -226,6 +226,47 @@ describe('lifecycle planner', () => {
     });
   });
 
+  test('a live disable-nonconforming plan describes containment and does not throw', async () => {
+    const root = temp('disable-live');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const beta = writePlugin(join(root, 'sources'), 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['disable']);
+    const cursor = boundHost('cursor', join(root, 'cursor'), ['install', 'update']);
+    const scopeId = createDeploymentScopeIdentity({ kind: 'local', locator: alpha }, { kind: 'codex', instance: 'default' }).id;
+    codex.fake.seedActivation({ nativeId: 'alpha', scopeId, packageName: 'alpha', sourceType: 'local', sourceLocator: null });
+    await withHome(home, async () => {
+      writeAuthoritative(alpha, 'codex', 'alpha', '.', [
+        ownedActivation({ scopeId, packageId: 'alpha', activationState: 'nonconforming', readbackState: 'unverified' }),
+      ]);
+      const before = readFileSync(stateFile(), 'utf8');
+      const codexBefore = codex.fake.hostMutationState();
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex'), syncEntry(beta, 'cursor')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner, cursor.planner],
+      }));
+      expect(plan.requestedDryRun).toBe(false);
+      expect(actionOf(plan, 'alpha')).toBe('disable-nonconforming');
+      expect(journalOf(plan, 'alpha')).toEqual({ kind: 'required', action: 'disable-nonconforming', mutation: true, readback: true });
+      const contained = plan.report.outcomes.find((row) => row.package === 'alpha');
+      expect(contained?.result).toBe('failed');
+      expect(contained?.resourceState).toBe('retained');
+      expect(contained?.activationState).toBe('active-nonconforming');
+      expect(contained?.changed).toBe(false);
+      expect(plan.report.command.dryRun).toBe(false);
+      expect(plan.report.summary.mutationStarted).toBe(false);
+      expect(plan.report.summary.changed).toBe(false);
+      expect(plan.report.summary.terminalPhase).toBe('preflight');
+      expect(plan.report.plan).toEqual(plan.operations.map((row) => row.operation));
+      expect(readFileSync(stateFile(), 'utf8')).toBe(before);
+      expect(codex.fake.hostMutationState()).toBe(codexBefore);
+      expect(codex.fake.events.some(mutatingEvent)).toBe(false);
+    });
+  });
+
   test('explicit selectors omit unselected siblings and an unfiltered sync enrolls every sibling', async () => {
     const root = temp('select');
     const home = join(root, 'home');
@@ -390,6 +431,32 @@ describe('lifecycle planner', () => {
     });
   });
 
+  test('an omission without host revalidation is a refusal row and blocks prune', async () => {
+    const root = temp('omission-refusal');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const host = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+    const scopeId = createDeploymentScopeIdentity({ kind: 'local', locator: alpha }, { kind: 'codex', instance: 'default' }).id;
+    await withHome(home, async () => {
+      writeAuthoritative(alpha, 'codex', 'alpha', '.', [
+        ownedActivation({ scopeId, packageId: 'stale', sourceRelativeDir: 'stale' }),
+      ]);
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [host.planner],
+      }));
+      expect(actionOf(plan, 'alpha')).toBe('install');
+      expect(actionOf(plan, 'stale')).toBe('not-attempted');
+      expect(plan.operations.find((row) => row.operation.package === 'stale')?.operation.coverage).toBe('retirement');
+      expect(plan.operations.some((row) => row.operation.action === 'retire-orphan')).toBe(false);
+      expect(plan.scopes[0]?.prune).toBe('blocked');
+      expect(reasonOf(plan, 'stale')?.diagnostic).toBe("ownership of 'stale' was not revalidated");
+    });
+  });
+
   test('scope identity includes the target instance', async () => {
     const root = temp('instance');
     const home = join(root, 'home');
@@ -493,6 +560,31 @@ describe('lifecycle planner', () => {
       expect(retarget.report.plan).toEqual([]);
       expect(readFileSync(stateFile(), 'utf8')).toBe(before);
       expect(host.fake.hostMutationState()).toBe(hostBefore);
+    });
+  });
+
+  test('retire-source plans prune only when every activation is retire-orphan', async () => {
+    const root = temp('retire-mixed');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const host = boundHost('codex', join(root, 'codex'), ['retire']);
+    const scopeId = createDeploymentScopeIdentity({ kind: 'local', locator: alpha }, { kind: 'codex', instance: 'default' }).id;
+    const installed = host.fake.seedActivation({ nativeId: 'alpha', scopeId, packageName: 'alpha', sourceType: 'local', sourceLocator: null });
+    await withHome(home, async () => {
+      writeAuthoritative(alpha, 'codex', 'alpha', '.', [
+        ownedActivation({ scopeId, packageId: 'alpha', installedFingerprint: installed, sourceRevision: 'recorded-local-revision' }),
+        ownedActivation({ scopeId, packageId: 'beta', sourceRelativeDir: 'beta', sourceRevision: 'recorded-local-revision' }),
+      ]);
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([{ operation: 'retire-source', scopeId, target: { kind: 'codex', instance: 'default' } }]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [host.planner],
+      }));
+      expect(actionOf(plan, 'alpha')).toBe('retire-orphan');
+      expect(actionOf(plan, 'beta')).toBe('not-attempted');
+      expect(plan.scopes[0]?.prune).toBe('blocked');
     });
   });
 });
