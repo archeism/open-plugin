@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,10 +17,29 @@ function incoming(body = 'ordinary skill\n'): { plugin: PluginSource; resolved: 
   const plugin: PluginSource = { dir, name: 'addy', marketplace: 'personal', contentFingerprint: body };
   return { plugin, resolved: { sourceUri: root, sha: '0.1.0', isGit: false, plugins: [plugin] } };
 }
+const MANAGED_DCODE = `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'deepagents-code 0.1.83' 'deepagents (SDK) 0.7.23'
+  exit 0
+fi
+exit 91
+`;
 async function isolated(fn: (root: string) => Promise<void>): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), 'plgnz-dcode-root-')); const old = process.env['OPEN_PLUGIN_DCODE_ROOT'];
+  const root = mkdtempSync(join(tmpdir(), 'plgnz-dcode-root-'));
+  const binary = join(root, 'dcode');
+  writeFileSync(binary, MANAGED_DCODE);
+  chmodSync(binary, 0o755);
+  const oldRoot = process.env['OPEN_PLUGIN_DCODE_ROOT'];
+  const oldBin = process.env['OPEN_PLUGIN_DCODE_BIN'];
   process.env['OPEN_PLUGIN_DCODE_ROOT'] = root;
-  try { await fn(root); } finally { if (old === undefined) delete process.env['OPEN_PLUGIN_DCODE_ROOT']; else process.env['OPEN_PLUGIN_DCODE_ROOT'] = old; rmSync(root, { recursive: true, force: true }); }
+  process.env['OPEN_PLUGIN_DCODE_BIN'] = binary;
+  try { await fn(root); } finally {
+    if (oldRoot === undefined) delete process.env['OPEN_PLUGIN_DCODE_ROOT'];
+    else process.env['OPEN_PLUGIN_DCODE_ROOT'] = oldRoot;
+    if (oldBin === undefined) delete process.env['OPEN_PLUGIN_DCODE_BIN'];
+    else process.env['OPEN_PLUGIN_DCODE_BIN'] = oldBin;
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 async function failed(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected failure'); }
 const registry = (root: string) => join(root, '.state', 'installed_plugins.json');

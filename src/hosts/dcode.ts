@@ -5,13 +5,101 @@
  * supported native state is `<DEEPAGENTS_HOME>/.state/{installed_plugins,
  * plugin_state}.json`; commands and invocation gating are deliberately not
  * inferred from the loader.
+ *
+ * `dcode0183ManagedProfile` is the only proven Managed release. A live
+ * `dcode --version` probe selects it. Any other version stays unverified
+ * until its own evidence profile exists.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
+import { spawnSync, which } from '../runtime';
 import { singleInstanceTargetProfile } from '../target-profile';
 
 export const dcodeTargetProfile = singleInstanceTargetProfile('dcode');
+
+export const dcode0183ManagedProfile = {
+  version: '0.1.83',
+  route: 'managed',
+  capabilities: {
+    lifecycle: 'supported',
+    commands: 'unsupported',
+    agents: 'unsupported',
+    'model-invocation': 'unsupported',
+    'user-invocation': 'unsupported',
+    'auto-update': 'supported',
+    readback: 'supported',
+    rollback: 'supported',
+  },
+} as const;
+
+export type Dcode0183ManagedProfile = typeof dcode0183ManagedProfile;
+
+export type DcodeVersionProfile =
+  | Dcode0183ManagedProfile
+  | { readonly route: 'unverified'; readonly version: string | null };
+
+export type DcodeVersionObservation =
+  | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'unparseable' };
+
+const DCODE_VERSION_LINE = /^deepagents-code (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/;
+
+export function dcodeVersionProfile(observation: DcodeVersionObservation): DcodeVersionProfile {
+  switch (observation.kind) {
+    case 'detected':
+      return observation.version === dcode0183ManagedProfile.version
+        ? dcode0183ManagedProfile
+        : { route: 'unverified', version: observation.version };
+    case 'unknown':
+    case 'unparseable':
+      return { route: 'unverified', version: null };
+    default: {
+      const unreachable: never = observation;
+      return unreachable;
+    }
+  }
+}
+
+export function probeDcodeVersion(): DcodeVersionObservation {
+  const binary = dcodeBinary();
+  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
+  let stdout = '';
+  try {
+    const result = spawnSync([binary, '--version'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: dcodeProbeEnv(),
+      timeout: 10_000,
+    });
+    if (result.exitCode !== 0) return { kind: 'unparseable' };
+    stdout = Buffer.from(result.stdout).toString('utf8');
+  } catch {
+    return { kind: 'unparseable' };
+  }
+  const line = stdout.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.length > 0);
+  const version = line === undefined ? undefined : DCODE_VERSION_LINE.exec(line)?.[1];
+  if (version === undefined) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `dcode:${version}` };
+}
+
+function dcodeBinary(): string | undefined {
+  const override = process.env['OPEN_PLUGIN_DCODE_BIN'];
+  if (override !== undefined && override.length > 0) return override;
+  return which('dcode') ?? undefined;
+}
+
+function dcodeProbeEnv(): Record<string, string | undefined> {
+  const isolatedHome = process.env['OPEN_PLUGIN_HOME'];
+  const explicitRoot = process.env['OPEN_PLUGIN_DCODE_ROOT'];
+  const home = isolatedHome !== undefined && isolatedHome.length > 0
+    ? isolatedHome
+    : explicitRoot !== undefined && explicitRoot.length > 0
+      ? dcodeRoot()
+      : process.env['HOME'];
+  return { ...process.env, HOME: home, DEEPAGENTS_HOME: dcodeRoot() };
+}
 
 export function dcodeRoot(): string {
   const explicit = process.env['OPEN_PLUGIN_DCODE_ROOT'];
