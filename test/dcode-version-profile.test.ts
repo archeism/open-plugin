@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { dcodeWriter } from '../src/hosts/dcode-writer';
@@ -60,7 +60,7 @@ async function failed(run: () => Promise<unknown>): Promise<Error> {
 }
 
 const registry = (root: string) => join(root, '.state', 'installed_plugins.json');
-const copy = (root: string) => join(root, 'plugins/cache/personal/addy/0.1.0');
+const managedRoot = (root: string) => join(root, 'plugins/cache/plgnz');
 
 describe('dcode version profile', () => {
   test('keeps an unknown dcode version unverified and admits 0.1.83 only as Managed with typed gaps', async () => {
@@ -86,7 +86,7 @@ exit 91
         ]);
         expect(error.message.includes('0.1.83')).toBe(false);
         expect(existsSync(registry(root))).toBe(false);
-        expect(existsSync(copy(root))).toBe(false);
+        expect(existsSync(managedRoot(root))).toBe(false);
       });
     }
 
@@ -103,14 +103,17 @@ exit 91
         { capabilityId: 'profile', code: 'capability.unverified', evidenceId: null },
       ]);
       expect(existsSync(registry(root))).toBe(false);
-      expect(existsSync(copy(root))).toBe(false);
+      expect(existsSync(managedRoot(root))).toBe(false);
     });
 
     await withBinary(MANAGED_BANNER, async (root) => {
       const ordinary = incoming();
       await dcodeWriter.add(ordinary.plugin, ordinary.resolved);
-      expect(existsSync(join(copy(root), 'skills/a/SKILL.md'))).toBe(true);
-      expect(existsSync(registry(root))).toBe(true);
+      const recorded = JSON.parse(readFileSync(registry(root), 'utf8')) as { plugins: { 'addy@personal': Array<{ installPath: string; version: string }> } };
+      const installed = recorded.plugins['addy@personal'][0]!;
+      expect(installed.version).toBe('0.1.0');
+      expect(installed.installPath.startsWith(`${managedRoot(root)}/`)).toBe(true);
+      expect(readFileSync(join(installed.installPath, 'skills/a/SKILL.md'), 'utf8')).toContain('ordinary skill');
     });
 
     await withBinary(MANAGED_BANNER, async (root) => {
@@ -130,7 +133,7 @@ exit 91
         ['user-invocation-control', 'capability.unsupported'],
       ]);
       expect(existsSync(registry(root))).toBe(false);
-      expect(existsSync(copy(root))).toBe(false);
+      expect(existsSync(managedRoot(root))).toBe(false);
     });
   });
 });
