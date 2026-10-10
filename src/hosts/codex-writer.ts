@@ -661,11 +661,11 @@ function applyNativeMarketplaceUpgrade(prepared: PreparedActivationMutation): Mu
   const stdout = decodeBytes(result.stdout);
   const stderr = decodeBytes(result.stderr).trim();
   const parsed = parseUpgradeJson(stdout);
-  const after = fingerprintAffected(prepared.handle.affectedNativeIds);
+  const rewritten = fingerprintAffected(prepared.handle.affectedNativeIds);
   const errors = parsed?.errors ?? [];
   const success = result.exitCode === 0 && parsed !== null && errors.length === 0;
   if (!success) {
-    const changed = prepared.handle.affectedNativeIds.filter((nativeId) => before.get(nativeId) !== after.get(nativeId));
+    const changed = prepared.handle.affectedNativeIds.filter((nativeId) => before.get(nativeId) !== rewritten.get(nativeId));
     if (changed.length > 0 || errors.length > 0) {
       const unchanged = prepared.handle.affectedNativeIds.filter((nativeId) => !changed.includes(nativeId));
       const detail = errors.length > 0 ? errors.map((error) => error.message).join('; ') : stderr;
@@ -673,6 +673,8 @@ function applyNativeMarketplaceUpgrade(prepared: PreparedActivationMutation): Mu
     }
     throw new Error(`codex marketplace upgrade stderr-only failure: ${stderr}`);
   }
+  restampNativeUpgrade(prepared);
+  const after = fingerprintAffected(prepared.handle.affectedNativeIds);
   const missed = prepared.handle.affectedNativeIds.filter((nativeId) => before.get(nativeId) !== null && after.get(nativeId) === null);
   if (missed.length > 0) throw new Error(`codex marketplace upgrade readback missed ${missed.join(', ')}`);
   return {
@@ -688,6 +690,35 @@ async function retireCodex(prepared: PreparedRetirementMutation): Promise<Mutati
     receiptId: `retire:${prepared.handle.attemptId}:${prepared.handle.operationId}`,
     changed: before !== cacheFingerprint(prepared.handle.nativeId),
   };
+}
+
+function restampNativeUpgrade(prepared: PreparedActivationMutation): void {
+  const markerPath = join(prepared.stagingRoot, OWNERSHIP);
+  if (!existsSync(markerPath)) return;
+  const marker = readFileSync(markerPath);
+  const version = pluginVersion(prepared.stagingRoot);
+  if (validVersionSegment(version)) {
+    const destination = cacheDestination(prepared.handle.nativeId, version);
+    if (existsSync(destination) && statSync(destination).isDirectory()) {
+      assertManagedPath(codexHome(), destination);
+      writeFileSync(join(destination, OWNERSHIP), marker);
+    }
+  }
+  const staged = readOwnership(prepared.stagingRoot);
+  const source = staged?.source ?? prepared.handle.sourceLocator ?? prepared.handle.sourceRevision;
+  for (const nativeId of prepared.handle.affectedNativeIds) {
+    if (nativeId === prepared.handle.nativeId) continue;
+    const path = codex.listInstalled().find((plugin) => plugin.id === nativeId)?.path;
+    if (path === undefined || !existsSync(path)) continue;
+    const existing = readOwnership(path);
+    if (existing?.pluginId === nativeId) continue;
+    assertManagedPath(codexHome(), path);
+    writeFileSync(join(path, OWNERSHIP), JSON.stringify({
+      source,
+      pluginId: nativeId,
+      fingerprint: existing?.fingerprint ?? staged?.fingerprint ?? '',
+    }));
+  }
 }
 
 function readCodexInstall(handle: DurableLifecycleOperation): LifecycleReadbackData {

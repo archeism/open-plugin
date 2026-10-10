@@ -220,6 +220,43 @@ describe('codex native marketplace upgrade route', () => {
       expect(readback.retention).toEqual(prepared.handle.prior.retention);
     });
   });
+
+  test('keeps a native upgrade owned when the cache is rewritten in place and into a new version directory', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home);
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      writeFiles(home, { '.codex/upgrade-mode': 'rewrite-inplace\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+      const observed = await codexLifecycle.readback(prepared.handle);
+      codexLifecycle.verify(prepared.handle, observed);
+      const inplace = join(home, '.codex/plugins/cache/demo-market/demo-plugin/1.0.0');
+      expect(readFileSync(join(inplace, '.plgnz-install.json'), 'utf8')).toContain(demoId);
+      const owned = await codexLifecycle.observeTarget(target);
+      expect(owned.installations.find((installation) => installation.nativeId === demoId)?.ownership.kind).toBe('owned');
+    });
+
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.1.0');
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      writeFiles(home, { '.codex/upgrade-mode': 'rewrite-new\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+      const observed = await codexLifecycle.readback(prepared.handle);
+      codexLifecycle.verify(prepared.handle, observed);
+      const created = join(home, '.codex/plugins/cache/demo-market/demo-plugin/1.1.0');
+      expect(readFileSync(join(created, '.plgnz-install.json'), 'utf8')).toContain(demoId);
+      const owned = await codexLifecycle.observeTarget(target);
+      expect(owned.installations.find((installation) => installation.nativeId === demoId)?.ownership.kind).toBe('owned');
+      expect(owned.installations.find((installation) => installation.nativeId === demoId)?.installedVersion).toBe('1.1.0');
+    });
+  });
 });
 
 function selectedRoute(decision: LifecycleRouteDecision<'update'>): SelectedRouteDecision<'native' | 'managed', 'update'> {
@@ -249,6 +286,24 @@ if [ "$mode" = "partial" ]; then
 fi
 if [ "$mode" = "drop-sibling" ]; then
   rm -rf "$CODEX_HOME/plugins/cache/demo-market/other-plugin"
+  printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
+  exit 0
+fi
+stage=$(find "$CODEX_HOME/.plgnz-lifecycle" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+copy_stage() {
+  dest="$1"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp -a "$stage"/. "$dest"/
+  rm -f "$dest/.plgnz-install.json"
+}
+if [ "$mode" = "rewrite-inplace" ]; then
+  copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.0.0"
+  printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
+  exit 0
+fi
+if [ "$mode" = "rewrite-new" ]; then
+  copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.1.0"
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
@@ -328,11 +383,11 @@ async function selectedUpdate(
   });
 }
 
-function frozenSnapshot(home: string): FrozenPackageSnapshot & { readonly action: 'update' } {
+function frozenSnapshot(home: string, version = '1.0.0'): FrozenPackageSnapshot & { readonly action: 'update' } {
   const snapshotRoot = join(home, 'source-snapshot');
   const packageRoot = join(snapshotRoot, 'packages', 'demo-plugin');
   mkdirSync(packageRoot, { recursive: true });
-  writeFiles(packageRoot, { 'plugin.json': '{"name":"demo-plugin","version":"1.0.0"}\n' });
+  writeFiles(packageRoot, { 'plugin.json': `{"name":"demo-plugin","version":"${version}"}\n` });
   const packageFingerprint = fingerprintTree(packageRoot);
   const snapshot = createFrozenPackageSnapshot({
     operationId: 'update-demo-plugin',
@@ -352,7 +407,7 @@ function frozenSnapshot(home: string): FrozenPackageSnapshot & { readonly action
     nativeGit: { locator: sourceLocator, resolvedRevision: frozenSha },
     inventory: {
       ...emptyInventory,
-      package: { name: 'demo-plugin', version: '1.0.0', fingerprint: packageFingerprint },
+      package: { name: 'demo-plugin', version, fingerprint: packageFingerprint },
     },
   });
   if (!isUpdateSnapshot(snapshot)) throw new Error('frozen codex snapshot drifted from update');
