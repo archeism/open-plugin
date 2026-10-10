@@ -44,42 +44,74 @@ async function isolated(fn: (root: string) => Promise<void>): Promise<void> {
 async function failed(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected failure'); }
 const registry = (root: string) => join(root, '.state', 'installed_plugins.json');
 const enablement = (root: string) => join(root, '.state', 'plugin_state.json');
+const managedRoot = (root: string) => join(root, 'plugins/cache/plgnz');
+const hashed = (root: string) => join(root, 'plugins/cache/personal-a1b2/addy-c3d4/0-1-0-e5f6');
 const copy = (root: string) => join(root, 'plugins/cache/personal/addy/0.1.0');
+function active(root: string): string {
+  const doc = JSON.parse(readFileSync(registry(root), 'utf8')) as { plugins: Record<string, Array<{ installPath: string; version: string }>> };
+  const row = doc.plugins['addy@personal']?.[0];
+  if (row === undefined) throw new Error('missing addy row');
+  return row.installPath;
+}
 
 describe('dcode lifecycle', () => {
   test('uses the isolated root and exposes enabled native installs', async () => {
-    await isolated(async root => { const item = incoming(); await dcodeWriter.add(item.plugin, item.resolved); expect(dcode.detect()).toBe(true); expect(dcode.listInstalled()[0]?.id).toBe('addy@personal'); expect(dcode.listInstalled()[0]?.enabled).toBe(true); expect(dcode.listInstalled()[0]?.path).toBe(copy(root)); });
+    await isolated(async root => {
+      const item = incoming();
+      await dcodeWriter.add(item.plugin, item.resolved);
+      const installed = dcode.listInstalled()[0];
+      expect(dcode.detect()).toBe(true);
+      expect(installed?.id).toBe('addy@personal');
+      expect(installed?.enabled).toBe(true);
+      expect(installed?.version).toBe('0.1.0');
+      expect(installed?.path?.startsWith(`${managedRoot(root)}/`)).toBe(true);
+      expect(readFileSync(join(installed!.path!, 'skills/a/SKILL.md'), 'utf8')).toContain('ordinary skill');
+    });
   });
   test('same content is unchanged and same-version changed bytes refresh', async () => {
     await isolated(async root => {
       const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); expect(await dcodeWriter.add(first.plugin, first.resolved)).toBe('unchanged');
       const changed = incoming('second\n'); changed.resolved.sourceUri = first.resolved.sourceUri; await dcodeWriter.add(changed.plugin, changed.resolved);
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toContain('second');
+      expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toContain('second');
     });
   });
-  test('explicit adoption takes over one identity-matched native copy without deleting the prior cache', async () => {
+  test('explicit adoption migrates one matching hashed row and retires it after readback', async () => {
     await isolated(async root => {
       const item = incoming(); item.resolved.sha = 'local';
-      writeFiles(copy(root), { 'plugin.json': '{"name":"addy","version":"0.1.0"}\n', 'skills/a/SKILL.md': 'legacy\n' });
+      const sourceManifest = readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8');
+      const sourceSkill = readFileSync(join(item.plugin.dir, 'skills/a/SKILL.md'), 'utf8');
+      writeFiles(hashed(root), { 'plugin.json': sourceManifest, 'skills/a/SKILL.md': sourceSkill });
       writeFiles(root, {
-        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: copy(root), version: '0.1.0' }] } }),
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }),
         '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
       });
       expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('not plgnz-owned');
+      expect(existsSync(hashed(root))).toBe(true);
+      expect(existsSync(managedRoot(root))).toBe(false);
       await dcodeWriter.add(item.plugin, item.resolved, { dryRun: true, adoptExisting: true });
-      expect(dcode.listInstalled()[0]?.path).toBe(copy(root));
+      expect(dcode.listInstalled()[0]?.path).toBe(hashed(root));
       await dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true });
-      expect(dcode.listInstalled()[0]?.path).toBe(join(root, 'plugins/cache/personal/addy/local'));
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe('legacy\n');
+      const installed = dcode.listInstalled()[0];
+      expect(installed?.path?.startsWith(`${managedRoot(root)}/`)).toBe(true);
+      expect(installed?.version).toBe('0.1.0');
+      expect(readFileSync(join(installed!.path!, 'skills/a/SKILL.md'), 'utf8')).toBe(sourceSkill);
+      const marker = JSON.parse(readFileSync(join(installed!.path!, '.plgnz-install.json'), 'utf8')) as { sourceRevision: string; fingerprint: string; projectedFingerprint: string };
+      expect(marker.sourceRevision).toBe('local');
+      expect(marker.fingerprint).toBe('ordinary skill\n');
+      expect(marker.projectedFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.parse(readFileSync(registry(root), 'utf8')).plugins['addy@personal'][0].version).toBe('0.1.0');
+      expect(existsSync(hashed(root))).toBe(false);
+      expect(readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8')).toBe(sourceManifest);
+      expect(readFileSync(join(installed!.path!, 'plugin.json'), 'utf8')).toContain('"autoUpdate": false');
       await dcodeWriter.remove('addy@personal');
-      expect(existsSync(copy(root))).toBe(true);
+      expect(existsSync(installed!.path!)).toBe(false);
     });
   });
   test('adoption refuses a mismatched legacy manifest and preserves native state', async () => {
     await isolated(async root => {
       const item = incoming(); item.resolved.sha = 'local';
-      writeFiles(copy(root), { 'plugin.json': '{"name":"other","version":"0.1.0"}\n' });
-      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: copy(root), version: '0.1.0' }] } }) });
+      writeFiles(hashed(root), { 'plugin.json': '{"name":"other","version":"0.1.0"}\n' });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
       const before = readFileSync(registry(root), 'utf8');
       expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('identity differs');
       expect(readFileSync(registry(root), 'utf8')).toBe(before);
@@ -89,9 +121,13 @@ describe('dcode lifecycle', () => {
   test('failed metadata commit during adoption restores the legacy native record', async () => {
     await isolated(async root => {
       const item = incoming(); item.resolved.sha = 'local';
-      writeFiles(copy(root), { 'plugin.json': '{"name":"addy","version":"0.1.0"}\n', 'skills/a/SKILL.md': 'legacy\n' });
+      const sourceSkill = readFileSync(join(item.plugin.dir, 'skills/a/SKILL.md'), 'utf8');
+      writeFiles(hashed(root), {
+        'plugin.json': readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8'),
+        'skills/a/SKILL.md': sourceSkill,
+      });
       writeFiles(root, {
-        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: copy(root), version: '0.1.0' }] } }),
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }),
         '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
       });
       const before = readFileSync(registry(root), 'utf8');
@@ -101,22 +137,22 @@ describe('dcode lifecycle', () => {
       try { await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true })); }
       finally { Date.now = now; }
       expect(readFileSync(registry(root), 'utf8')).toBe(before);
-      expect(dcode.listInstalled()[0]?.path).toBe(copy(root));
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe('legacy\n');
-      expect(existsSync(join(root, 'plugins/cache/personal/addy/local'))).toBe(false);
+      expect(dcode.listInstalled()[0]?.path).toBe(hashed(root));
+      expect(readFileSync(join(hashed(root), 'skills/a/SKILL.md'), 'utf8')).toBe(sourceSkill);
+      expect(existsSync(managedRoot(root))).toBe(false);
     });
   });
   test('copies ordinary skill bytes without normalizing line endings', async () => {
     await isolated(async root => {
       const raw = 'byte-preserved\r\n'; const item = incoming(raw); await dcodeWriter.add(item.plugin, item.resolved);
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(`---\nname: a\ndescription: fixture\n---\n${raw}`);
+      expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(`---\nname: a\ndescription: fixture\n---\n${raw}`);
     });
   });
   test('retains native MCP and hook declarations without translation', async () => {
     await isolated(async root => {
       const item = incoming(); writeFiles(item.plugin.dir, { '.mcp.json': '{"mcpServers":{"fixture":{"command":"fixture"}}}\n', 'hooks/hooks.json': '{"hooks":{}}\n' });
       await dcodeWriter.add(item.plugin, item.resolved);
-      expect(readFileSync(join(copy(root), '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"fixture"}}}\n'); expect(readFileSync(join(copy(root), 'hooks/hooks.json'), 'utf8')).toBe('{"hooks":{}}\n');
+      expect(readFileSync(join(active(root), '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"fixture"}}}\n'); expect(readFileSync(join(active(root), 'hooks/hooks.json'), 'utf8')).toBe('{"hooks":{}}\n');
     });
   });
   test('refuses hook declarations that dcode would mask or partially ignore before activation', async () => {
@@ -195,7 +231,7 @@ describe('dcode lifecycle', () => {
       });
 
       await dcodeWriter.add(item.plugin, item.resolved);
-      expect(readFileSync(join(copy(root), 'config/hooks.conf'), 'utf8')).toBe(`${JSON.stringify(hooks)}\n`);
+      expect(readFileSync(join(active(root), 'config/hooks.conf'), 'utf8')).toBe(`${JSON.stringify(hooks)}\n`);
     });
   });
   test('refuses a .plugin-only manifest that the native loader does not read', async () => {
@@ -206,15 +242,15 @@ describe('dcode lifecycle', () => {
   });
   test('unsupported commands, agents, and model-invocation controls are typed before activation', async () => {
     await isolated(async root => {
-      const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8');
       const command = incoming('second\n'); command.resolved.sourceUri = first.resolved.sourceUri; writeFiles(command.plugin.dir, { 'commands/x.md': '---\ndescription: x\n---\nbody\n', 'agents/x.md': '---\nname: x\ndescription: x\n---\nbody\n' });
       const commandFailure = await failed(() => dcodeWriter.add(command.plugin, command.resolved));
       expect(commandFailure instanceof PackageCapabilityError).toBe(true);
       expect((commandFailure as PackageCapabilityError).gaps.map(({ capabilityId }) => capabilityId)).toEqual(['commands', 'agents']);
       expect(commandFailure.message).toContain("target 'dcode' 0.1.83 managed update is unsupported for commands");
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: true\n---\nbody\n' });
-      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain('unsupported for model-invocation-control'); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      const gatedFailure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(gatedFailure instanceof CompatibilityError).toBe(true); expect(gatedFailure.message).toContain('unsupported for model-invocation-control'); expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
   test('rejects unknown, duplicate, and malformed alternate component roots before first activation', async () => {
@@ -261,7 +297,7 @@ describe('dcode lifecycle', () => {
     await isolated(async root => {
       const first = incoming('first\n');
       await dcodeWriter.add(first.plugin, first.resolved);
-      const beforeSkill = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const beforeSkill = readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8');
       const beforeRegistry = readFileSync(registry(root), 'utf8');
       const beforeEnablement = readFileSync(enablement(root), 'utf8');
       const changed = incoming('second\n');
@@ -279,22 +315,22 @@ describe('dcode lifecycle', () => {
         'user-invocation-control',
         'permissions-preprocessing',
       ]);
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(beforeSkill);
+      expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(beforeSkill);
       expect(readFileSync(registry(root), 'utf8')).toBe(beforeRegistry);
       expect(readFileSync(enablement(root), 'utf8')).toBe(beforeEnablement);
     });
   });
   test('reads model and user invocation aliases independently only from opening YAML frontmatter', async () => {
     await isolated(async root => {
-      const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const first = incoming('first\n'); await dcodeWriter.add(first.plugin, first.resolved); const before = readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8');
       for (const [key, value, capability] of [['disable-model-invocation', true, 'model-invocation-control'], ['disable_model_invocation', true, 'model-invocation-control'], ['user-invocable', false, 'user-invocation-control'], ['user_invocable', false, 'user-invocation-control']] as const) {
         const gated = incoming(); gated.resolved.sourceUri = first.resolved.sourceUri; writeFiles(gated.plugin.dir, { 'skills/a/SKILL.md': `---\nname: a\ndescription: fixture\n"${key}": ${value}\n---\nbody\n` });
-        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain(`unsupported for ${capability}`); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+        const failure = await failed(() => dcodeWriter.add(gated.plugin, gated.resolved)); expect(failure instanceof CompatibilityError).toBe(true); expect(failure.message).toContain(`unsupported for ${capability}`); expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       }
       const ordinary = incoming(); ordinary.resolved.sourceUri = first.resolved.sourceUri; writeFiles(ordinary.plugin.dir, { 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\ndisable-model-invocation: false\nuser-invocable: true\n---\nbody\n', 'skills/a/agents/openai.yaml': 'policy:\n  allow_implicit_invocation: true\n' });
-      expect(await dcodeWriter.add(ordinary.plugin, ordinary.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      expect(await dcodeWriter.add(ordinary.plugin, ordinary.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
       const bodyOnly = incoming('---\nname: a\ndescription: fixture\n---\nThe text disable-model-invocation: true is body text.\n'); bodyOnly.resolved.sourceUri = first.resolved.sourceUri;
-      expect(await dcodeWriter.add(bodyOnly.plugin, bodyOnly.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      expect(await dcodeWriter.add(bodyOnly.plugin, bodyOnly.resolved, { dryRun: true })).toBeUndefined(); expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
   test('refuses a Codex sidecar that restricts implicit skill invocation', async () => {
@@ -309,15 +345,19 @@ describe('dcode lifecycle', () => {
       const conflict = await failed(() => dcodeWriter.add(restricted.plugin, restricted.resolved));
       expect(conflict instanceof SemanticInventoryError).toBe(true);
       expect(conflict.message).toContain('conflicting model-invocation policy declarations');
-      expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toContain('first');
+      expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toContain('first');
     });
   });
   test('dry-run preflights identically and writes no active state', async () => {
     await isolated(async root => {
-      const item = incoming(); await dcodeWriter.add(item.plugin, item.resolved, { dryRun: true }); expect(existsSync(registry(root))).toBe(false); expect(existsSync(copy(root))).toBe(false);
-      writeFiles(copy(root), { 'foreign.txt': 'keep\n' });
+      const item = incoming(); await dcodeWriter.add(item.plugin, item.resolved, { dryRun: true }); expect(existsSync(registry(root))).toBe(false); expect(existsSync(managedRoot(root))).toBe(false);
+      await dcodeWriter.add(item.plugin, item.resolved);
+      const installed = active(root);
+      const before = readFileSync(join(installed, 'skills/a/SKILL.md'), 'utf8');
+      rmSync(join(installed, '.plgnz-install.json'));
+      writeFileSync(registry(root), JSON.stringify({ version: 2, plugins: {} }));
       for (const opts of [{ dryRun: true }, undefined]) expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, opts))).message).toContain('unowned');
-      expect(readFileSync(join(copy(root), 'foreign.txt'), 'utf8')).toBe('keep\n');
+      expect(readFileSync(join(installed, 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
   test('rejects a symlinked native cache before it can write outside the dcode root', async () => {
@@ -332,23 +372,195 @@ describe('dcode lifecycle', () => {
     await isolated(async root => {
       const item = incoming(); writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': ['broken'] } }), '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: {} }) });
       const before = readFileSync(registry(root), 'utf8'); expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('registry record'); expect(readFileSync(registry(root), 'utf8')).toBe(before);
-      rmSync(join(root, '.state'), { recursive: true, force: true }); writeFiles(copy(root), { '.plgnz-install.json': '{bad json' });
-      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('ownership marker'); expect(readFileSync(join(copy(root), '.plgnz-install.json'), 'utf8')).toBe('{bad json');
+      rmSync(join(root, '.state'), { recursive: true, force: true });
+      writeFiles(hashed(root), { '.plgnz-install.json': '{bad json' });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('ownership marker');
+      expect(readFileSync(join(hashed(root), '.plgnz-install.json'), 'utf8')).toBe('{bad json');
     });
   });
   test('removes only a marker-owned native record', async () => {
     await isolated(async root => {
-      const item = incoming(); await dcodeWriter.add(item.plugin, item.resolved); await dcodeWriter.remove('addy@personal'); expect(existsSync(copy(root))).toBe(false); expect(JSON.parse(readFileSync(registry(root), 'utf8')).plugins['addy@personal']).toBeUndefined();
-      writeFiles(copy(root), { 'foreign.txt': 'keep\n' }); writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: copy(root), version: '0.1.0' }] } }) });
-      expect((await failed(() => dcodeWriter.remove('addy@personal'))).message).toContain('not wholly'); expect(existsSync(copy(root))).toBe(true);
+      const item = incoming(); await dcodeWriter.add(item.plugin, item.resolved); const installed = active(root); await dcodeWriter.remove('addy@personal'); expect(existsSync(installed)).toBe(false); expect(JSON.parse(readFileSync(registry(root), 'utf8')).plugins['addy@personal']).toBeUndefined();
+      writeFiles(hashed(root), { 'foreign.txt': 'keep\n' }); writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.remove('addy@personal'))).message).toContain('not wholly'); expect(existsSync(join(hashed(root), 'foreign.txt'))).toBe(true);
+    });
+  });
+  test('hashed adoption negatives leave the former row active', async () => {
+    const files = { 'plugin.json': '{"name":"addy","version":"0.1.0"}\n', 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\n---\nordinary skill\n' };
+    await isolated(async root => {
+      const item = incoming();
+      const outside = join(root, 'plugins/cache/personal-a1b2/../../outside-addy');
+      writeFiles(join(root, 'outside-addy'), { 'plugin.json': files['plugin.json'], 'keep.txt': 'stay\n' });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: outside, version: '0.1.0' }] } }) });
+      const before = readFileSync(registry(root), 'utf8');
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('escapes managed cache');
+      expect(readFileSync(registry(root), 'utf8')).toBe(before);
+      expect(readFileSync(join(root, 'outside-addy/keep.txt'), 'utf8')).toBe('stay\n');
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+    await isolated(async root => {
+      const item = incoming();
+      const outside = join(root, 'plugins/data/addy');
+      writeFiles(outside, { 'plugin.json': files['plugin.json'], 'keep.txt': 'stay\n' });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: outside, version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('escapes managed cache');
+      expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('stay\n');
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+    await isolated(async root => {
+      const item = incoming();
+      const real = mkdtempSync(join(tmpdir(), 'plgnz-dcode-symlink-target-'));
+      writeFiles(real, { 'plugin.json': files['plugin.json'], 'keep.txt': 'stay\n' });
+      mkdirSync(join(root, 'plugins/cache'), { recursive: true });
+      expect(spawnSync('ln', ['-s', real, join(root, 'plugins/cache/linked')]).status).toBe(0);
+      const linked = join(root, 'plugins/cache/linked');
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: linked, version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('symlink');
+      expect(readFileSync(join(real, 'keep.txt'), 'utf8')).toBe('stay\n');
+      expect(existsSync(managedRoot(root))).toBe(false);
+      rmSync(real, { recursive: true, force: true });
+    });
+    await isolated(async root => {
+      const item = incoming();
+      writeFiles(hashed(root), files);
+      writeFiles(root, {
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }, { installPath: hashed(root), version: '0.1.0' }] } }),
+      });
+      const before = readFileSync(registry(root), 'utf8');
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('duplicate rows');
+      expect(readFileSync(registry(root), 'utf8')).toBe(before);
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+    await isolated(async root => {
+      const item = incoming();
+      writeFiles(hashed(root), { ...files, '.plgnz-install.json': JSON.stringify({ source: 'other', pluginId: 'addy@personal', fingerprint: 'x' }) });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('conflicting ownership marker');
+      expect(existsSync(hashed(root))).toBe(true);
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+    await isolated(async root => {
+      const item = incoming();
+      writeFiles(hashed(root), { 'plugin.json': '{"name":"addy","version":"9.9.9"}\n', 'skills/a/SKILL.md': files['skills/a/SKILL.md'] });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('identity differs');
+      expect(readFileSync(join(hashed(root), 'plugin.json'), 'utf8')).toContain('9.9.9');
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+    await isolated(async root => {
+      const item = incoming();
+      writeFiles(hashed(root), { 'plugin.json': files['plugin.json'], 'skills/a/SKILL.md': '---\nname: a\ndescription: fixture\n---\ndifferent\n' });
+      writeFiles(root, { '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }) });
+      const before = readFileSync(join(hashed(root), 'skills/a/SKILL.md'), 'utf8');
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('content differs');
+      expect(readFileSync(join(hashed(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+  });
+  test('readback failure restores the former hashed row', async () => {
+    await isolated(async root => {
+      const item = incoming(); item.resolved.sha = 'local';
+      writeFiles(hashed(root), {
+        'plugin.json': readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8'),
+        'skills/a/SKILL.md': readFileSync(join(item.plugin.dir, 'skills/a/SKILL.md'), 'utf8'),
+      });
+      writeFiles(root, {
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }),
+        '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
+        '.state/.plgnz-dcode-readback-fault': '1\n',
+      });
+      const before = readFileSync(registry(root), 'utf8');
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('readback failed');
+      expect(readFileSync(registry(root), 'utf8')).toBe(before);
+      expect(dcode.listInstalled()[0]?.path).toBe(hashed(root));
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+  });
+  test('cleanup failure keeps the new managed row and the former cache', async () => {
+    await isolated(async root => {
+      const item = incoming(); item.resolved.sha = 'local';
+      writeFiles(hashed(root), {
+        'plugin.json': readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8'),
+        'skills/a/SKILL.md': readFileSync(join(item.plugin.dir, 'skills/a/SKILL.md'), 'utf8'),
+      });
+      writeFiles(root, {
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }),
+        '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
+      });
+      writeFileSync(join(root, 'plugins/cache/personal-a1b2/addy-c3d4/.plgnz-dcode-retire-0-1-0-e5f6'), 'blocked\n');
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('cleanup could not retire');
+      expect(dcode.listInstalled()[0]?.path?.startsWith(`${managedRoot(root)}/`)).toBe(true);
+      expect(readFileSync(join(hashed(root), 'skills/a/SKILL.md'), 'utf8')).toContain('ordinary skill');
+    });
+  });
+  test('pins and autoUpdate false apply only to the staged projection', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      const sourceManifest = '{"name":"addy","version":"0.1.0","extensions":{"com.example":{"keep":true},"com.langchain.deepagents.code":{"autoUpdate":true,"theme":"kept"}}}\n';
+      writeFiles(item.plugin.dir, {
+        'plugin.json': sourceManifest,
+        '.mcp.json': '{"mcpServers":{"fixture":{"command":"true"}}}\n',
+      });
+      await dcodeWriter.add(item.plugin, item.resolved);
+      const installed = active(root);
+      const projected = JSON.parse(readFileSync(join(installed, 'plugin.json'), 'utf8')) as { extensions: { 'com.example': { keep: boolean }; 'com.langchain.deepagents.code': { autoUpdate: boolean; theme: string } } };
+      expect(projected.extensions['com.langchain.deepagents.code']).toEqual({ autoUpdate: false, theme: 'kept' });
+      expect(projected.extensions['com.example']).toEqual({ keep: true });
+      expect(readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8')).toBe(sourceManifest);
+      expect(readFileSync(join(item.plugin.dir, '.mcp.json'), 'utf8')).toBe('{"mcpServers":{"fixture":{"command":"true"}}}\n');
+      expect(readFileSync(join(installed, '.mcp.json'), 'utf8')).toContain('/true');
+    });
+  });
+  test('a faithful updater cannot move a managed activation whose projection opts out', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      await dcodeWriter.add(item.plugin, item.resolved);
+      const before = active(root);
+      const updater = join(root, 'updater.mjs');
+      writeFileSync(updater, `import { readFileSync, writeFileSync } from 'node:fs';
+const registry = process.argv[2];
+const remote = process.argv[3];
+const doc = JSON.parse(readFileSync(registry, 'utf8'));
+const moved = [];
+for (const [pluginId, rows] of Object.entries(doc.plugins)) {
+  const row = rows[0];
+  const manifest = JSON.parse(readFileSync(row.installPath + '/plugin.json', 'utf8'));
+  const extension = manifest.extensions?.['com.langchain.deepagents.code'] ?? {};
+  if (extension.autoUpdate === true && row.version !== remote) {
+    row.installPath = remote;
+    row.version = remote;
+    moved.push(pluginId);
+  }
+}
+writeFileSync(registry, JSON.stringify(doc));
+console.log(moved.join(','));
+`);
+      const run = spawnSync(process.execPath, [updater, registry(root), '9.9.9'], { encoding: 'utf8' });
+      expect(run.status).toBe(0);
+      expect(run.stdout.trim()).toBe('');
+      expect(active(root)).toBe(before);
+      const control = join(root, 'control.json');
+      writeFileSync(control, JSON.stringify({
+        plugins: { 'opt-in@personal': [{ installPath: before, version: '0.1.0' }] },
+      }));
+      const manifestPath = join(before, 'plugin.json');
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { extensions: { 'com.langchain.deepagents.code': { autoUpdate: boolean } } };
+      manifest.extensions['com.langchain.deepagents.code'].autoUpdate = true;
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      const moved = spawnSync(process.execPath, [updater, control, '9.9.9'], { encoding: 'utf8' });
+      expect(moved.status).toBe(0);
+      expect(moved.stdout.trim()).toBe('opt-in@personal');
+      expect(JSON.parse(readFileSync(control, 'utf8')).plugins['opt-in@personal'][0].version).toBe('9.9.9');
+      expect(active(root)).toBe(before);
     });
   });
   test('metadata failure rollback retains the prior active copy when enablement is a directory', async () => {
     await isolated(async root => {
-      const item = incoming('first\n'); await dcodeWriter.add(item.plugin, item.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
+      const item = incoming('first\n'); await dcodeWriter.add(item.plugin, item.resolved); const before = readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8');
       rmSync(join(root, '.state', 'plugin_state.json')); writeFiles(join(root, '.state', 'plugin_state.json'), { '.keep': '' });
       const changed = incoming('second\n'); changed.resolved.sourceUri = item.resolved.sourceUri;
-      await failed(() => dcodeWriter.add(changed.plugin, changed.resolved)); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
+      await failed(() => dcodeWriter.add(changed.plugin, changed.resolved)); expect(readFileSync(join(active(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);
     });
   });
 });

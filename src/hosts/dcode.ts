@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
+import type { PluginMcpCandidate } from '../mcp';
 import { spawnSync, which } from '../runtime';
 import { singleInstanceTargetProfile } from '../target-profile';
 
@@ -101,6 +102,17 @@ export function dcodeRoot(): string {
 export function dcodeStateDir(): string { return join(dcodeRoot(), '.state'); }
 export function dcodeRegistryFile(): string { return join(dcodeStateDir(), 'installed_plugins.json'); }
 export function dcodeEnablementFile(): string { return join(dcodeStateDir(), 'plugin_state.json'); }
+export function dcodeCacheRoot(): string { return join(dcodeRoot(), 'plugins', 'cache'); }
+
+export function dcodeMcpCandidates(): readonly PluginMcpCandidate[] {
+  return [
+    { kind: 'spec', file: '.mcp.json' },
+    { kind: 'spec', file: 'mcp.json' },
+    { kind: 'inline', manifest: 'plugin.json' },
+    { kind: 'inline', manifest: '.claude-plugin/plugin.json' },
+    { kind: 'inline', manifest: '.codex-plugin/plugin.json' },
+  ];
+}
 
 type Registry = { version: 1 | 2; plugins: Record<string, unknown> };
 type Enablement = { version?: number; enabledPlugins: Record<string, boolean> };
