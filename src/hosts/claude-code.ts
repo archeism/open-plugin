@@ -45,8 +45,6 @@ export function pluginsDir(): string {
   return join(claudeCodeRoot(), 'plugins');
 }
 
-/** An explicit Claude Code binary permits first install before its config root exists. */
-
 const CLAUDE_CODE_VERSION = /^(\d+\.\d+\.\d+) \(Claude Code\)\s*$/u;
 
 export type ClaudeCodeVersionObservation =
@@ -54,7 +52,6 @@ export type ClaudeCodeVersionObservation =
   | { readonly kind: 'unknown' }
   | { readonly kind: 'unparseable' };
 
-/** Live `claude --version` probe. Static consumer-profile metadata is not a version. */
 export function observeClaudeCodeVersion(
   env: Record<string, string | undefined> = process.env,
 ): ClaudeCodeVersionObservation {
