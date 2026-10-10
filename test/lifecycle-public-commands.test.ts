@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { bytesToText, snapshotTree, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
 import { parseLifecycleReport } from '../src/lifecycle-report';
@@ -377,6 +378,137 @@ describe('public lifecycle commands', () => {
         alpha: alphaJson,
         betaGone: true,
         instanceTwo: twoBefore,
+      });
+    });
+  });
+
+  test('scenario 2 bad and uninvoked sources never delete and offline retire keeps retained state', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const foreignJson = '{"name":"foreign","version":"1.0.0"}\n';
+      const retainedData = 'plugin data\n';
+      const retainedMetadata = 'inactive metadata\n';
+      const source = harness.source('scenario-2', {
+        'plugin.json': keptJson,
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const malformed = harness.source('scenario-2-malformed', {
+        'marketplace.json': '{"name":"bad","plugins":"nope"}\n',
+      });
+      const empty = harness.source('scenario-2-empty', {
+        'README.md': 'no plugins\n',
+      });
+      const uninvoked = harness.source('scenario-2-uninvoked', {
+        'plugin.json': '{"name":"other","version":"1.0.0","description":"uninvoked"}\n',
+        'skills/other/SKILL.md': '---\nname: other\ndescription: uninvoked\n---\n\nOther.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const git = harness.fakeNative('git-remote', [{
+        args: ['ls-remote', 'https://example.test/missing.git', 'HEAD'],
+        stderr: 'fatal: unavailable\n',
+        exitCode: 17,
+      }]);
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const installedReport = parseLifecycleReport(JSON.parse(installed.stdout));
+      const scopeId = installedReport.outcomes[0]?.scope.id;
+      expect(installed.exitCode).toBe(0);
+      expect(scopeId).toMatch(/^scope-v1-[0-9a-f]{64}$/u);
+      harness.writeHome({
+        '.cursor/plugins/local/foreign/.cursor-plugin/plugin.json': foreignJson,
+        '.cursor/plugins/retained/kept/data/note.txt': retainedData,
+        '.cursor/plugins/retained/kept/metadata/note.txt': retainedMetadata,
+      });
+
+      const preserved = (files: Record<string, number[] | undefined>) => ({
+        kept: bytesToText(files['plugins/local/kept/plugin.json'] ?? []),
+        foreign: bytesToText(files['plugins/local/foreign/.cursor-plugin/plugin.json'] ?? []),
+        data: bytesToText(files['plugins/retained/kept/data/note.txt'] ?? []),
+        metadata: bytesToText(files['plugins/retained/kept/metadata/note.txt'] ?? []),
+      });
+      const refused = (label: string, result: ReturnType<typeof harness.run>, fragment: string) => {
+        const report = parseLifecycleReport(JSON.parse(result.stdout));
+        expect({
+          label,
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          plan: report.plan.length,
+          outcomes: report.outcomes.length,
+          mutationStarted: report.summary.mutationStarted,
+          changed: report.summary.changed,
+          diagnostic: report.summary.reason?.diagnostic.includes(fragment) === true,
+          cursor: result.stores.cursor.after,
+          files: preserved(result.stores.cursor.after.files),
+        }).toEqual({
+          label,
+          exitCode: 2,
+          stderr: '',
+          plan: 0,
+          outcomes: 0,
+          mutationStarted: false,
+          changed: false,
+          diagnostic: true,
+          cursor: result.stores.cursor.before,
+          files: { kept: keptJson, foreign: foreignJson, data: retainedData, metadata: retainedMetadata },
+        });
+      };
+
+      refused('missing', harness.run(['sync', join(harness.root, 'missing-source'), '--target', 'cursor', '--json'], { env }), 'Local source not found');
+      refused(
+        'unreachable',
+        harness.run(
+          ['sync', 'https://example.test/missing.git', '--target', 'cursor', '--json'],
+          { env: { ...env, OPEN_PLUGIN_GIT_BIN: git.path } },
+        ),
+        'Failed to resolve git remote',
+      );
+      refused('malformed', harness.run(['sync', malformed, '--target', 'cursor', '--json'], { env }), 'Malformed marketplace');
+      const idle = harness.run(['scopes', uninvoked, '--target', 'cursor', '--json'], { env });
+      expect({
+        exitCode: idle.exitCode,
+        stderr: idle.stderr,
+        stdout: idle.stdout,
+        cursor: idle.stores.cursor.after,
+        files: preserved(snapshotTree(cursorStore).files),
+      }).toEqual({
+        exitCode: 2,
+        stderr: `unknown deployment scope '${uninvoked}'\n`,
+        stdout: '',
+        cursor: idle.stores.cursor.before,
+        files: { kept: keptJson, foreign: foreignJson, data: retainedData, metadata: retainedMetadata },
+      });
+      refused('zero-package', harness.run(['sync', empty, '--target', 'cursor', '--json'], { env }), 'No plugins discovered');
+
+      rmSync(source, { recursive: true, force: true });
+      const retired = harness.run(['retire-source', scopeId!, '--target', 'cursor', '--json'], { env });
+      const retiredReport = parseLifecycleReport(JSON.parse(retired.stdout));
+      const after = snapshotTree(cursorStore);
+      expect({
+        exitCode: retired.exitCode,
+        stderr: retired.stderr,
+        sourceAbsent: existsSync(source),
+        rows: retiredReport.outcomes.map((outcome) => ({
+          package: outcome.package,
+          action: outcome.action,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+        })),
+        keptDir: after.directories.includes('plugins/local/kept'),
+        foreign: bytesToText(after.files['plugins/local/foreign/.cursor-plugin/plugin.json'] ?? []),
+        data: bytesToText(after.files['plugins/retained/kept/data/note.txt'] ?? []),
+        metadata: bytesToText(after.files['plugins/retained/kept/metadata/note.txt'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        sourceAbsent: false,
+        rows: [{ package: 'kept', action: 'retire-orphan', result: 'succeeded', resourceState: 'absent' }],
+        keptDir: false,
+        foreign: foreignJson,
+        data: retainedData,
+        metadata: retainedMetadata,
       });
     });
   });
