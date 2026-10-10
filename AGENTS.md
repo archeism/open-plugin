@@ -19,6 +19,6 @@ The current implemented native adapters are claude-code, codex, kimi, cursor, om
 - `doctor` is read-only by construction — it must not import any writer.
 - Every spec claim in code or docs cites the section (`spec §7.2.1`). Spec: https://agentplugins.org (Agent Plugins Specification 1.0.0).
 - Commit history is an asset: never squash. Work in small verified commits and push directly to `main` when authorized.
-- While the package is `0.0.x`, published version changes are patch-only. npm publication and fleet rollout require separate authorization.
+- **Release policy (supersedes 'npm publication requires separate authorization')**: early-stage velocity first — merge to main IS the publish. The workflow auto-bumps the patch, publishes via Trusted Publishing, tags `v<version>`, and commits the bump back (registry-existence check guards the loop). Manual dispatch remains for exact versions. The superseded rule was superseded by the owner on 2026-10-10. Fleet rollout (personal pin bumps, machine binary refreshes) stays deliberate until the pin-hygiene work lands.
 - `CLAUDE.md` is a symlink to this file; do not maintain a second copy.
 - Research and decisions live in `docs/`; this file is rules only.

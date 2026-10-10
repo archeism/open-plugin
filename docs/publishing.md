@@ -8,6 +8,20 @@ For each release, bump `package.json` to the next `0.0.x` patch version, run the
 
 The published package ships `dist/plugnz.mjs` — one plain-JavaScript ESM bundle with a `node` shebang — so `npx plugnz` works on any machine with Node >= 22 and `bunx plugnz` keeps working. Bun remains the build and development toolchain only: the workflow installs with Bun, builds with `bun run build` (scripts/build.mjs, `--target=node`), and smoke-checks the bundle under plain Node before publishing. Never commit `dist/`; the artifact exists only inside the publish run.
 
+## Automated releases (merge = publish) — early-stage velocity policy
+
+**This supersedes the manual-dispatch-only release rule (owner decision,
+2026-10-10).** Every push to `main` publishes the next `0.0.x` patch
+automatically: build -> registry check (loop guard) -> patch bump ->
+Trusted Publishing publish -> `v<version>` tag -> bump commit back with
+`[skip ci]`. The loop guard is the registry itself — when package.json's
+version already exists on npm the run succeeds without publishing, so the
+bump commit's own re-trigger is a no-op. Manual dispatch (version must
+match `package.json`) remains for exact-version releases. Never hand-edit
+`package.json`'s version on main; the release-bot owns it. When the
+project outgrows this, move to tag-triggered releases before reinstating
+any manual gate.
+
 ## Name guard (pluginz)
 
 `guards/pluginz` reserves the alternate spelling. Its release workflow is

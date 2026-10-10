@@ -1,21 +1,29 @@
 name: Publish to npm
 
+# Merge-to-main IS the release authorization: every push to main publishes
+# the next 0.0.x patch, commits the bump back with [skip ci], and tags.
+# Manual dispatch remains for exact-version releases. The loop guard is the
+# registry itself: when package.json's version already exists on npm the run
+# succeeds without publishing (this is what makes the bump commit's own
+# re-trigger a no-op even if [skip ci] were ignored).
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: Package version to publish (0.0.x)
-        required: true
+        description: Package version to publish (0.0.x) — must match package.json
+        required: false
         type: string
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -31,24 +39,39 @@ jobs:
           bun install --frozen-lockfile
           bun run build
           node dist/plugnz.mjs --version --json
-      - name: Verify release
+      - name: Resolve the release version
+        id: version
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          node --input-type=module <<'NODE'
-          import { readFileSync } from 'node:fs';
-
-          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
-          const requested = process.env.RELEASE_VERSION;
-          if (process.env.GITHUB_REF !== 'refs/heads/main' ||
-              name !== 'plugnz' ||
-              !/^0\.0\.[1-9]\d*$/.test(requested) ||
-              requested !== version) {
-            console.error('Publish requires main and a matching, nonzero 0.0.x package version.');
-            process.exit(1);
-          }
-          NODE
-      - name: Install npm with Trusted Publishing support
-        run: npm install --global npm@11.14.1
-      - name: Publish
-        run: npm publish --access public --ignore-scripts
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$DISPATCH_VERSION" ]; then
+            if [ "$CURRENT" != "$DISPATCH_VERSION" ]; then
+              echo "dispatch requested $DISPATCH_VERSION but package.json is $CURRENT"; exit 1
+            fi
+            VERSION="$CURRENT"
+          elif npm view "plugnz@$CURRENT" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$CURRENT is already on npm — nothing to release"
+            exit 0
+          else
+            VERSION=$(node -p "'$CURRENT'.split('.').map((p, i) => i === 2 ? +p + 1 : p).join('.')")
+            node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); pkg.version = '$VERSION'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n')"
+            bun install --frozen-lockfile
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Publish, tag, and commit the bump
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npm install --global npm@11.14.1
+          npm publish --access public --ignore-scripts
+          git config user.name "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore(release): v$RELEASE_VERSION [skip ci]"
+          git tag "v$RELEASE_VERSION"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main "v$RELEASE_VERSION"
