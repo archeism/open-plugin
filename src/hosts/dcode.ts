@@ -74,7 +74,7 @@ export function probeDcodeVersion(): DcodeVersionObservation {
       timeout: 10_000,
     });
     if (result.exitCode !== 0) return { kind: 'unparseable' };
-    stdout = Buffer.from(result.stdout).toString('utf8');
+    stdout = decode(result.stdout);
   } catch {
     return { kind: 'unparseable' };
   }
@@ -82,6 +82,12 @@ export function probeDcodeVersion(): DcodeVersionObservation {
   const version = line === undefined ? undefined : DCODE_VERSION_LINE.exec(line)?.[1];
   if (version === undefined) return { kind: 'unparseable' };
   return { kind: 'detected', version, probeId: `dcode:${version}` };
+}
+
+function decode(bytes: Uint8Array): string {
+  let text = '';
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return text;
 }
 
 function dcodeBinary(): string | undefined {
