@@ -1143,6 +1143,63 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 14 a marketplace-wide sync leaves an unowned plugin byte-identical and does not retire it; scenario 5 native nonzero and readback mismatch; source drift is refused before a journal write; a pins failure removes the staged preparation and does not apply; a generation move before activation confirmation rolls the mutation back; cleanup failure after a confirmed activation keeps that activation and records pending cleanup; a changed state generation is refused and does not write', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const foreignJson = '{"name":"foreign","version":"9.9.9","description":"unowned"}\n';
+      const source = harness.source('scenario-14', {
+        'kept/plugin.json': keptJson,
+        'kept/skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const local = join(cursorStore, 'plugins', 'local');
+      const keptPath = join(local, 'kept', 'plugin.json');
+      const foreignPath = join(local, 'foreign', 'plugin.json');
+
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      expect({
+        exitCode: installed.exitCode,
+        stderr: installed.stderr,
+        kept: readFileSync(keptPath, 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        kept: keptJson,
+      });
+
+      mkdirSync(join(local, 'foreign'), { recursive: true });
+      writeFileSync(foreignPath, foreignJson);
+      const stateBefore = readFileSync(join(harness.home, 'state.json'), 'utf8');
+      expect(stateBefore.includes('foreign')).toBe(false);
+      expect(readFileSync(join(source, 'kept', 'plugin.json'), 'utf8').includes('foreign')).toBe(false);
+
+      const again = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const againReport = parseLifecycleReport(JSON.parse(again.stdout));
+      expect({
+        exitCode: again.exitCode,
+        stderr: again.stderr,
+        foreign: readFileSync(foreignPath, 'utf8'),
+        retired: againReport.outcomes
+          .filter((outcome) => outcome.package === 'foreign' && outcome.action === 'retire-orphan' && outcome.result === 'succeeded')
+          .map((outcome) => outcome.package),
+        planned: againReport.plan
+          .filter((operation) => operation.package === 'foreign' && operation.action === 'retire-orphan')
+          .map((operation) => operation.package),
+        kept: readFileSync(keptPath, 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        foreign: foreignJson,
+        retired: [],
+        planned: [],
+        kept: keptJson,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
