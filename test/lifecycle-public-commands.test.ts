@@ -297,7 +297,10 @@ describe('public lifecycle commands', () => {
         'beta/skills/beta/SKILL.md': '---\nname: beta\ndescription: B\n---\n\nBeta.\n',
       });
       const cursor = harness.fakeNative('cursor', versionSteps(48));
-      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const env = {
+        OPEN_PLUGIN_CURSOR_BIN: cursor.path,
+        OPEN_PLUGIN_CURSOR_INSTANCE_ROOT: join(harness.storePath('cursor'), 'instances'),
+      };
       const instanceOne = join(harness.storePath('cursor'), 'instances', 'one');
       const instanceTwo = join(harness.storePath('cursor'), 'instances', 'two');
 
@@ -671,9 +674,10 @@ describe('public lifecycle commands', () => {
         { args: ['--version'], stdout: '2.4.0\n' },
         { args: ['--version'], stdout: '2.4.0\n' },
       ]);
+      const instances = join(harness.storePath('cursor'), 'instances');
       const seeded = harness.run(
         ['sync', installed, '--target', 'cursor', '--instance', 'two', '--json'],
-        { env: { OPEN_PLUGIN_CURSOR_BIN: accepted.path } },
+        { env: { OPEN_PLUGIN_CURSOR_BIN: accepted.path, OPEN_PLUGIN_CURSOR_INSTANCE_ROOT: instances } },
       );
       expect(seeded.exitCode).toBe(0);
       const instanceOne = join(harness.storePath('cursor'), 'instances', 'one');
@@ -700,7 +704,7 @@ describe('public lifecycle commands', () => {
       }));
       const result = harness.run(
         ['sync', '--manifest', manifest, '--json'],
-        { env: { OPEN_PLUGIN_CURSOR_BIN: batch.path } },
+        { env: { OPEN_PLUGIN_CURSOR_BIN: batch.path, OPEN_PLUGIN_CURSOR_INSTANCE_ROOT: instances } },
       );
       const report = parseLifecycleReport(JSON.parse(result.stdout));
       const incomplete = report.plan.filter((operation) => operation.scope.target.instance === 'two');
@@ -850,6 +854,102 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('an unchanged re-sync exits 0, update and route-migrate are refused, and an ungated cursor instance is refused', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const movedJson = '{"name":"moved","version":"1.0.0","description":"moved"}\n';
+      const source = harness.source('ada-mediums', {
+        'kept/plugin.json': keptJson,
+        'kept/skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+        'moved/plugin.json': movedJson,
+        'moved/skills/moved/SKILL.md': '---\nname: moved\ndescription: moved\n---\n\nMoved.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(48));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const statePath = join(harness.home, 'state.json');
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      expect(installed.exitCode).toBe(0);
+
+      const again = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const againReport = parseLifecycleReport(JSON.parse(again.stdout));
+      expect({
+        exitCode: again.exitCode,
+        stderr: again.stderr,
+        rows: againReport.outcomes.map((outcome) => ({ package: outcome.package, action: outcome.action, result: outcome.result })).sort((left, right) => left.package < right.package ? -1 : 1),
+        store: again.stores.cursor.after,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        rows: [
+          { package: 'kept', action: 'unchanged', result: 'succeeded' },
+          { package: 'moved', action: 'unchanged', result: 'succeeded' },
+        ],
+        store: again.stores.cursor.before,
+      });
+
+      writeFileSync(join(source, 'kept', 'plugin.json'), '{"name":"kept","version":"1.0.0","description":"changed"}\n');
+      recordNativeRoute(statePath, 'moved');
+      const manifest = join(harness.source('ada-mediums-manifest', {}), 'manifest.json');
+      writeFileSync(manifest, JSON.stringify({
+        schemaVersion: 1,
+        entries: [{
+          operation: 'sync',
+          source: { kind: 'local', locator: source },
+          target: { kind: 'cursor', instance: 'default' },
+        }],
+      }));
+      const storeBeforeRefusal = snapshotTree(cursorStore);
+      const stateBeforeRefusal = readFileSync(statePath, 'utf8');
+      const refused = (label: string, args: string[]) => {
+        const result = harness.run(args, { env });
+        const report = parseLifecycleReport(JSON.parse(result.stdout));
+        const reasons = report.outcomes.map((outcome) => outcome.reason?.code ?? report.summary.failureCategory);
+        expect({
+          label,
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          mutationStarted: report.summary.mutationStarted,
+          changed: report.summary.changed,
+          capability: reasons.every((code) => code === 'capability.unsupported' || code === 'capability'),
+          succeededMutation: report.outcomes.filter((outcome) => outcome.result === 'succeeded' && (outcome.action === 'update' || outcome.action === 'route-migrate')).map((outcome) => outcome.package),
+          store: snapshotTree(cursorStore),
+          state: readFileSync(statePath, 'utf8'),
+        }).toEqual({
+          label,
+          exitCode: 1,
+          stderr: '',
+          mutationStarted: false,
+          changed: false,
+          capability: true,
+          succeededMutation: [],
+          store: storeBeforeRefusal,
+          state: stateBeforeRefusal,
+        });
+      };
+      refused('dry-run', ['sync', '--manifest', manifest, '--dry-run', '--json']);
+      refused('apply', ['sync', '--manifest', manifest, '--json']);
+
+      const side = harness.run(
+        ['sync', source, '--target', 'cursor', '--instance', 'side', '--json'],
+        { env },
+      );
+      const sideReport = side.stdout.trim().startsWith('{') ? parseLifecycleReport(JSON.parse(side.stdout)) : null;
+      expect({
+        failed: side.exitCode !== 0,
+        directory: existsSync(join(cursorStore, 'instances', 'side')),
+        present: sideReport?.outcomes.some((outcome) => outcome.result === 'succeeded' && outcome.resourceState === 'present') ?? false,
+        claimsCursorLoadedInstance: `${side.stdout}${side.stderr}`.includes('instances/side'),
+      }).toEqual({
+        failed: true,
+        directory: false,
+        present: false,
+        claimsCursorLoadedInstance: false,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
@@ -986,6 +1086,16 @@ describe('public lifecycle commands', () => {
     });
   });
 });
+
+function recordNativeRoute(statePath: string, packageId: string): void {
+  const recorded = JSON.parse(readFileSync(statePath, 'utf8')) as {
+    activations?: Array<{ packageId?: string; route?: { kind?: string } }>;
+  };
+  const activation = recorded.activations?.find((row) => row.packageId === packageId);
+  if (activation?.route === undefined) throw new Error(`missing activation for ${packageId}`);
+  activation.route.kind = 'native';
+  writeFileSync(statePath, JSON.stringify(recorded));
+}
 
 function versionSteps(count: number): { args: string[]; stdout: string }[] {
   return Array.from({ length: count }, () => ({ args: ['--version'], stdout: '2.4.0\n' }));

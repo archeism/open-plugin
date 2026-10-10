@@ -47,7 +47,12 @@ function parseCursorTarget(value: unknown, label: string): PersistedTargetIdenti
 }
 
 export function cursorInstanceRoot(instance = 'default'): string {
-  return instance === 'default' ? cursorRoot() : join(cursorRoot(), 'instances', instance);
+  if (instance === 'default') return cursorRoot();
+  const configured = process.env['OPEN_PLUGIN_CURSOR_INSTANCE_ROOT'];
+  if (configured === undefined || configured.length === 0) {
+    throw new Error(`cursor instance '${instance}' has no configured root`);
+  }
+  return join(configured, instance);
 }
 
 export function localDir(instance = 'default'): string {
