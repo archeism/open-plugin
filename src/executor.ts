@@ -9,13 +9,14 @@ import {
   type LifecycleReason,
   type LifecycleReport,
 } from './lifecycle-report';
-import { LifecycleHostPhaseError, createFrozenPackageSnapshot, createLifecyclePlanCoverage, createRecordedOwnedActivation, createResolvedLifecyclePins } from './lifecycle-runtime';
+import { LifecycleHostPhaseError, createFrozenPackageSnapshot, createLifecyclePlanCoverage, createResolvedLifecyclePins } from './lifecycle-runtime';
+import { ownedActivation, retirementTombstone } from './owned-activation';
 import type { LifecyclePlan, PlannerHost } from './planner';
 import { inventoryPackageSemantics, type PackageSemanticInventory } from './semantic-inventory';
 import { CryptoHasher } from './runtime';
 import { resolveSource, type FrozenSource, type PluginSource } from './source';
 import type { SourceBinding } from './source-reference';
-import { readLifecycleState, type ActivationRecord, type DeploymentScopeRecord, type JournalAction, type JournalEntryRecord, type JournalState, type LifecycleAttemptRecord, type LifecycleStateV2, type TombstoneRecord } from './state';
+import { readLifecycleState, type ActivationRecord, type DeploymentScopeRecord, type JournalAction, type JournalEntryRecord, type JournalState, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
 import { writeLifecycleState } from './state-write';
 
 export interface ExecuteLifecycleInput {
@@ -406,7 +407,10 @@ async function prepareRetirement(
   if (version.kind !== 'detected') {
     return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `retirement '${operation.package}' lost its detected target version`));
   }
-  const owned = ownedActivation(recorded, installation, observation.target);
+  if (recorded.fingerprints.installed !== installation.installedFingerprint) {
+    return refused(createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.package}' fingerprint does not match the owned install`));
+  }
+  const owned = ownedActivation(operation.scope, operation.scope.source, recorded, installation, observation.target);
   if (owned === null) {
     return refused(createLifecycleReason('internal', 'internal.invariant', `ownership of '${operation.package}' was not revalidated`));
   }
@@ -451,41 +455,6 @@ async function prepareRetirement(
     return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `retirement '${operation.package}' kept frozen route '${operation.route}'`));
   }
   return { kind: 'ready', selection: decision, activation: owned, recorded };
-}
-
-function ownedActivation(
-  activation: ActivationRecord,
-  installation: TargetInstallationData,
-  target: LifecycleTargetIdentity,
-): RecordedOwnedActivation | null {
-  if (activation.route.kind !== 'managed' && activation.route.kind !== 'native') return null;
-  if (activation.ownership.kind !== 'created' && activation.ownership.kind !== 'adopted') return null;
-  if (activation.sourceRevision === undefined || activation.fingerprints.installed === undefined || installation.installedFingerprint === null || installation.contentRoots.length === 0 || installation.source === null) return null;
-  const activationState = activation.activationState === 'nonconforming' ? 'nonconforming' : activation.activationState === 'inactive' ? 'inactive' : activation.activationState === 'active' ? 'active' : null;
-  if (activationState === null) return null;
-  const route = activation.route;
-  const ownership = activation.ownership;
-  try {
-    return createRecordedOwnedActivation({
-      scopeId: activation.scopeId,
-      target,
-      packageName: activation.packageId,
-      nativeId: activation.nativeId,
-      sourceType: installation.source.type,
-      sourceRevision: activation.sourceRevision,
-      sourceLocator: installation.source.locator,
-      installedVersion: installation.installedVersion,
-      route: route.kind,
-      evidenceId: route.evidenceKey.key,
-      ownership: { kind: ownership.kind, proofId: ownership.proofKey.key },
-      activation: activationState,
-      enablement: installation.enablement === 'enabled' ? 'enabled' : 'disabled',
-      installedFingerprint: installation.installedFingerprint,
-      contentRoots: installation.contentRoots,
-    });
-  } catch {
-    return null;
-  }
 }
 
 function lifecycleTarget(operation: LifecyclePlanOperation): LifecycleTargetIdentity {
@@ -580,7 +549,7 @@ class Ledger {
 
   confirmRetirement(plan: FrozenPlan, operation: LifecyclePlanOperation, recorded: ActivationRecord): void {
     const current = this.activation(recorded.scopeId, recorded.packageId, recorded.nativeId) ?? recorded;
-    const tombstone = tombstoneFor(current, this.now);
+    const tombstone = retirementTombstone(current, this.now);
     if (tombstone === null) throw new Error(`retirement '${operation.operationId}' cannot retain a tombstone`);
     this.state = {
       ...this.state,
@@ -615,14 +584,29 @@ class Ledger {
   markCompleted(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
     this.state = {
       ...this.state,
-      scopes: this.state.scopes.map((scope) => scope.id === operation.scope.id && scope.desired !== undefined
-        ? { ...scope, lastConverged: scope.desired, updatedAt: this.now }
-        : scope),
+      scopes: this.state.scopes.map((scope) => this.completedScope(plan, operation, scope)),
     };
     this.replaceAttempt(plan, (attempt) => ({
       ...this.journaled(attempt, operation.operationId, 'completed', 'completed', true),
       completedAt: this.now,
     }));
+  }
+
+  private completedScope(plan: FrozenPlan, operation: LifecyclePlanOperation, scope: DeploymentScopeRecord): DeploymentScopeRecord {
+    if (scope.id !== operation.scope.id) return scope;
+    const planned = plan.scopes.find((row) => row.scope.id === scope.id);
+    if (planned?.selectorMode === 'retired') {
+      const { desired: _desired, lastConverged: _converged, ...kept } = scope;
+      return {
+        ...kept,
+        lifecycle: 'retired',
+        selectorMode: 'retired',
+        updatedAt: this.now,
+        retiredAt: this.now,
+      };
+    }
+    if (scope.desired === undefined) return scope;
+    return { ...scope, lastConverged: scope.desired, updatedAt: this.now };
   }
 
   private replaceAttempt(plan: FrozenPlan, update: (attempt: LifecycleAttemptRecord) => LifecycleAttemptRecord): void {
@@ -756,32 +740,6 @@ function retired(operation: LifecyclePlanOperation, changed: boolean): Operation
       reason: null,
     },
   };
-}
-
-function tombstoneFor(activation: ActivationRecord, retiredAt: string): TombstoneRecord | null {
-  if (activation.route.kind !== 'managed' && activation.route.kind !== 'native') return null;
-  if (activation.ownership.kind !== 'created' && activation.ownership.kind !== 'adopted') return null;
-  if (activation.sourceRevision === undefined) return null;
-  const source = activation.fingerprints.source;
-  const projected = activation.fingerprints.projected;
-  const installed = activation.fingerprints.installed;
-  if (source === undefined || projected === undefined || installed === undefined) return null;
-  const tombstone: TombstoneRecord = {
-    id: `tombstone-v1-${contentAddress(`${activation.scopeId}\0${activation.packageId}\0${activation.nativeId}`).slice('sha256:'.length)}`,
-    scopeId: activation.scopeId,
-    packageId: activation.packageId,
-    nativeId: activation.nativeId,
-    ...(activation.sourceRelativeDir === undefined ? {} : { sourceRelativeDir: activation.sourceRelativeDir }),
-    sourceRevision: activation.sourceRevision,
-    route: activation.route,
-    ownership: activation.ownership,
-    fingerprints: { source, projected, installed },
-    pins: activation.pins,
-    retentionState: 'plugin-state-retained',
-    ...(activation.activatedAt === undefined ? {} : { activatedAt: activation.activatedAt }),
-    retiredAt,
-  };
-  return tombstone;
 }
 
 function mutationBegan(state: JournalState): boolean {

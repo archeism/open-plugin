@@ -22,9 +22,9 @@ import {
 import {
   createFrozenPackageSnapshot,
   createLifecyclePlanCoverage,
-  createRecordedOwnedActivation,
   createResolvedLifecyclePins,
 } from './lifecycle-runtime';
+import { ownedActivation } from './owned-activation';
 import { CryptoHasher } from './runtime';
 import {
   inventoryPackageSemantics,
@@ -709,31 +709,7 @@ function recordedActivation(
   installation: TargetInstallationData,
   target: LifecycleTargetIdentity,
 ): RecordedOwnedActivation | null {
-  if ((activation.route.kind !== 'managed' && activation.route.kind !== 'native') || activation.ownership.kind === 'legacy-claim') return null;
-  if (activation.sourceRevision === undefined || activation.fingerprints.installed === undefined || installation.installedFingerprint === null) return null;
-  if (installation.contentRoots.length === 0) return null;
-  const sourceType = sourceTypeOf(source);
-  try {
-    return createRecordedOwnedActivation({
-      scopeId: scope.id,
-      target,
-      packageName: activation.packageId,
-      nativeId: activation.nativeId,
-      sourceType,
-      sourceRevision: activation.sourceRevision,
-      sourceLocator: source.kind === 'git' ? source.locator : null,
-      installedVersion: installation.installedVersion,
-      route: activation.route.kind,
-      evidenceId: activation.route.evidenceKey.key,
-      ownership: { kind: activation.ownership.kind, proofId: activation.ownership.proofKey.key },
-      activation: activation.activationState === 'nonconforming' ? 'nonconforming' : activation.activationState === 'active' ? 'active' : 'inactive',
-      enablement: installation.enablement === 'enabled' ? 'enabled' : 'disabled',
-      installedFingerprint: installation.installedFingerprint,
-      contentRoots: installation.contentRoots,
-    });
-  } catch {
-    return null;
-  }
+  return ownedActivation(scope, source, activation, installation, target);
 }
 
 function frozenPlan(
