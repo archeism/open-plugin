@@ -34,3 +34,5 @@ The previous `plgnz` executable remains an alias. Existing `.open-plugin` state,
 `.plgnz` ownership markers and host-managed directories retain their names so
 installed plugins continue to be recognized. `plugnz` is the public package,
 repository and preferred command name.
+
+<!-- verified: auto-publish fires on the next push after the trigger commit -->
