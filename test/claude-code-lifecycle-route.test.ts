@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fingerprintTree } from '../src/fingerprint';
+import type { FrozenPackageSnapshot, LifecycleHostAdapter, TargetInstallationData } from '../src/lifecycle-host';
 import { createFrozenPackageSnapshot, createLifecyclePlanCoverage, createRecordedOwnedActivation, createResolvedLifecyclePins } from '../src/lifecycle-runtime';
-import type { LifecycleHostAdapter, TargetInstallationData } from '../src/lifecycle-host';
 import type { PackageSemanticInventory } from '../src/semantic-inventory';
 import { createClaudeCodeLifecycleHost, type ClaudeNativeRemoteUpdateContract } from '../src/hosts/claude-code-writer';
 
@@ -208,9 +208,154 @@ describe('claude-code lifecycle route', () => {
       expect(await route(proven, root, { attemptId: 'exact-update', version: '1.1.0' })).toBe('native');
     });
   });
+
+  test('managed install readback rolls back, and retire keeps plugin data', async () => {
+    await withClaude(async (root) => {
+      const host = createClaudeCodeLifecycleHost();
+      const snapshot = updateSnapshot(root, 'install', '1.2.0', '3'.repeat(40), 'install');
+      const installed = await activate(host, snapshot);
+      const readback = await host.readback(installed.handle);
+      host.verify(installed.handle, readback);
+      expect(readFileSync(join(readback.contentRoots[0]!.path, 'plugin.json'), 'utf8')).toContain('"version":"1.2.0"');
+
+      const rolled = await host.rollback(installed.handle);
+      const restored = await host.readback(installed.handle);
+      host.verifyRollback(installed.handle, restored);
+      expect(rolled.changed).toBe(true);
+      expect(existsSync(readback.contentRoots[0]!.path)).toBe(false);
+      await host.cleanup(installed.handle, 'verified-rollback');
+
+      const again = await activate(host, updateSnapshot(root, 'reinstall', '1.2.0', '3'.repeat(40), 'install'));
+      const active = await host.readback(again.handle);
+      host.verify(again.handle, active);
+      const dataDir = join(root, 'plugins/plugin-data/demo@market');
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(join(dataDir, 'state.txt'), 'kept\n');
+      const observed = await host.observeTarget(claudeTarget);
+      const row = observed.installations.find((item) => item.nativeId === 'demo@market');
+      if (row === undefined) throw new Error('reinstalled Claude package was not observed');
+      const retired = await retire(host, observed, row);
+      const after = await host.readback(retired.handle);
+      host.verify(retired.handle, after);
+      expect(after.presence).toBe('absent');
+      expect(after.retention.pluginData).toEqual({ state: 'present', fingerprint: fingerprintTree(dataDir) });
+      expect(readFileSync(join(dataDir, 'state.txt'), 'utf8')).toBe('kept\n');
+      expect(existsSync(active.contentRoots[0]!.path)).toBe(false);
+    });
+  });
 });
 
-function updateSnapshot(root: string, attemptId: string, version: string, revision: string) {
+async function activate(host: LifecycleHostAdapter, snapshot: FrozenPackageSnapshot) {
+  const version = await host.probeVersion(claudeTarget);
+  const observed = await host.observeTarget(claudeTarget);
+  const pins = createResolvedLifecyclePins([]);
+  const projection = await host.observeNativeProjection({
+    targetObservation: observed,
+    operation: 'install',
+    snapshot,
+    pins,
+  });
+  const decision = host.decideRoute({
+    target: claudeTarget,
+    operationId: snapshot.operationId,
+    attemptId: snapshot.attemptId,
+    scopeId: snapshot.scopeId,
+    packageName: snapshot.packageName,
+    nativeId: snapshot.nativeId,
+    version,
+    sourceType: 'git',
+    targetObservation: observed,
+    nativeScope: await host.observeNativeMutationScope({
+      targetObservation: observed,
+      operation: 'install',
+      packageName: snapshot.packageName,
+      nativeId: snapshot.nativeId,
+      sourceType: 'git',
+    }),
+    nativeProjection: projection,
+    planCoverage: createLifecyclePlanCoverage(observed, [{
+      nativeId: snapshot.nativeId,
+      operationId: snapshot.operationId,
+      operation: 'install',
+      mutationGroupId: `group-${snapshot.attemptId}`,
+      authorization: 'planned-create',
+    }]),
+    operation: 'install',
+    snapshot,
+    pins,
+  });
+  if (decision.kind !== 'selected' || decision.route !== 'managed') {
+    throw new Error(`expected managed install, got ${decision.kind}`);
+  }
+  const staged = await host.stageActivation({ selection: decision, snapshot, pins });
+  const directed = await host.applyLifecycleDirectives(staged);
+  const pinned = await host.applyPins(directed);
+  const prepared = await host.sealActivation(pinned);
+  const receipt = await host.apply(prepared);
+  return receipt;
+}
+
+async function retire(
+  host: LifecycleHostAdapter,
+  observed: Awaited<ReturnType<LifecycleHostAdapter['observeTarget']>>,
+  installed: TargetInstallationData,
+) {
+  if (installed.ownership.kind !== 'owned' || installed.installedFingerprint === null || installed.source === null) {
+    throw new Error('installed Claude package is not owned');
+  }
+  const version = await host.probeVersion(claudeTarget);
+  const operationId = 'op-retire-data';
+  const attemptId = 'retire-data';
+  const activation = recorded(installed);
+  const projection = await host.observeNativeProjection({
+    targetObservation: observed,
+    operation: 'retire',
+    operationId,
+    attemptId,
+    activation,
+  });
+  const decision = host.decideRoute({
+    target: claudeTarget,
+    operationId,
+    attemptId,
+    scopeId: 'scope-demo',
+    packageName: 'demo',
+    nativeId: 'demo@market',
+    version,
+    sourceType: 'git',
+    targetObservation: observed,
+    nativeScope: await host.observeNativeMutationScope({
+      targetObservation: observed,
+      operation: 'retire',
+      packageName: 'demo',
+      nativeId: 'demo@market',
+      sourceType: 'git',
+    }),
+    nativeProjection: projection,
+    planCoverage: createLifecyclePlanCoverage(observed, [{
+      nativeId: 'demo@market',
+      operationId,
+      operation: 'retire',
+      mutationGroupId: 'group-retire-data',
+      authorization: 'observed-owned',
+    }]),
+    operation: 'retire',
+    activation,
+  });
+  if (decision.kind !== 'selected' || decision.route !== 'managed') {
+    throw new Error(`expected managed retire, got ${decision.kind}`);
+  }
+  const prepared = await host.prepareRetirement({
+    operationId,
+    attemptId,
+    action: 'remove',
+    selection: decision,
+    activation,
+  });
+  return host.retire(prepared);
+}
+
+function updateSnapshot(root: string, attemptId: string, version: string, revision: string, action: 'install' | 'update' = 'update') {
   const snapshotRoot = join(root, `snapshot-${attemptId}`);
   const packageRoot = join(snapshotRoot, 'packages/demo');
   mkdirSync(packageRoot, { recursive: true });
@@ -233,7 +378,7 @@ function updateSnapshot(root: string, attemptId: string, version: string, revisi
     attemptId,
     scopeId: 'scope-demo',
     target: claudeTarget,
-    action: 'update',
+    action,
     packageName: 'demo',
     nativeId: 'demo@market',
     sourceType: 'git',

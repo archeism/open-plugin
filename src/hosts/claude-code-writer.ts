@@ -10,12 +10,15 @@ import { pinPluginMcpFiles } from '../mcp-write';
 
 import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
 import { fingerprintTree } from '../fingerprint';
-import { createLifecycleHostAdapter } from '../lifecycle-runtime';
+import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
 import type {
+  DurableLifecycleOperation,
   LifecycleHostAdapter,
   LifecycleHostDefinition,
+  LifecycleReadbackData,
   NativeProjectionData,
   NativeProjectionRequest,
+  SelectedLifecycleRoute,
   TargetInstallationData,
   TargetVersionObservation,
 } from '../lifecycle-host';
@@ -23,7 +26,7 @@ import { PACKAGE_SEMANTICS, type PackageSemantic } from '../semantic-inventory';
 import { validateSourceBinding } from '../source-reference';
 import { CryptoHasher } from '../runtime';
 const OWNERSHIP = '.plgnz-install.json';
-type Ownership = { source: string; pluginId: string; fingerprint: string; adopted?: true };
+type Ownership = { source: string; pluginId: string; fingerprint: string; adopted?: true; scopeId?: string };
 type Registry = { version: number; plugins: Record<string, unknown> };
 
 export const claudeCodeWriter: HostWriter = {
@@ -569,7 +572,16 @@ function readOwnership(dir: string): Ownership | null {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
     if (typeof parsed !== 'object' || parsed === null) return null;
     const value = parsed as Record<string, unknown>;
-    return typeof value['source'] === 'string' && typeof value['pluginId'] === 'string' && typeof value['fingerprint'] === 'string' && (value['adopted'] === undefined || value['adopted'] === true) ? { source: value['source'], pluginId: value['pluginId'], fingerprint: value['fingerprint'], ...(value['adopted'] === true ? { adopted: true } : {}) } : null;
+    if (typeof value['source'] !== 'string' || typeof value['pluginId'] !== 'string' || typeof value['fingerprint'] !== 'string') return null;
+    if (value['adopted'] !== undefined && value['adopted'] !== true) return null;
+    if (value['scopeId'] !== undefined && typeof value['scopeId'] !== 'string') return null;
+    return {
+      source: value['source'],
+      pluginId: value['pluginId'],
+      fingerprint: value['fingerprint'],
+      ...(value['adopted'] === true ? { adopted: true as const } : {}),
+      ...(typeof value['scopeId'] === 'string' ? { scopeId: value['scopeId'] } : {}),
+    };
   } catch { return null; }
 }
 
@@ -687,19 +699,93 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
       affectedNativeIds: [request.nativeId],
     }),
     observeNativeProjection: async (request) => nativeProjection(contracts, request),
-    revalidateTargetPrecondition: async () => unsupportedLifecycleMutation('revalidation'),
-    stageActivation: async () => unsupportedLifecycleMutation('stage'),
-    applyLifecycleDirectives: async () => unsupportedLifecycleMutation('directives'),
-    applyPins: async () => unsupportedLifecycleMutation('pins'),
-    captureActivationPreparation: async () => unsupportedLifecycleMutation('activation-capture'),
-    captureDisablePreparation: async () => unsupportedLifecycleMutation('disable-capture'),
-    captureRetirementPreparation: async () => unsupportedLifecycleMutation('retirement-capture'),
-    apply: async () => unsupportedLifecycleMutation('apply'),
-    disable: async () => unsupportedLifecycleMutation('disable'),
-    retire: async () => unsupportedLifecycleMutation('retire'),
-    readback: async () => unsupportedLifecycleMutation('readback'),
-    rollback: async () => unsupportedLifecycleMutation('rollback'),
-    cleanup: async () => unsupportedLifecycleMutation('cleanup'),
+    revalidateTargetPrecondition: async (handle) => ({
+      version: claudeVersionObservation(),
+      targetObservationId: createTargetInventoryObservation('claude-code', {
+        target: handle.target,
+        installations: observeClaudeInstallations(),
+      }).observationId,
+    }),
+    stageActivation: async (request) => {
+      const stagingRoot = lifecyclePath('.plgnz-lifecycle', request.snapshot.attemptId, request.snapshot.operationId);
+      rmSync(stagingRoot, { recursive: true, force: true });
+      mkdirSync(dirname(stagingRoot), { recursive: true });
+      stagePlugin(
+        request.snapshot.packageRoot,
+        stagingRoot,
+        request.snapshot.packageName,
+        slotVersion(request.snapshot.inventory.package.version, request.snapshot.immutableRevision),
+      );
+      return { stagingId: `${request.snapshot.attemptId}:${request.snapshot.operationId}`, stagingRoot };
+    },
+    applyLifecycleDirectives: async (projection) => {
+      writeFileSync(join(projection.stagingRoot, OWNERSHIP), JSON.stringify({
+        source: projection.sourceLocator ?? projection.sourceRevision,
+        pluginId: projection.nativeId,
+        fingerprint: projection.snapshot.packageFingerprint,
+        scopeId: projection.scopeId,
+      }));
+      writeFileSync(join(projection.stagingRoot, '.plgnz-lifecycle.json'), JSON.stringify({ autoUpdate: false, route: projection.route }));
+      return ['claude-code.auto-update', 'claude-code.ownership'];
+    },
+    applyPins: async (projection) => {
+      pinPluginMcpFiles(projection.stagingRoot, mcpCandidates());
+      return projection.pins.map(({ server }) => server);
+    },
+    captureActivationPreparation: async (projection, projectedFingerprint) => {
+      const installPath = cacheSlot(projection.nativeId, slotVersion(projection.packageVersion, projection.sourceRevision));
+      const prior = claudeReadback(projection, 'none');
+      return {
+        prior,
+        expected: {
+          ...prior,
+          route: projection.route,
+          presence: 'present' as const,
+          enablement: 'enabled' as const,
+          activation: 'active' as const,
+          transition: effectiveTransition(),
+          installedFingerprint: projectedFingerprint,
+          contentRoots: [{ label: 'plugin', path: installPath, fingerprint: projectedFingerprint }],
+        },
+        rollbackReference: captureRollback(projection.attemptId, projection.operationId, projection.nativeId),
+        rollbackCoverageOperationIds: [...projection.affectedOperationIds],
+      };
+    },
+    captureDisablePreparation: async (request) => ({
+      prior: claudeReadback(activationIdentity(request.activation), 'none'),
+      rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId),
+      rollbackCoverageOperationIds: [...request.selection.affectedOperationIds],
+      transition: effectiveTransition(),
+    }),
+    captureRetirementPreparation: async (request) => ({
+      prior: claudeReadback(activationIdentity(request.activation), 'none'),
+      rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId),
+      rollbackCoverageOperationIds: [...request.selection.affectedOperationIds],
+      transition: effectiveTransition(),
+    }),
+    apply: async (prepared) => {
+      if (prepared.handle.route === 'native') throw new Error('claude-code native update is not invoked without a sandbox command');
+      return mutateInstall(prepared.handle, prepared.stagingRoot);
+    },
+    disable: async (prepared) => setEnabled(prepared.handle, false, `claude-disable-${prepared.handle.operationId}`),
+    retire: async (prepared) => {
+      const installPath = recordedInstallPath(prepared.handle.nativeId);
+      const existed = installPath !== undefined && existsSync(installPath);
+      if (installPath !== undefined) rmSync(installPath, { recursive: true, force: true });
+      dropUserRow(prepared.handle.nativeId);
+      setEnabled(prepared.handle, false, `claude-retire-${prepared.handle.operationId}`);
+      return { receiptId: `claude-retire-${prepared.handle.operationId}`, changed: existed };
+    },
+    readback: async (handle) => claudeReadback(
+      handle,
+      handle.action === 'remove' || handle.action === 'retire-orphan' ? handle.route : 'none',
+    ),
+    rollback: async (handle) => restoreRollback(handle),
+    cleanup: async (reference) => {
+      rmSync(lifecyclePath('.plgnz-lifecycle', reference.attemptId, reference.operationId), { recursive: true, force: true });
+      rmSync(lifecyclePath('.plgnz-rollback', reference.attemptId, reference.operationId), { recursive: true, force: true });
+      return { cleanupId: `claude-cleanup-${reference.operationId}`, completed: true as const };
+    },
   };
 }
 
@@ -843,7 +929,7 @@ function observeClaudeInstallations(): TargetInstallationData[] {
         ? {
           kind: 'owned',
           proof: marker.adopted === true ? 'adopted' : 'created',
-          scopeId: `claude-code:${id}`,
+          scopeId: marker.scopeId ?? `claude-code:${id}`,
           proofId: `claude-code:${id}`,
         }
         : { kind: 'unmanaged' },
@@ -870,6 +956,207 @@ function gitLocator(source: string): string | undefined {
   }
 }
 
-function unsupportedLifecycleMutation(phase: string): never {
-  throw new Error(`claude-code lifecycle ${phase} is not implemented`);
+function effectiveTransition(): LifecycleReadbackData['transition'] {
+  return { requirement: 'none', status: 'effective' };
+}
+
+function activationIdentity(activation: {
+  target: LifecycleReadbackData['target'];
+  scopeId: string;
+  packageName: string;
+  nativeId: string;
+}): Pick<LifecycleReadbackData, 'adapterId' | 'target' | 'scopeId' | 'packageName' | 'nativeId'> {
+  return { adapterId: 'claude-code', ...activation };
+}
+
+function claudeReadback(
+  identity: Pick<LifecycleReadbackData, 'adapterId' | 'target' | 'scopeId' | 'packageName' | 'nativeId'>,
+  absentRoute: SelectedLifecycleRoute | 'none',
+): LifecycleReadbackData {
+  const installPath = recordedInstallPath(identity.nativeId);
+  const present = installPath !== undefined && existsSync(installPath);
+  const retention = {
+    pluginData: retained(resolve(join(pluginsDir(), 'plugin-data', identity.nativeId))),
+    inactiveMetadata: retained(resolve(join(pluginsDir(), 'inactive-metadata', identity.nativeId))),
+  };
+  if (!present || installPath === undefined) {
+    return {
+      ...identity,
+      route: absentRoute,
+      presence: 'absent',
+      enablement: 'disabled',
+      activation: 'inactive',
+      transition: effectiveTransition(),
+      installedFingerprint: null,
+      contentRoots: [],
+      retention,
+    };
+  }
+  const digest = fingerprintTree(installPath);
+  const enabled = enabledPlugins()[identity.nativeId] === true;
+  return {
+    ...identity,
+    route: installedRoute(installPath),
+    presence: 'present',
+    enablement: enabled ? 'enabled' : 'disabled',
+    activation: enabled ? 'active' : 'inactive',
+    transition: effectiveTransition(),
+    installedFingerprint: digest,
+    contentRoots: [{ label: 'plugin', path: installPath, fingerprint: digest }],
+    retention,
+  };
+}
+
+function installedRoute(installPath: string): SelectedLifecycleRoute {
+  const file = join(installPath, '.plgnz-lifecycle.json');
+  if (!existsSync(file)) return 'managed';
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null && (parsed as Record<string, unknown>)['route'] === 'native') return 'native';
+  } catch {
+    return 'managed';
+  }
+  return 'managed';
+}
+
+function retained(path: string): LifecycleReadbackData['retention']['pluginData'] {
+  if (!existsSync(path)) return { state: 'absent', fingerprint: null };
+  return { state: 'present', fingerprint: fingerprintTree(path) };
+}
+
+function enabledPlugins(): Record<string, unknown> {
+  const enabled = readSettings(join(pluginsDir(), '..', 'settings.json'))['enabledPlugins'];
+  return typeof enabled === 'object' && enabled !== null && !Array.isArray(enabled)
+    ? enabled as Record<string, unknown>
+    : {};
+}
+
+function recordedInstallPath(nativeId: string): string | undefined {
+  const rows = readRegistry(join(pluginsDir(), 'installed_plugins.json')).plugins[nativeId];
+  if (!Array.isArray(rows)) return undefined;
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue;
+    const record = row as Record<string, unknown>;
+    if (record['scope'] === 'user' && typeof record['installPath'] === 'string') return resolve(record['installPath']);
+  }
+  return undefined;
+}
+
+function cacheSlot(nativeId: string, version: string): string {
+  const at = nativeId.indexOf('@');
+  const name = at === -1 ? nativeId : nativeId.slice(0, at);
+  const market = at === -1 ? 'local' : nativeId.slice(at + 1);
+  return resolve(join(pluginsDir(), 'cache', market, name, version));
+}
+
+function slotVersion(version: string | null, revision: string): string {
+  const selected = version ?? revision;
+  if (selected.length === 0 || selected.includes('/') || selected.includes('\\')) {
+    throw new Error(`claude-code cache version is not a single path segment: ${selected}`);
+  }
+  return selected;
+}
+
+function lifecyclePath(kind: '.plgnz-lifecycle' | '.plgnz-rollback', attemptId: string, operationId: string): string {
+  return resolve(join(pluginsDir(), kind, attemptId, operationId));
+}
+
+function captureRollback(attemptId: string, operationId: string, nativeId: string): string {
+  const reference = lifecyclePath('.plgnz-rollback', attemptId, operationId);
+  rmSync(reference, { recursive: true, force: true });
+  mkdirSync(reference, { recursive: true });
+  saveOptional(join(pluginsDir(), 'installed_plugins.json'), join(reference, 'registry.json'));
+  saveOptional(join(pluginsDir(), '..', 'settings.json'), join(reference, 'settings.json'));
+  const installPath = recordedInstallPath(nativeId);
+  if (installPath !== undefined && existsSync(installPath)) {
+    cpSync(installPath, join(reference, 'install'), { recursive: true });
+    writeFileSync(join(reference, 'install-path.txt'), installPath);
+  }
+  return reference;
+}
+
+function saveOptional(file: string, dest: string): void {
+  writeFileSync(dest, existsSync(file) ? readFileSync(file, 'utf8') : '');
+}
+
+function restoreOptional(file: string, dest: string): void {
+  const bytes = readFileSync(dest, 'utf8');
+  if (bytes.length === 0) {
+    rmSync(file, { force: true });
+    return;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, bytes);
+}
+
+function mutateInstall(handle: DurableLifecycleOperation, stagingRoot: string): { receiptId: string; changed: boolean } {
+  if (handle.projectedFingerprint === null) throw new Error('claude-code activation is missing its sealed fingerprint');
+  const installPath = cacheSlot(handle.nativeId, slotVersion(handle.packageVersion, handle.sourceRevision));
+  const before = existsSync(installPath) ? fingerprintTree(installPath) : null;
+  rmSync(installPath, { recursive: true, force: true });
+  mkdirSync(dirname(installPath), { recursive: true });
+  cpSync(stagingRoot, installPath, { recursive: true });
+  const registryFile = join(pluginsDir(), 'installed_plugins.json');
+  const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const source: ResolvedSource = {
+    sourceUri: handle.sourceLocator ?? handle.sourceRevision,
+    sha: handle.sourceRevision,
+    isGit: handle.sourceType === 'git',
+    plugins: [],
+  };
+  try {
+    writeRegistry(registryFile, registryWithEntry(readRegistry(registryFile), handle.nativeId, installPath, slotVersion(handle.packageVersion, handle.sourceRevision), source));
+    writeSettings(settingsFile, settingsWithEnabled(readSettings(settingsFile), handle.nativeId, true));
+  } catch (error) {
+    rmSync(installPath, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    receiptId: `claude-apply-${handle.operationId}`,
+    changed: before !== handle.projectedFingerprint,
+  };
+}
+
+function setEnabled(handle: DurableLifecycleOperation, enabled: boolean, receiptId: string): { receiptId: string; changed: boolean } {
+  const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const was = enabledPlugins()[handle.nativeId] === true;
+  writeSettings(settingsFile, settingsWithEnabled(readSettings(settingsFile), handle.nativeId, enabled));
+  return { receiptId, changed: was !== enabled };
+}
+
+function dropUserRow(nativeId: string): void {
+  const registryFile = join(pluginsDir(), 'installed_plugins.json');
+  const registry = readRegistry(registryFile);
+  const rows = registry.plugins[nativeId];
+  if (!Array.isArray(rows)) return;
+  const retained = rows.filter((row) => typeof row !== 'object' || row === null || (row as Record<string, unknown>)['scope'] !== 'user');
+  const next: Registry = { ...registry, plugins: { ...registry.plugins } };
+  if (retained.length === 0) delete next.plugins[nativeId];
+  else next.plugins[nativeId] = retained;
+  writeRegistry(registryFile, next);
+}
+
+function restoreRollback(handle: DurableLifecycleOperation): { receiptId: string; changed: boolean } {
+  const reference = handle.rollbackReference;
+  const registryFile = join(pluginsDir(), 'installed_plugins.json');
+  const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const savedPath = join(reference, 'install-path.txt');
+  const installPath = existsSync(savedPath)
+    ? readFileSync(savedPath, 'utf8')
+    : recordedInstallPath(handle.nativeId) ?? cacheSlot(handle.nativeId, slotVersion(handle.packageVersion, handle.sourceRevision));
+  const beforeRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
+  const beforeInstall = existsSync(installPath);
+  restoreOptional(registryFile, join(reference, 'registry.json'));
+  restoreOptional(settingsFile, join(reference, 'settings.json'));
+  const backup = join(reference, 'install');
+  rmSync(installPath, { recursive: true, force: true });
+  if (existsSync(backup)) {
+    mkdirSync(dirname(installPath), { recursive: true });
+    cpSync(backup, installPath, { recursive: true });
+  }
+  const afterRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
+  return {
+    receiptId: `claude-rollback-${handle.operationId}`,
+    changed: beforeRegistry !== afterRegistry || beforeInstall !== existsSync(installPath),
+  };
 }
