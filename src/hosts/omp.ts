@@ -154,3 +154,69 @@ export const omp: HostReader = {
     return entries;
   },
 };
+
+export type OmpFrozenCatalogBinding = {
+  readonly marketplace: string;
+  readonly pluginId: string;
+  readonly immutableRevision: string;
+};
+
+export type OmpSynchronousReadback = {
+  readonly synchronous: true;
+  readonly readbackFingerprint: string;
+};
+
+export type OmpNativeUpgradeCandidate =
+  | {
+      readonly kind: 'exact-package';
+      readonly catalog: OmpFrozenCatalogBinding | null;
+      readonly readback: OmpSynchronousReadback | null;
+    }
+  | { readonly kind: 'all-plugins' };
+
+export type OmpNativeUpgradeGap = 'all-plugin-upgrade' | 'frozen-catalog-binding' | 'synchronous-readback';
+
+export type OmpNativeUpgradeDecision =
+  | { readonly status: 'eligible'; readonly route: 'native'; readonly mode: 'exact-package' }
+  | { readonly status: 'ineligible'; readonly route: 'managed'; readonly missing: readonly OmpNativeUpgradeGap[] };
+
+export function selectOmpNativeUpgrade(candidate: OmpNativeUpgradeCandidate): OmpNativeUpgradeDecision {
+  switch (candidate.kind) {
+    case 'all-plugins':
+      return { status: 'ineligible', route: 'managed', missing: ['all-plugin-upgrade'] };
+    case 'exact-package':
+      return exactPackageDecision(candidate.catalog, candidate.readback);
+    default: {
+      const unreachable: never = candidate;
+      return unreachable;
+    }
+  }
+}
+
+function exactPackageDecision(
+  catalog: OmpFrozenCatalogBinding | null,
+  readback: OmpSynchronousReadback | null,
+): OmpNativeUpgradeDecision {
+  const missing: OmpNativeUpgradeGap[] = [];
+  if (!isFrozenCatalog(catalog)) missing.push('frozen-catalog-binding');
+  if (!isSynchronousReadback(readback)) missing.push('synchronous-readback');
+  if (missing.length > 0) return { status: 'ineligible', route: 'managed', missing };
+  return { status: 'eligible', route: 'native', mode: 'exact-package' };
+}
+
+function isFrozenCatalog(catalog: OmpFrozenCatalogBinding | null): catalog is OmpFrozenCatalogBinding {
+  return catalog !== null
+    && isIdentity(catalog.marketplace)
+    && isIdentity(catalog.pluginId)
+    && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(catalog.immutableRevision);
+}
+
+function isSynchronousReadback(readback: OmpSynchronousReadback | null): readback is OmpSynchronousReadback {
+  return readback !== null
+    && readback.synchronous === true
+    && /^[0-9a-f]{64}$/u.test(readback.readbackFingerprint);
+}
+
+function isIdentity(value: string): boolean {
+  return value.trim() === value && value.length > 0 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
