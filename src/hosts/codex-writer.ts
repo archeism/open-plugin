@@ -6,8 +6,8 @@
  * code (AGENTS.md: doctor is read-only by construction;
  * test/doctor-imports.test.ts pins it).
  */
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse as parseToml } from 'smol-toml';
 import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
@@ -15,19 +15,32 @@ import { projectPluginForCodex } from '../conversion';
 import { fingerprintTree } from '../fingerprint';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type {
+  ActivationPreparationCapture,
+  CleanupReference,
+  CleanupResultData,
+  DirectivesAppliedProjection,
+  DurableLifecycleOperation,
   LifecycleHostDefinition,
+  LifecycleReadbackData,
+  LifecycleTargetIdentity,
+  MutationResultData,
   NativeMutationScopeData,
   NativeProjectionData,
   NativeProjectionRequest,
+  PinsAppliedProjection,
+  PreparedActivationMutation,
+  PreparedRetirementMutation,
+  RetirementPreparationCapture,
   TargetInstallationData,
   TargetInventoryData,
 } from '../lifecycle-host';
-import { createLifecycleHostAdapter } from '../lifecycle-runtime';
+import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
 import { pinPluginMcpFiles } from '../mcp-write';
 import { codexHome } from '../paths';
-import { PACKAGE_SEMANTICS, type PackageSemantic } from '../semantic-inventory';
+import { CryptoHasher, spawnSync } from '../runtime';
+import { PACKAGE_SEMANTICS, type CapabilityOperation, type PackageSemantic } from '../semantic-inventory';
 import { readPluginManifest, type PluginSource, type ResolvedSource } from '../source';
-import { codex, configFile, mcpCandidates, probeCodexVersion } from './codex';
+import { codex, configFile, mcpCandidates, probeCodexVersion, resolveCodexBinary } from './codex';
 
 const OWNERSHIP = '.plgnz-install.json';
 
@@ -427,10 +440,16 @@ type CodexCatalogBinding =
   | { readonly kind: 'absent'; readonly marketplace: string };
 
 const CODEX_ROUTE_VERSION = '0.162.0';
+const RELOAD_EFFECTIVE = { requirement: 'reload', status: 'effective' } as const;
+const UPDATE_SEMANTICS = ['auto-update-control', 'readback', 'rollback', 'activation-reload'] as const satisfies readonly PackageSemantic[];
+const MANAGED_SEMANTICS = [...UPDATE_SEMANTICS, 'retirement', 'retention-safety'] as const satisfies readonly PackageSemantic[];
 
 const codexEvidenceProfiles: readonly CapabilityEvidenceProfile[] = [
-  codexRouteProfile('native', ['docs/research/native-plugin-update-capabilities-2026-10-09.md']),
-  codexRouteProfile('managed', ['docs/hosts/codex.md']),
+  codexRouteProfile('native', ['update'], UPDATE_SEMANTICS, ['docs/research/native-plugin-update-capabilities-2026-10-09.md']),
+  codexRouteProfile('managed', ['update', 'retire'], MANAGED_SEMANTICS, [
+    'docs/hosts/codex.md',
+    'docs/adr/0004-retain-plugin-state-on-removal.md',
+  ]),
 ];
 
 const codexLifecycleDefinition = {
@@ -452,63 +471,463 @@ const codexLifecycleDefinition = {
     return { kind: 'bounded', mode: 'marketplace-wide', affectedNativeIds: [first, ...rest] };
   },
   observeNativeProjection: async (request): Promise<NativeProjectionData> => nativeProjection(request),
-  revalidateTargetPrecondition: async () => {
-    throw new Error('codex lifecycle precondition is not routed yet');
-  },
-  stageActivation: async () => {
-    throw new Error('codex lifecycle staging is not routed yet');
-  },
-  applyLifecycleDirectives: async () => {
-    throw new Error('codex lifecycle directives are not routed yet');
-  },
-  applyPins: async () => {
-    throw new Error('codex lifecycle pins are not routed yet');
-  },
-  captureActivationPreparation: async () => {
-    throw new Error('codex lifecycle activation capture is not routed yet');
-  },
+  revalidateTargetPrecondition: async (handle) => revalidateCodexTarget(handle),
+  stageActivation: async (request) => stageCodexActivation(request),
+  applyLifecycleDirectives: async () => [],
+  applyPins: async (projection) => applyCodexPins(projection),
+  captureActivationPreparation: async (projection, projectedFingerprint) => captureCodexActivation(projection, projectedFingerprint),
   captureDisablePreparation: async () => {
-    throw new Error('codex lifecycle disable capture is not routed yet');
+    throw new Error('codex lifecycle disable is not routed yet');
   },
-  captureRetirementPreparation: async () => {
-    throw new Error('codex lifecycle retirement capture is not routed yet');
-  },
-  apply: async () => {
-    throw new Error('codex lifecycle apply is not routed yet');
-  },
+  captureRetirementPreparation: async (request) => captureCodexRetirement(request),
+  apply: async (prepared) => applyCodexActivation(prepared),
   disable: async () => {
     throw new Error('codex lifecycle disable is not routed yet');
   },
-  retire: async () => {
-    throw new Error('codex lifecycle retire is not routed yet');
-  },
-  readback: async () => {
-    throw new Error('codex lifecycle readback is not routed yet');
-  },
-  rollback: async () => {
-    throw new Error('codex lifecycle rollback is not routed yet');
-  },
-  cleanup: async () => {
-    throw new Error('codex lifecycle cleanup is not routed yet');
-  },
+  retire: async (prepared) => retireCodex(prepared),
+  readback: async (handle) => readCodexInstall(handle),
+  rollback: async (handle) => restoreCodexRollback(handle),
+  cleanup: async (reference) => cleanupCodexStage(reference),
 } satisfies LifecycleHostDefinition;
 
 export const codexLifecycle = createLifecycleHostAdapter(codexLifecycleDefinition);
 
-function codexRouteProfile(route: 'native' | 'managed', evidence: readonly string[]): CapabilityEvidenceProfile {
-  const supported = new Set<PackageSemantic>(['auto-update-control', 'readback', 'rollback', 'activation-reload']);
+function codexRouteProfile(
+  route: 'native' | 'managed',
+  operations: readonly CapabilityOperation[],
+  supportedSemantics: readonly PackageSemantic[],
+  evidence: readonly string[],
+): CapabilityEvidenceProfile {
+  const supported = new Set<PackageSemantic>(supportedSemantics);
   const semantics = {} as Record<PackageSemantic, CapabilityStatus>;
   for (const semantic of PACKAGE_SEMANTICS) semantics[semantic] = supported.has(semantic) ? 'supported' : 'unsupported';
   return createCapabilityEvidenceProfile({
     host: 'codex',
     detectedVersion: CODEX_ROUTE_VERSION,
     sourceTypes: ['git', 'local'],
-    operations: ['update'],
+    operations,
     route,
     operationStatus: 'supported',
     semantics,
     evidence,
   });
+}
+
+function revalidateCodexTarget(handle: DurableLifecycleOperation): { version: ReturnType<typeof probeCodexVersion>; targetObservationId: string } {
+  const version = probeCodexVersion();
+  const observation = createTargetInventoryObservation('codex', {
+    target: handle.target,
+    installations: codex.listInstalled().map(installationRecord),
+  });
+  return { version, targetObservationId: observation.observationId };
+}
+
+function stageCodexActivation(request: Parameters<LifecycleHostDefinition['stageActivation']>[0]): { stagingId: string; stagingRoot: string } {
+  const stagingId = `${request.snapshot.attemptId}:${request.snapshot.operationId}`;
+  const stagingRoot = resolve(join(codexHome(), '.plgnz-lifecycle', stagingId));
+  assertManagedPath(codexHome(), stagingRoot);
+  rmSync(stagingRoot, { recursive: true, force: true });
+  mkdirSync(stagingRoot, { recursive: true });
+  projectPluginForCodex(request.snapshot.packageRoot, stagingRoot);
+  const version = pluginVersion(stagingRoot);
+  if (!validVersionSegment(version)) throw new Error(`unsafe Codex plugin version: ${version}`);
+  ensureNativeManifest(stagingRoot, request.snapshot.packageName, version);
+  validateStage(stagingRoot);
+  const source = request.snapshot.nativeGit?.locator ?? request.snapshot.immutableRevision;
+  writeFileSync(join(stagingRoot, OWNERSHIP), JSON.stringify({
+    source,
+    pluginId: request.snapshot.nativeId,
+    fingerprint: request.snapshot.packageFingerprint,
+  }));
+  return { stagingId, stagingRoot };
+}
+
+function applyCodexPins(projection: DirectivesAppliedProjection): readonly string[] {
+  if (projection.pins.length === 0) return [];
+  const outcome = pinPluginMcpFiles(projection.stagingRoot, mcpCandidates());
+  if (outcome.refusals.length > 0) throw new Error(`codex pin refused ${outcome.refusals.map((refusal) => refusal.server).join(', ')}`);
+  return projection.pins.map((pin) => pin.server);
+}
+
+function captureCodexActivation(projection: PinsAppliedProjection, projectedFingerprint: string): ActivationPreparationCapture {
+  const version = pluginVersion(projection.stagingRoot);
+  const destination = cacheDestination(projection.nativeId, version);
+  const prior = readInstall({
+    target: projection.target,
+    scopeId: projection.scopeId,
+    packageName: projection.packageName,
+    nativeId: projection.nativeId,
+  });
+  saveCodexRollback(projection.attemptId, projection.operationId, projection.affectedNativeIds);
+  return {
+    prior,
+    expected: {
+      ...prior,
+      route: projection.route,
+      presence: 'present',
+      enablement: 'enabled',
+      activation: 'active',
+      transition: RELOAD_EFFECTIVE,
+      installedFingerprint: projectedFingerprint,
+      contentRoots: [{ label: 'plugin', path: destination, fingerprint: projectedFingerprint }],
+    },
+    rollbackReference: codexRollbackReference(projection.attemptId, projection.operationId),
+    rollbackCoverageOperationIds: projection.affectedOperationIds,
+  };
+}
+
+function captureCodexRetirement(request: Parameters<LifecycleHostDefinition['captureRetirementPreparation']>[0]): RetirementPreparationCapture {
+  const prior = readInstall({
+    target: request.activation.target,
+    scopeId: request.activation.scopeId,
+    packageName: request.activation.packageName,
+    nativeId: request.activation.nativeId,
+    route: 'managed',
+  });
+  saveCodexRollback(request.attemptId, request.operationId, request.selection.affectedNativeIds);
+  return {
+    prior,
+    rollbackReference: codexRollbackReference(request.attemptId, request.operationId),
+    rollbackCoverageOperationIds: request.selection.affectedOperationIds,
+    transition: RELOAD_EFFECTIVE,
+  };
+}
+
+function applyCodexActivation(prepared: PreparedActivationMutation): MutationResultData {
+  switch (prepared.handle.route) {
+    case 'native':
+      return applyNativeMarketplaceUpgrade(prepared);
+    case 'managed':
+      return applyManagedCodexActivation(prepared);
+    default: {
+      const unreachable: never = prepared.handle.route;
+      throw new Error(`unreachable Codex lifecycle route: ${String(unreachable)}`);
+    }
+  }
+}
+
+function applyManagedCodexActivation(prepared: PreparedActivationMutation): MutationResultData {
+  const { handle, stagingRoot } = prepared;
+  const version = pluginVersion(stagingRoot);
+  if (!validVersionSegment(version)) throw new Error(`unsafe Codex plugin version: ${version}`);
+  const marketplace = marketplaceOf(handle.nativeId);
+  if (marketplace === null) throw new Error(`codex native id has no marketplace: ${handle.nativeId}`);
+  const name = handle.nativeId.slice(0, handle.nativeId.indexOf('@'));
+  const slot = join(codexHome(), 'plugins', 'cache', marketplace, name);
+  const targetDir = join(slot, version);
+  const configPath = configFile();
+  assertManagedConfigPath(codexHome(), configPath);
+  assertManagedPath(codexHome(), slot);
+  mkdirSync(slot, { recursive: true });
+  assertNoSymlinks(slot);
+  const source = readOwnership(stagingRoot)?.source ?? handle.sourceLocator ?? handle.sourceRevision;
+  assertNoWinningForeignVersion(slot, version, handle.nativeId, source);
+  const marker = readOwnership(targetDir);
+  if (marker !== null && (marker.source !== source || marker.pluginId !== handle.nativeId)) {
+    throw new Error(`codex cache slot ${targetDir} has a different owned source identity; refusing to replace it`);
+  }
+  const before = cacheFingerprint(handle.nativeId);
+  const configBefore = readConfigSnapshot(configPath);
+  const activation = activate(stagingRoot, targetDir, slot);
+  try {
+    enable(configPath, handle.nativeId);
+  } catch (error) {
+    try { restoreConfig(configPath, configBefore); }
+    finally { activation.rollback(); }
+    throw error;
+  }
+  activation.commit();
+  cleanupOwnedVersions(slot, targetDir, handle.nativeId, source);
+  return {
+    receiptId: `apply:${handle.attemptId}:${handle.operationId}`,
+    changed: before !== cacheFingerprint(handle.nativeId),
+  };
+}
+
+function applyNativeMarketplaceUpgrade(prepared: PreparedActivationMutation): MutationResultData {
+  const marketplace = marketplaceOf(prepared.handle.nativeId);
+  if (marketplace === null) throw new Error(`codex native id has no marketplace: ${prepared.handle.nativeId}`);
+  const binding = catalogBinding(marketplace);
+  if (binding.kind !== 'sha-bound' || prepared.handle.sourceLocator !== binding.source || prepared.handle.sourceRevision !== binding.sha) {
+    throw new Error(`codex marketplace upgrade refused: ${catalogRefusal(binding, prepared.handle.sourceLocator === null ? undefined : { locator: prepared.handle.sourceLocator, resolvedRevision: prepared.handle.sourceRevision })}`);
+  }
+  const before = fingerprintAffected(prepared.handle.affectedNativeIds);
+  const binary = resolveCodexBinary();
+  if (binary === null) throw new Error('codex marketplace upgrade stderr-only failure: codex binary is unavailable');
+  const result = spawnSync([binary, 'plugin', 'marketplace', 'upgrade', marketplace, '--json'], {
+    env: codexCommandEnv(),
+    timeout: 10_000,
+  });
+  const stdout = decodeBytes(result.stdout);
+  const stderr = decodeBytes(result.stderr).trim();
+  const parsed = parseUpgradeJson(stdout);
+  const after = fingerprintAffected(prepared.handle.affectedNativeIds);
+  const errors = parsed?.errors ?? [];
+  const success = result.exitCode === 0 && parsed !== null && errors.length === 0;
+  if (!success) {
+    const changed = prepared.handle.affectedNativeIds.filter((nativeId) => before.get(nativeId) !== after.get(nativeId));
+    if (changed.length > 0 || errors.length > 0) {
+      const unchanged = prepared.handle.affectedNativeIds.filter((nativeId) => !changed.includes(nativeId));
+      const detail = errors.length > 0 ? errors.map((error) => error.message).join('; ') : stderr;
+      throw new Error(`codex marketplace upgrade partial mutation changed ${changed.join(', ')}; unchanged ${unchanged.join(', ')}: ${detail}`);
+    }
+    throw new Error(`codex marketplace upgrade stderr-only failure: ${stderr}`);
+  }
+  const missed = prepared.handle.affectedNativeIds.filter((nativeId) => before.get(nativeId) !== null && after.get(nativeId) === null);
+  if (missed.length > 0) throw new Error(`codex marketplace upgrade readback missed ${missed.join(', ')}`);
+  return {
+    receiptId: `apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`,
+    changed: before.get(prepared.handle.nativeId) !== after.get(prepared.handle.nativeId),
+  };
+}
+
+async function retireCodex(prepared: PreparedRetirementMutation): Promise<MutationResultData> {
+  const before = cacheFingerprint(prepared.handle.nativeId);
+  await codexWriter.remove(prepared.handle.nativeId);
+  return {
+    receiptId: `retire:${prepared.handle.attemptId}:${prepared.handle.operationId}`,
+    changed: before !== cacheFingerprint(prepared.handle.nativeId),
+  };
+}
+
+function readCodexInstall(handle: DurableLifecycleOperation): LifecycleReadbackData {
+  return readInstall({
+    target: handle.target,
+    scopeId: handle.scopeId,
+    packageName: handle.packageName,
+    nativeId: handle.nativeId,
+    route: handle.route,
+  });
+}
+
+function cleanupCodexStage(reference: CleanupReference): CleanupResultData {
+  const stage = resolve(join(codexHome(), '.plgnz-lifecycle', `${reference.attemptId}:${reference.operationId}`));
+  if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
+  return { cleanupId: `cleanup:${reference.attemptId}:${reference.operationId}`, completed: true };
+}
+
+function readInstall(identity: {
+  readonly target: LifecycleTargetIdentity;
+  readonly scopeId: string;
+  readonly packageName: string;
+  readonly nativeId: string;
+  readonly route?: LifecycleReadbackData['route'];
+}): LifecycleReadbackData {
+  const plugin = codex.listInstalled().find((item) => item.id === identity.nativeId);
+  const retention = retentionObservation(identity.nativeId);
+  const shared = {
+    adapterId: 'codex',
+    target: identity.target,
+    scopeId: identity.scopeId,
+    packageName: identity.packageName,
+    nativeId: identity.nativeId,
+    transition: RELOAD_EFFECTIVE,
+    retention,
+  };
+  if (plugin?.path === undefined) {
+    return {
+      ...shared,
+      route: identity.route ?? 'none',
+      presence: 'absent',
+      enablement: plugin?.enabled === false ? 'disabled' : 'unknown',
+      activation: 'inactive',
+      installedFingerprint: null,
+      contentRoots: [],
+    };
+  }
+  const installedFingerprint = fingerprintTree(plugin.path);
+  const owned = readOwnership(plugin.path)?.pluginId === identity.nativeId;
+  return {
+    ...shared,
+    route: identity.route ?? (owned ? 'managed' : 'none'),
+    presence: 'present',
+    enablement: plugin.enabled ? 'enabled' : 'disabled',
+    activation: plugin.enabled ? 'active' : 'inactive',
+    installedFingerprint,
+    contentRoots: [{ label: 'plugin', path: plugin.path, fingerprint: installedFingerprint }],
+  };
+}
+
+function retentionObservation(nativeId: string): LifecycleReadbackData['retention'] {
+  return {
+    pluginData: retainedTree(pluginDataRoots(nativeId)),
+    inactiveMetadata: inactiveMetadata(nativeId),
+  };
+}
+
+function pluginDataRoots(nativeId: string): readonly string[] {
+  const marketplace = marketplaceOf(nativeId);
+  if (marketplace === null) return [];
+  const name = nativeId.slice(0, nativeId.indexOf('@'));
+  const hash = new CryptoHasher('sha256');
+  hash.update(`${marketplace}\0${name}`);
+  const prefix = hash.digest('hex').slice(0, 32);
+  return [
+    join(codexHome(), 'plugins', 'data', `${name}-${marketplace}`),
+    join(codexHome(), 'plugins', 'data', 'agent-plugins', prefix),
+  ];
+}
+
+function retainedTree(paths: readonly string[]): LifecycleReadbackData['retention']['pluginData'] {
+  const present = paths.filter((path) => existsSync(path));
+  const [only, ...rest] = present;
+  if (only === undefined) return { state: 'absent', fingerprint: null };
+  if (rest.length === 0) return { state: 'present', fingerprint: fingerprintTree(only) };
+  const hash = new CryptoHasher('sha256');
+  for (const path of [only, ...rest].sort()) hash.update(`${fingerprintTree(path)}\0`);
+  return { state: 'present', fingerprint: hash.digest('hex') };
+}
+
+function inactiveMetadata(nativeId: string): LifecycleReadbackData['retention']['inactiveMetadata'] {
+  const extra = pluginConfigExtras(nativeId);
+  const keys = Object.keys(extra).sort();
+  if (keys.length === 0) return { state: 'absent', fingerprint: null };
+  const hash = new CryptoHasher('sha256');
+  hash.update(JSON.stringify(Object.fromEntries(keys.map((key) => [key, extra[key]]))));
+  return { state: 'present', fingerprint: hash.digest('hex') };
+}
+
+function pluginConfigExtras(nativeId: string): Record<string, unknown> {
+  const entry = table(table(readConfigDocument()?.['plugins'])?.[nativeId]);
+  if (entry === null) return {};
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(entry)) {
+    if (key === 'enabled') continue;
+    extra[key] = value;
+  }
+  return extra;
+}
+
+function cacheDestination(nativeId: string, version: string): string {
+  const marketplace = marketplaceOf(nativeId);
+  if (marketplace === null) throw new Error(`codex native id has no marketplace: ${nativeId}`);
+  const name = nativeId.slice(0, nativeId.indexOf('@'));
+  return join(codexHome(), 'plugins', 'cache', marketplace, name, version);
+}
+
+function cacheFingerprint(nativeId: string): string | null {
+  const path = codex.listInstalled().find((plugin) => plugin.id === nativeId)?.path;
+  if (path === undefined || !existsSync(path)) return null;
+  try {
+    return fingerprintTree(path);
+  } catch {
+    return null;
+  }
+}
+
+function fingerprintAffected(nativeIds: readonly string[]): Map<string, string | null> {
+  return new Map(nativeIds.map((nativeId) => [nativeId, cacheFingerprint(nativeId)]));
+}
+
+function codexCommandEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string') env[key] = value;
+  }
+  env['CODEX_HOME'] = codexHome();
+  return env;
+}
+
+function decodeBytes(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => String.fromCharCode(byte)).join('');
+}
+
+function parseUpgradeJson(stdout: string): { readonly errors: readonly { readonly marketplaceName: string; readonly message: string }[] } | null {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    const record = value as Record<string, unknown>;
+    if (!Array.isArray(record['errors']) || !Array.isArray(record['selectedMarketplaces'])) return null;
+    const errors: { marketplaceName: string; message: string }[] = [];
+    for (const item of record['errors']) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return null;
+      const error = item as Record<string, unknown>;
+      if (typeof error['marketplaceName'] !== 'string' || typeof error['message'] !== 'string') return null;
+      errors.push({ marketplaceName: error['marketplaceName'], message: error['message'] });
+    }
+    if (record['selectedMarketplaces'].some((name) => typeof name !== 'string')) return null;
+    return { errors };
+  } catch {
+    return null;
+  }
+}
+
+function codexRollbackReference(attemptId: string, operationId: string): string {
+  return `codex:${attemptId}:${operationId}`;
+}
+
+function rollbackBundle(attemptId: string, operationId: string): string {
+  return resolve(join(codexHome(), '.plgnz-rollback', attemptId, operationId));
+}
+
+function saveCodexRollback(attemptId: string, operationId: string, nativeIds: readonly string[]): void {
+  const bundle = rollbackBundle(attemptId, operationId);
+  assertManagedPath(codexHome(), bundle);
+  rmSync(bundle, { recursive: true, force: true });
+  mkdirSync(bundle, { recursive: true });
+  const snapshot = readConfigSnapshot(configFile());
+  if (snapshot.existed) {
+    const write = writeFileSync as unknown as (file: string, bytes: Uint8Array) => void;
+    write(join(bundle, 'config.toml'), snapshot.bytes);
+  }
+  const installs = nativeIds.map((nativeId, index) => {
+    const cachePath = codex.listInstalled().find((plugin) => plugin.id === nativeId)?.path;
+    if (cachePath === undefined) return { nativeId, existed: false as const };
+    const saved = String(index);
+    cpSync(cachePath, join(bundle, 'cache', saved), { recursive: true });
+    return { nativeId, existed: true as const, cachePath, saved };
+  });
+  writeFileSync(join(bundle, 'manifest.json'), JSON.stringify({ configExisted: snapshot.existed, installs }));
+}
+
+function restoreCodexRollback(handle: DurableLifecycleOperation): MutationResultData {
+  const bundle = rollbackBundle(handle.attemptId, handle.operationId);
+  const manifestPath = join(bundle, 'manifest.json');
+  if (!existsSync(manifestPath)) throw new Error(`codex lifecycle rollback bundle is missing: ${handle.operationId}`);
+  const manifest = parseRollbackManifest(readFileSync(manifestPath, 'utf8'));
+  const configPath = configFile();
+  if (manifest.configExisted) {
+    const read = readFileSync as unknown as (file: string) => Uint8Array;
+    const write = writeFileSync as unknown as (file: string, bytes: Uint8Array) => void;
+    mkdirSync(dirname(configPath), { recursive: true });
+    write(configPath, read(join(bundle, 'config.toml')));
+  } else {
+    rmSync(configPath, { force: true });
+  }
+  for (const install of manifest.installs) {
+    if (!install.existed) {
+      const current = codex.listInstalled().find((plugin) => plugin.id === install.nativeId)?.path;
+      if (current !== undefined) rmSync(current, { recursive: true, force: true });
+      continue;
+    }
+    assertManagedPath(codexHome(), install.cachePath);
+    rmSync(install.cachePath, { recursive: true, force: true });
+    mkdirSync(dirname(install.cachePath), { recursive: true });
+    cpSync(join(bundle, 'cache', install.saved), install.cachePath, { recursive: true });
+  }
+  return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
+}
+
+function parseRollbackManifest(text: string): {
+  readonly configExisted: boolean;
+  readonly installs: readonly (
+    | { readonly nativeId: string; readonly existed: false }
+    | { readonly nativeId: string; readonly existed: true; readonly cachePath: string; readonly saved: string }
+  )[];
+} {
+  const value: unknown = JSON.parse(text);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('codex rollback manifest is invalid');
+  const record = value as Record<string, unknown>;
+  if (typeof record['configExisted'] !== 'boolean' || !Array.isArray(record['installs'])) throw new Error('codex rollback manifest is invalid');
+  const installs = record['installs'].map((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('codex rollback manifest install is invalid');
+    const install = item as Record<string, unknown>;
+    if (typeof install['nativeId'] !== 'string' || typeof install['existed'] !== 'boolean') throw new Error('codex rollback manifest install is invalid');
+    if (!install['existed']) return { nativeId: install['nativeId'], existed: false as const };
+    if (typeof install['cachePath'] !== 'string' || typeof install['saved'] !== 'string') throw new Error('codex rollback manifest install is invalid');
+    return { nativeId: install['nativeId'], existed: true as const, cachePath: install['cachePath'], saved: install['saved'] };
+  });
+  return { configExisted: record['configExisted'], installs };
 }
 
 function installationRecord(plugin: InstalledPlugin): TargetInstallationData {
