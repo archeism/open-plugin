@@ -14,7 +14,7 @@ import {
   createRecordedOwnedActivation,
   createResolvedLifecyclePins,
 } from '../src/lifecycle-runtime';
-import { PACKAGE_SEMANTICS, type PackageSemanticInventory } from '../src/semantic-inventory';
+import { PACKAGE_SEMANTICS, inventoryPackageSemantics, type PackageSemanticInventory } from '../src/semantic-inventory';
 import { type PluginSource, type ResolvedSource } from '../src/source';
 import { writeFiles } from './util';
 import { withKimiNative } from './kimi-fixture';
@@ -450,6 +450,9 @@ describe('Kimi lifecycle preflight', () => {
         const observed = await adapter.observeTarget(target);
         const packageRoot = plugin.dir;
         const packageFingerprint = fingerprintTree(packageRoot);
+        const inventory = inventoryPackageSemantics({ ...plugin, version: '1.0.0', contentFingerprint: packageFingerprint });
+        expect(inventory.requiredSemantics).toContain('ordinary-skills');
+        expect(inventory.requiredSemantics).toContain('mcp');
         const snapshot = createFrozenPackageSnapshot({
           operationId: 'op-install',
           attemptId: 'attempt-install',
@@ -465,18 +468,7 @@ describe('Kimi lifecycle preflight', () => {
           relativePackagePath: 'source',
           snapshotFingerprint: fingerprintTree(root),
           packageFingerprint,
-          inventory: {
-            schemaVersion: 1,
-            package: { name: 'demo', version: '1.0.0', fingerprint: packageFingerprint },
-            components: { skills: ['skills/ordinary/SKILL.md'], mcp: ['mcp.json'], hooks: [], commands: [], agents: [], resources: [], permissionsPreprocessing: [] },
-            componentDefinitions: [],
-            invocationPolicies: [],
-            componentInvocationPolicies: [],
-            autoUpdate: [],
-            manifestPaths: ['plugin.json'],
-            hookDeclarations: [],
-            requiredSemantics: [],
-          },
+          inventory,
         });
         const pins = createResolvedLifecyclePins([]);
         const nativeScope = await adapter.observeNativeMutationScope({
@@ -536,6 +528,10 @@ describe('Kimi lifecycle preflight', () => {
         const installedSkill = readFileSync(join(managed, 'skills/ordinary/SKILL.md'), 'utf8');
         const read = await adapter.readback(prepared.handle);
         const verified = adapter.verify(prepared.handle, read);
+        const registryFile = join(home, '.kimi-code', 'plugins', 'installed.json');
+        const registry = JSON.parse(readFileSync(registryFile, 'utf8')) as { version: number; plugins: Array<Record<string, unknown>> };
+        registry.plugins.push({ id: 'sibling', root: join(home, '.kimi-code', 'plugins', 'managed', 'sibling'), enabled: true });
+        writeFileSync(registryFile, JSON.stringify(registry));
         const rolled = await adapter.rollback(prepared.handle);
         const restored = await adapter.readback(prepared.handle);
         const rollbackVerified = adapter.verifyRollback(prepared.handle, restored);
@@ -552,6 +548,8 @@ describe('Kimi lifecycle preflight', () => {
         expect(rollbackVerified.phase).toBe('rollback-verified');
         expect(cleaned.completed).toBe(true);
         expect(existsSync(managed)).toBe(false);
+        const surviving = JSON.parse(readFileSync(registryFile, 'utf8')) as { plugins: Array<{ id: string }> };
+        expect(surviving.plugins.map((row) => row.id)).toEqual(['sibling']);
         expect(existsSync(join(home, '.kimi-code', 'plugins', '.plgnz-kimi-lifecycle'))).toBe(false);
       });
     });
