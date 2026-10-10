@@ -153,14 +153,14 @@ function snapshot(root: string, input: {
   }) as FrozenPackageSnapshot & { readonly action: 'install' | 'update' };
 }
 
-async function prepare(
+async function stageThroughDirectives(
   adapter: LifecycleHostAdapter,
   packaged: FrozenPackageSnapshot & { readonly action: 'install' | 'update' },
-): Promise<PreparedActivationMutation> {
+  pins = createResolvedLifecyclePins([]),
+) {
   const operation = packaged.action === 'install' ? 'install' : 'update';
   const version = await adapter.probeVersion(grokTarget);
   const observed = await adapter.observeTarget(grokTarget);
-  const pins = createResolvedLifecyclePins([]);
   const nativeScope = await adapter.observeNativeMutationScope({
     targetObservation: observed,
     operation,
@@ -202,7 +202,14 @@ async function prepare(
     throw new Error(`expected a native ${operation} route`);
   }
   const staged = await adapter.stageActivation({ selection: decision, snapshot: packaged, pins });
-  const directed = await adapter.applyLifecycleDirectives(staged);
+  return adapter.applyLifecycleDirectives(staged);
+}
+
+async function prepare(
+  adapter: LifecycleHostAdapter,
+  packaged: FrozenPackageSnapshot & { readonly action: 'install' | 'update' },
+): Promise<PreparedActivationMutation> {
+  const directed = await stageThroughDirectives(adapter, packaged);
   const pinned = await adapter.applyPins(directed);
   return adapter.sealActivation(pinned);
 }
@@ -439,6 +446,27 @@ describe('Grok lifecycle SPI', () => {
       expect(readFileSync(join(source, 'resources', 'value.txt'), 'utf8')).toBe('stale-source\n');
       expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo']);
       expect(readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').includes('plugin install')).toBe(false);
+    });
+  });
+
+  test('restores config.toml when a pin fails before seal', async () => {
+    await isolated(async (home, root) => {
+      const priorConfig = '[plugins]\ndisabled = ["kept"]\n';
+      writeFiles(join(home, '.grok'), { 'config.toml': priorConfig });
+      const adapter = createGrokLifecycleAdapter();
+      const directed = await stageThroughDirectives(adapter, snapshot(root, {
+        operationId: 'op-pins',
+        attemptId: 'attempt-pins',
+        action: 'install',
+        bytes: 'pinned\n',
+      }), createResolvedLifecyclePins([{ server: 'missing', executable: join(root, 'pin-bin') }]));
+      const error = await failure(adapter.applyPins(directed));
+      expect(error instanceof LifecycleHostPhaseError).toBe(true);
+      if (!(error instanceof LifecycleHostPhaseError)) return;
+      expect(error.phase).toBe('pins');
+      expect(error.mutationStarted).toBe(false);
+      await adapter.cleanup(directed, 'aborted-preparation');
+      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toBe(priorConfig);
     });
   });
 });
