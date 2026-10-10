@@ -1262,6 +1262,66 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 16 applied sync json is one object, each outcome cites one plan operation, and dry-run operation ids stay identical', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('scenario-16', {
+        'plugin.json': '{"name":"kept","version":"1.0.0","description":"kept"}\n',
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const applied = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const parsed: unknown = JSON.parse(applied.stdout);
+      const report = parseLifecycleReport(parsed);
+      const planIds = report.plan.map((operation) => operation.operationId);
+      const outcomeIds = report.outcomes.map((outcome) => outcome.operationId);
+      const progressLine = applied.stdout.split('\n').some((line) => {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) return false;
+        if (trimmed === '{' || trimmed === '}' || trimmed === '[' || trimmed === ']' || trimmed === ',') return false;
+        if (trimmed.startsWith('"') || trimmed.startsWith('{') || trimmed.startsWith('}') || trimmed.startsWith('[') || trimmed.startsWith(']')) return false;
+        if (trimmed === 'true' || trimmed === 'false' || trimmed === 'null') return false;
+        if (/^-?\d+(?:\.\d+)?$/u.test(trimmed)) return false;
+        return true;
+      });
+      expect({
+        exitCode: applied.exitCode,
+        stderr: applied.stderr,
+        oneObject: parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed),
+        progressLine,
+        eachOutcomeCitesOnePlan: report.outcomes.every((outcome) => planIds.filter((operationId) => operationId === outcome.operationId).length === 1),
+        eachPlanHasOneOutcome: report.plan.every((operation) => outcomeIds.filter((operationId) => operationId === operation.operationId).length === 1),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneObject: true,
+        progressLine: false,
+        eachOutcomeCitesOnePlan: true,
+        eachPlanHasOneOutcome: true,
+      });
+
+      const dryRun = () => harness.run(['sync', source, '--target', 'cursor', '--dry-run', '--json'], { env });
+      const first = dryRun();
+      const second = dryRun();
+      const firstIds = parseLifecycleReport(JSON.parse(first.stdout)).plan.map((operation) => operation.operationId);
+      const secondIds = parseLifecycleReport(JSON.parse(second.stdout)).plan.map((operation) => operation.operationId);
+      expect({
+        firstExit: first.exitCode,
+        secondExit: second.exitCode,
+        firstStderr: first.stderr,
+        secondStderr: second.stderr,
+        secondIds,
+      }).toEqual({
+        firstExit: 0,
+        secondExit: 0,
+        firstStderr: '',
+        secondStderr: '',
+        secondIds: firstIds,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
