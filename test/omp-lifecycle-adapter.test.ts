@@ -291,6 +291,37 @@ describe('OMP managed extension-package lifecycle', () => {
     expect(readFileSync(lockFile(root), 'utf8')).toBe(before);
   }));
 
+  test('rollback keeps a sibling lock row and shared settings edited after prepare', async () => isolated(async (root) => {
+    expect(await commitPrepared(await sealInstall(root, {
+      operationId: 'install-sibling', attemptId: 'attempt-install-sibling', version: '1.2.0', revision: 'local-install', resource: 'one\n',
+      authorization: 'planned-create',
+    }))).toBe(true);
+    const installed = await packagePath();
+    const npm = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8')).name as string;
+    writeLockMetadata(root, npm, false);
+    const prepared = await sealUpdate(root, {
+      operationId: 'update-sibling', attemptId: 'attempt-update-sibling', version: '1.3.0', revision: 'local-sibling', resource: 'two\n',
+    });
+    expect(await commitPrepared(prepared)).toBe(true);
+    const file = lockFile(root);
+    const live = JSON.parse(readFileSync(file, 'utf8')) as { plugins: Record<string, unknown>; settings: unknown };
+    live.plugins['other-plugin'] = { version: '4.0.0', enabled: false, note: 'sibling' };
+    live.settings = { telemetry: true };
+    writeFileSync(file, JSON.stringify(live, null, 2));
+    await ompLifecycle.rollback(prepared.handle);
+    const after = JSON.parse(readFileSync(file, 'utf8')) as {
+      plugins: Record<string, { version?: string; enabled?: boolean; enabledFeatures?: string[]; settings?: { theme: string }; note?: string }>;
+      settings: { telemetry?: boolean };
+    };
+    expect(after.plugins['other-plugin']).toEqual({ version: '4.0.0', enabled: false, note: 'sibling' });
+    expect(after.settings).toEqual({ telemetry: true });
+    expect(after.plugins[npm]?.version).toBe('1.2.0');
+    expect(after.plugins[npm]?.enabled).toBe(false);
+    expect(after.plugins[npm]?.enabledFeatures).toEqual(['skills']);
+    expect(after.plugins[npm]?.settings).toEqual({ theme: 'quiet' });
+    expect(readFileSync(join(installed, 'resources/value.txt'), 'utf8')).toBe('one\n');
+  }));
+
   test('a forced activation failure restores the previous package', async () => isolated(async (root) => {
     expect(await commitPrepared(await sealInstall(root, {
       operationId: 'install-fail', attemptId: 'attempt-install-fail', version: '1.2.0', revision: 'local-install', resource: 'one\n',
