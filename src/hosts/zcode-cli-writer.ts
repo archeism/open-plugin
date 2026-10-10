@@ -2,15 +2,35 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
-import type { PluginSource, ResolvedSource } from '../source';
-import { fingerprintTree } from '../fingerprint';
-import { assertZcodeNativeRegistryReadable, readZcodeEnabledPluginIds, readZcodeNativeRecords, readZcodeOwnership, runOfficialZcode, zcodeCli, zcodeMarketplaceRoot, zcodeResourceRoot, zcodeSafeInstallRoot } from './zcode-cli';
+import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
 import { normalizeCommandTree } from '../conversion';
-import { zcodeCliRoot } from '../paths';
-
+import { fingerprintTree } from '../fingerprint';
+import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
+import type {
+  CleanupDisposition,
+  CleanupReference,
+  CleanupResultData,
+  DurableLifecycleOperation,
+  LifecycleHostDefinition,
+  LifecycleReadbackData,
+  LifecycleTargetIdentity,
+  NativeMutationScopeData,
+  NativeProjectionData,
+  NativeProjectionRequest,
+  RetentionObservation,
+  TargetInstallationData,
+  TargetInventoryData,
+  TargetVersionObservation,
+} from '../lifecycle-host';
+import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
+import { zcodeCliConfigRoot, zcodeCliRoot } from '../paths';
+import { CryptoHasher, spawnSync as bunShapedSpawnSync } from '../runtime';
+import { PACKAGE_SEMANTICS, type PackageSemantic } from '../semantic-inventory';
+import type { PluginSource, ResolvedSource } from '../source';
 import { yamlParse, yamlStringify } from '../yaml';
-import { CryptoHasher } from '../runtime';
+import { assertZcodeNativeRegistryReadable, readZcodeEnabledPluginIds, readZcodeNativeRecords, readZcodeOwnership, resolveOfficialZcodeCli, runOfficialZcode, zcodeCli, zcodeCliEnv, zcodeMarketplaceRoot, zcodeRegistryFile, zcodeResourceRoot, zcodeSafeInstallRoot } from './zcode-cli';
+
+declare const TextDecoder: { new (): { decode(input: Uint8Array): string } };
 
 
 const MARKER = '.plgnz-install.json';
@@ -240,3 +260,316 @@ function assertName(value: string, label: string): void { if (!/^[a-z0-9][a-z0-9
 function argumentHint(value: unknown, file: string): string { if (typeof value === 'string') return JSON.stringify(value); if (Array.isArray(value) && value.every(item => typeof item === 'string')) return `[${value.join(' ')}]`; throw new Error(`ZCode argument-hint must be text or text list: ${file}`); }
 function assertNoSymlinks(root: string): void { const visit = (path: string): void => { const stat = lstatSync(path); if (stat.isSymbolicLink()) throw new Error(`ZCode source contains symlink: ${path}`); if (stat.isDirectory()) for (const child of readdirSync(path)) visit(join(path, child)); }; visit(root); }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+
+/**
+ * Official `plugins update` tells a running ZCode process to restart.
+ * Store readback is effective for the next process, which is the lifecycle contract.
+ */
+const ZCODE_ACTIVATION: LifecycleReadbackData['transition'] = { requirement: 'restart', status: 'effective' };
+const ZCODE_PROVEN_VERSION = '0.16.9';
+const ZCODE_EVIDENCE = [
+  'docs/evidence/zcode-official-cli-872ad960-20260923.json',
+  'docs/hosts/zcode-cli.md',
+] as const;
+
+function zcodeSemantics(overrides: Partial<Record<PackageSemantic, CapabilityStatus>>): Record<PackageSemantic, CapabilityStatus> {
+  const unsupported = Object.fromEntries(PACKAGE_SEMANTICS.map((semantic) => [semantic, 'unsupported'])) as Record<PackageSemantic, CapabilityStatus>;
+  return { ...unsupported, ...overrides };
+}
+
+function zcodeRetireProfile(route: 'native' | 'managed', retention: CapabilityStatus): CapabilityEvidenceProfile {
+  return createCapabilityEvidenceProfile({
+    host: 'zcode-cli',
+    detectedVersion: ZCODE_PROVEN_VERSION,
+    sourceTypes: ['local', 'git'],
+    operations: ['retire'],
+    route,
+    operationStatus: 'supported',
+    semantics: zcodeSemantics({
+      retirement: 'supported',
+      'retention-safety': retention,
+      readback: 'supported',
+      rollback: 'supported',
+      'activation-reload': 'supported',
+    }),
+    evidence: [...ZCODE_EVIDENCE],
+  });
+}
+
+/** Native uninstall deletes plugin data and options. Managed retirement is the retention-safe route. */
+export const zcodeCliEvidenceProfiles: readonly CapabilityEvidenceProfile[] = Object.freeze([
+  zcodeRetireProfile('native', 'unsupported'),
+  zcodeRetireProfile('managed', 'supported'),
+]);
+
+function assertZcodeTarget(target: LifecycleTargetIdentity): void {
+  if (target.kind !== 'zcode-cli' || target.instance !== 'default' || target.context !== undefined) {
+    throw new Error('Official ZCode CLI lifecycle target must be zcode-cli/default without context');
+  }
+}
+
+function officialVersionText(): string | undefined {
+  const binary = resolveOfficialZcodeCli();
+  if (binary === undefined) return undefined;
+  const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', env: zcodeCliEnv(), timeout: 10_000 });
+  if (result.exitCode !== 0 || !(result.stdout instanceof Uint8Array)) return undefined;
+  return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function probeZcodeVersion(target: LifecycleTargetIdentity): Promise<TargetVersionObservation> {
+  assertZcodeTarget(target);
+  const version = officialVersionText();
+  if (version === undefined) return { kind: 'unknown' };
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: 'zcode-cli:--version' };
+}
+
+function zcodePluginDataDir(nativeId: string): string {
+  return join(zcodeCliRoot(), 'plugins', 'data', nativeId.replace(/[^a-zA-Z0-9_.@-]/g, '-'));
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
+
+function sha256(text: string): string {
+  const hash = new CryptoHasher('sha256');
+  hash.update(text);
+  return hash.digest('hex');
+}
+
+function readConfigObject(): Record<string, unknown> | null {
+  const file = join(zcodeCliConfigRoot(), 'config.json');
+  if (!existsSync(file)) return null;
+  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!isObject(value)) throw new Error(`Official ZCode config is unsupported: ${file}`);
+  return value;
+}
+
+function optionValue(nativeId: string): unknown {
+  const config = readConfigObject();
+  if (config === null || !isObject(config['plugins'])) return undefined;
+  const options = config['plugins']['options'];
+  if (!isObject(options) || !Object.hasOwn(options, nativeId)) return undefined;
+  return options[nativeId];
+}
+
+function retainedState(nativeId: string): RetentionObservation {
+  const dataDir = zcodePluginDataDir(nativeId);
+  const pluginData = existsSync(dataDir) && statSync(dataDir).isDirectory()
+    ? { state: 'present' as const, fingerprint: fingerprintTree(dataDir) }
+    : { state: 'absent' as const, fingerprint: null };
+  const options = optionValue(nativeId);
+  const inactiveMetadata = options === undefined
+    ? { state: 'absent' as const, fingerprint: null }
+    : { state: 'present' as const, fingerprint: sha256(canonicalJson(options)) };
+  return { pluginData, inactiveMetadata };
+}
+
+function installationFor(native: ReturnType<typeof readZcodeNativeRecords>[number]): TargetInstallationData {
+  const root = zcodeSafeInstallRoot(native.installPath);
+  if (root === undefined) throw new Error(`Official ZCode native root is unsafe: ${native.installPath}`);
+  const marker = readZcodeOwnership(root);
+  const owned = marker !== null && marker.nativeId === native.id && native.scope === 'user';
+  const digest = fingerprintTree(root);
+  const enabled = readZcodeEnabledPluginIds().get(native.id) === true;
+  return {
+    nativeId: native.id,
+    packageName: native.name,
+    ownership: owned
+      ? { kind: 'owned', proof: 'created', scopeId: marker.logicalId, proofId: `marker:${native.id}` }
+      : { kind: 'unmanaged' },
+    presence: 'present',
+    enablement: enabled ? 'enabled' : 'disabled',
+    activation: enabled ? 'active' : 'inactive',
+    installedFingerprint: digest,
+    installedVersion: native.version,
+    source: owned
+      ? { type: 'local', immutableRevision: marker.fingerprint, locator: null }
+      : null,
+    contentRoots: [{ label: 'native', path: root, fingerprint: digest }],
+  };
+}
+
+function inventoryFor(target: LifecycleTargetIdentity): TargetInventoryData {
+  assertZcodeTarget(target);
+  assertZcodeNativeRegistryReadable();
+  return { target, installations: readZcodeNativeRecords().map(installationFor) };
+}
+
+function readbackFor(
+  handle: Pick<DurableLifecycleOperation, 'adapterId' | 'target' | 'scopeId' | 'packageName' | 'nativeId'>,
+  absentRoute: LifecycleReadbackData['route'],
+): LifecycleReadbackData {
+  const row = nativeById(handle.nativeId);
+  const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
+  const retention = retainedState(handle.nativeId);
+  if (row === undefined || root === undefined) {
+    return {
+      adapterId: handle.adapterId,
+      target: handle.target,
+      scopeId: handle.scopeId,
+      packageName: handle.packageName,
+      nativeId: handle.nativeId,
+      route: absentRoute,
+      presence: 'absent',
+      enablement: 'disabled',
+      activation: 'inactive',
+      transition: ZCODE_ACTIVATION,
+      installedFingerprint: null,
+      contentRoots: [],
+      retention,
+    };
+  }
+  const digest = fingerprintTree(root);
+  const enabled = readZcodeEnabledPluginIds().get(handle.nativeId) === true;
+  return {
+    adapterId: handle.adapterId,
+    target: handle.target,
+    scopeId: handle.scopeId,
+    packageName: handle.packageName,
+    nativeId: handle.nativeId,
+    route: 'native',
+    presence: 'present',
+    enablement: enabled ? 'enabled' : 'disabled',
+    activation: enabled ? 'active' : 'inactive',
+    transition: ZCODE_ACTIVATION,
+    installedFingerprint: digest,
+    contentRoots: [{ label: 'native', path: root, fingerprint: digest }],
+    retention,
+  };
+}
+
+function retirementSnapshot(attemptId: string, operationId: string, nativeId: string): string {
+  const dir = join(zcodeCliRoot(), 'plgnz-lifecycle', attemptId, operationId);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const row = nativeById(nativeId);
+  const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
+  if (root !== undefined) cpSync(root, join(dir, 'cache'), { recursive: true });
+  writeFileSync(join(dir, 'install-path.txt'), root ?? '');
+  const registry = zcodeRegistryFile();
+  if (existsSync(registry)) cpSync(registry, join(dir, 'installed_plugins.json'));
+  const config = join(zcodeCliConfigRoot(), 'config.json');
+  if (existsSync(config)) cpSync(config, join(dir, 'config.json'));
+  return dir;
+}
+
+function isCacheInstallPath(path: string): boolean {
+  const cache = resolve(join(zcodeCliRoot(), 'plugins', 'cache'));
+  const target = resolve(path);
+  return target.startsWith(`${cache}/`);
+}
+
+function removeRegistryPlugin(nativeId: string): boolean {
+  const file = zcodeRegistryFile();
+  if (!existsSync(file)) return false;
+  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!isObject(value) || !Array.isArray(value['plugins'])) throw new Error(`Official ZCode registry is unsupported: ${file}`);
+  const plugins = value['plugins'];
+  const next = plugins.filter((row) => !isObject(row) || row['id'] !== nativeId);
+  if (next.length === plugins.length) return false;
+  value['plugins'] = next;
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+  return true;
+}
+
+function removeEnabledFlag(nativeId: string): void {
+  const file = join(zcodeCliConfigRoot(), 'config.json');
+  if (!existsSync(file)) return;
+  const value = readConfigObject();
+  if (value === null || !isObject(value['plugins']) || !isObject(value['plugins']['enabledPlugins'])) return;
+  if (!Object.hasOwn(value['plugins']['enabledPlugins'], nativeId)) return;
+  delete value['plugins']['enabledPlugins'][nativeId];
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function notInSlice(): Promise<never> {
+  return Promise.reject(new Error('ZCode CLI lifecycle slice routes retirement only'));
+}
+
+const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
+  id: 'zcode-cli',
+  evidenceProfiles: zcodeCliEvidenceProfiles,
+  probeVersion: probeZcodeVersion,
+  observeTarget: async (target) => inventoryFor(target),
+  observeNativeMutationScope: async (request): Promise<NativeMutationScopeData> => ({
+    kind: 'bounded',
+    mode: 'exact-package',
+    affectedNativeIds: [request.nativeId],
+  }),
+  observeNativeProjection: async (request: NativeProjectionRequest): Promise<NativeProjectionData> => {
+    if (request.operation === 'retire') {
+      const version = await probeZcodeVersion(request.targetObservation.target);
+      if (version.kind === 'detected' && version.version === ZCODE_PROVEN_VERSION) {
+        return { kind: 'requires-managed', reasonId: 'native-uninstall-drops-retained-state' };
+      }
+    }
+    return { kind: 'unverified', reasonId: 'zcode-native-projection-unverified' };
+  },
+  revalidateTargetPrecondition: async (handle) => {
+    const version = await probeZcodeVersion(handle.target);
+    return {
+      version,
+      targetObservationId: createTargetInventoryObservation(handle.adapterId, inventoryFor(handle.target)).observationId,
+    };
+  },
+  stageActivation: notInSlice,
+  applyLifecycleDirectives: notInSlice,
+  applyPins: notInSlice,
+  captureActivationPreparation: notInSlice,
+  captureDisablePreparation: notInSlice,
+  captureRetirementPreparation: async (request) => ({
+    prior: readbackFor({
+      adapterId: 'zcode-cli',
+      target: request.activation.target,
+      scopeId: request.activation.scopeId,
+      packageName: request.activation.packageName,
+      nativeId: request.activation.nativeId,
+    }, 'none'),
+    rollbackReference: retirementSnapshot(request.attemptId, request.operationId, request.activation.nativeId),
+    rollbackCoverageOperationIds: request.selection.affectedOperationIds,
+    transition: ZCODE_ACTIVATION,
+  }),
+  apply: notInSlice,
+  disable: notInSlice,
+  retire: async (prepared) => {
+    const nativeId = prepared.handle.nativeId;
+    const row = nativeById(nativeId);
+    const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
+    if (root !== undefined) rmSync(root, { recursive: true, force: true });
+    const removed = removeRegistryPlugin(nativeId);
+    removeEnabledFlag(nativeId);
+    return {
+      receiptId: `retire:${prepared.handle.attemptId}:${prepared.handle.operationId}`,
+      changed: removed || root !== undefined,
+    };
+  },
+  readback: async (handle) => readbackFor(
+    handle,
+    handle.action === 'remove' || handle.action === 'retire-orphan' ? handle.route : 'none',
+  ),
+  rollback: async (handle) => {
+    const dir = handle.rollbackReference;
+    const registry = join(dir, 'installed_plugins.json');
+    const config = join(dir, 'config.json');
+    const installPath = existsSync(join(dir, 'install-path.txt')) ? readFileSync(join(dir, 'install-path.txt'), 'utf8') : '';
+    if (existsSync(registry)) cpSync(registry, zcodeRegistryFile());
+    if (existsSync(config)) cpSync(config, join(zcodeCliConfigRoot(), 'config.json'));
+    const cache = join(dir, 'cache');
+    if (installPath.length > 0 && isCacheInstallPath(installPath) && existsSync(cache)) {
+      rmSync(installPath, { recursive: true, force: true });
+      mkdirSync(dirname(installPath), { recursive: true });
+      cpSync(cache, installPath, { recursive: true });
+    }
+    return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
+  },
+  cleanup: async (reference: CleanupReference, _disposition: CleanupDisposition): Promise<CleanupResultData> => {
+    rmSync(join(zcodeCliRoot(), 'plgnz-lifecycle', reference.attemptId, reference.operationId), { recursive: true, force: true });
+    return { cleanupId: `cleanup:${reference.attemptId}:${reference.operationId}`, completed: true };
+  },
+};
+
+export const zcodeCliLifecycle = createLifecycleHostAdapter(zcodeCliLifecycleDefinition);

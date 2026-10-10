@@ -25,7 +25,7 @@ const args = process.argv.slice(2);
 mkdirSync(root, { recursive: true });
 const logPath = join(root, 'cli-invocations.log');
 const prior = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
-writeFileSync(logPath, prior + args.join(' ') + '\n');
+writeFileSync(logPath, prior + args.join(' ') + String.fromCharCode(10));
 if (args[0] === '--version') {
   console.log('0.16.9');
   process.exit(0);
@@ -205,8 +205,8 @@ describe('ZCode CLI retirement route', () => {
       expect(registry.plugins.some((row: { id: string }) => row.id === DEMO)).toBe(false);
       expect(existsSync(installation.contentRoots[0]?.path ?? '')).toBe(false);
       const log = readFileSync(join(cliRoot, 'cli-invocations.log'), 'utf8');
-      expect(log).toContain(`plugins uninstall ${SCRATCH} --force`);
-      expect(log).not.toContain(`plugins uninstall ${DEMO}`);
+      const uninstalls = log.split('\n').filter((line) => line.startsWith('plugins uninstall'));
+      expect(uninstalls).toEqual([`plugins uninstall ${SCRATCH} --force`]);
     } finally {
       process.chdir(originalCwd);
       keys.forEach((key, index) => {
