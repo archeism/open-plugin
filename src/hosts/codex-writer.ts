@@ -727,11 +727,12 @@ function restampNativeUpgrade(prepared: PreparedActivationMutation): void {
     if (existing?.pluginId === nativeId) continue;
     const prior = priorInstallMarker(prepared, nativeId);
     const ownedPrior = prior?.pluginId === nativeId ? prior : null;
+    if (ownedPrior === null) continue;
     assertManagedPath(codexHome(), path);
     writeFileSync(join(path, OWNERSHIP), JSON.stringify({
-      source: ownedPrior?.source ?? prepared.handle.sourceLocator ?? prepared.handle.sourceRevision,
+      source: ownedPrior.source,
       pluginId: nativeId,
-      fingerprint: ownedPrior?.fingerprint ?? '',
+      fingerprint: ownedPrior.fingerprint,
     }));
   }
 }
@@ -1152,6 +1153,7 @@ function nativeProjection(request: NativeProjectionRequest): NativeProjectionDat
   if (!('snapshot' in request) || request.operation !== 'update') {
     return { kind: 'requires-managed', reasonId: 'native-upgrade-update-only' };
   }
+  if (request.pins.length > 0) return { kind: 'requires-managed', reasonId: 'pins-present' };
   const marketplace = marketplaceOf(request.snapshot.nativeId);
   if (marketplace === null) return { kind: 'requires-managed', reasonId: 'catalog-absent' };
   const binding = catalogBinding(marketplace);
