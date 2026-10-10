@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCapabilityEvidenceProfile, type CapabilityStatus } from '../src/capability-evidence';
@@ -654,9 +654,10 @@ describe('lifecycle executor', () => {
 
 function hasDirectoryNamed(dir: string, name: string): boolean {
   if (!existsSync(dir)) return false;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (entry.name === name || hasDirectoryNamed(join(dir, entry.name), name)) return true;
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    if (!statSync(path).isDirectory()) continue;
+    if (entry === name || hasDirectoryNamed(path, name)) return true;
   }
   return false;
 }
