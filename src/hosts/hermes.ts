@@ -52,6 +52,12 @@ export const hermesTargetProfile: TargetProfile<'hermes'> = {
 
 export function hermesPluginsDir(): string { return join(hermesRoot(), 'plugins'); }
 
+/** Plugin store for one manifest target. The process Hermes root is not a key. */
+export function hermesInstancePluginsDir(target: PersistedTargetIdentity): string {
+  if (target.kind !== 'hermes') invalidTargetSelection('hermes instance kind must be hermes');
+  return join(hermesContext(target).root, 'plugins');
+}
+
 type Manifest = { name: string; version?: string };
 
 function parseHermesIdentity(value: unknown, label: string): PersistedTargetIdentity {
