@@ -3,8 +3,18 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { kimiWriter } from '../src/hosts/kimi-writer';
+import { fingerprintTree } from '../src/fingerprint';
+import { kimiWriter, kimiLifecycle } from '../src/hosts/kimi-writer';
 import { kimi } from '../src/hosts/kimi';
+import {
+  LifecycleHostPhaseError,
+  createFrozenPackageSnapshot,
+  createLifecycleHostAdapter,
+  createLifecyclePlanCoverage,
+  createRecordedOwnedActivation,
+  createResolvedLifecyclePins,
+} from '../src/lifecycle-runtime';
+import { PACKAGE_SEMANTICS, inventoryPackageSemantics, type PackageSemanticInventory } from '../src/semantic-inventory';
 import { type PluginSource, type ResolvedSource } from '../src/source';
 import { writeFiles } from './util';
 import { withKimiNative } from './kimi-fixture';
@@ -258,6 +268,322 @@ describe('Kimi lifecycle preflight', () => {
       expect(failure?.message).toContain('invalid Kimi installed registry');
       expect(readFileSync(join(target, 'preserve.txt'), 'utf8')).toBe('active');
       expect(readdirSync(join(root, 'plugins')).some(name => name.startsWith('.plgnz-kimi-backup-'))).toBe(false);
+    });
+  });
+
+  test('refuses the interactive marketplace updater as an update route and keeps retirement on its own gate', async () => {
+    await withKimi(async ({ home, root }) => {
+      const binary = join(home, 'kimi');
+      mkdirSync(home, { recursive: true });
+      writeFileSync(binary, '#!/bin/sh\necho 2.0.1\n');
+      chmodSync(binary, 0o755);
+      const managed = join(home, '.kimi-code', 'plugins', 'managed', 'demo');
+      mkdirSync(managed, { recursive: true });
+      writeFileSync(join(managed, 'payload.txt'), 'installed\n');
+      writeFileSync(join(managed, '.plgnz-install.json'), JSON.stringify({ source: join(root, 'source'), pluginId: 'demo', fingerprint: 'owned-demo' }));
+      writeFileSync(join(home, '.kimi-code', 'plugins', 'installed.json'), JSON.stringify({
+        version: 1,
+        plugins: [{ id: 'demo', root: managed, enabled: true }],
+      }));
+      const before = process.env.OPEN_PLUGIN_KIMI_BIN;
+      process.env.OPEN_PLUGIN_KIMI_BIN = binary;
+      try {
+        const adapter = createLifecycleHostAdapter(kimiLifecycle);
+        const target = { kind: 'kimi', instance: 'default' } as const;
+        const version = await adapter.probeVersion(target);
+        const observed = await adapter.observeTarget(target);
+        const installed = observed.installations.find((row) => row.nativeId === 'demo');
+        if (installed === undefined || installed.ownership.kind !== 'owned' || installed.source === null || installed.installedFingerprint === null) {
+          throw new Error('owned Kimi installation was not observed');
+        }
+        const packageRoot = join(root, 'update-package');
+        mkdirSync(packageRoot, { recursive: true });
+        writeFileSync(join(packageRoot, 'payload.txt'), 'replacement\n');
+        const packageFingerprint = fingerprintTree(packageRoot);
+        const inventory: PackageSemanticInventory = {
+          schemaVersion: 1,
+          package: { name: 'demo', version: '1.1.0', fingerprint: packageFingerprint },
+          components: { skills: [], mcp: [], hooks: [], commands: [], agents: [], resources: [], permissionsPreprocessing: [] },
+          componentDefinitions: [],
+          invocationPolicies: [],
+          componentInvocationPolicies: [],
+          autoUpdate: [],
+          manifestPaths: [],
+          hookDeclarations: [],
+          requiredSemantics: [...PACKAGE_SEMANTICS],
+        };
+        const snapshot = createFrozenPackageSnapshot({
+          operationId: 'op-update',
+          attemptId: 'attempt-update',
+          scopeId: installed.ownership.scopeId,
+          target,
+          action: 'update',
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+          immutableRevision: 'local-demo-revision',
+          snapshotRoot: root,
+          packageRoot,
+          relativePackagePath: 'update-package',
+          snapshotFingerprint: fingerprintTree(root),
+          packageFingerprint,
+          inventory,
+        });
+        const pins = createResolvedLifecyclePins([]);
+        const updateScope = await adapter.observeNativeMutationScope({
+          targetObservation: observed,
+          operation: 'update',
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+        });
+        const updateProjection = await adapter.observeNativeProjection({
+          targetObservation: observed,
+          operation: 'update',
+          snapshot,
+          pins,
+        });
+        const update = adapter.decideRoute({
+          target,
+          operationId: 'op-update',
+          attemptId: 'attempt-update',
+          scopeId: installed.ownership.scopeId,
+          packageName: 'demo',
+          nativeId: 'demo',
+          version,
+          sourceType: 'local',
+          targetObservation: observed,
+          nativeScope: updateScope,
+          nativeProjection: updateProjection,
+          planCoverage: createLifecyclePlanCoverage(observed, [{
+            nativeId: 'demo',
+            operationId: 'op-update',
+            operation: 'update',
+            mutationGroupId: 'group-update',
+            authorization: 'observed-owned',
+          }]),
+          operation: 'update',
+          snapshot,
+          pins,
+        });
+        const activation = createRecordedOwnedActivation({
+          scopeId: installed.ownership.scopeId,
+          target,
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+          sourceRevision: installed.source.immutableRevision,
+          sourceLocator: null,
+          installedVersion: installed.installedVersion,
+          route: 'native',
+          evidenceId: 'kimi-owned-demo',
+          ownership: { kind: 'created', proofId: installed.ownership.proofId },
+          activation: 'active',
+          enablement: 'enabled',
+          installedFingerprint: installed.installedFingerprint,
+          contentRoots: installed.contentRoots,
+        });
+        const retireScope = await adapter.observeNativeMutationScope({
+          targetObservation: observed,
+          operation: 'retire',
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+        });
+        const retireProjection = await adapter.observeNativeProjection({
+          targetObservation: observed,
+          operation: 'retire',
+          operationId: 'op-retire',
+          attemptId: 'attempt-retire',
+          activation,
+        });
+        const retire = adapter.decideRoute({
+          target,
+          operationId: 'op-retire',
+          attemptId: 'attempt-retire',
+          scopeId: installed.ownership.scopeId,
+          packageName: 'demo',
+          nativeId: 'demo',
+          version,
+          sourceType: 'local',
+          targetObservation: observed,
+          nativeScope: retireScope,
+          nativeProjection: retireProjection,
+          planCoverage: createLifecyclePlanCoverage(observed, [{
+            nativeId: 'demo',
+            operationId: 'op-retire',
+            operation: 'retire',
+            mutationGroupId: 'group-retire',
+            authorization: 'observed-owned',
+          }]),
+          operation: 'retire',
+          activation,
+        });
+
+        expect(version).toEqual({ kind: 'detected', version: '2.0.1', probeId: 'kimi-bin:2.0.1' });
+        expect(updateScope.kind).toBe('unavailable');
+        expect(updateProjection.kind === 'unverified' && updateProjection.reasonId).toBe('interactive-marketplace-updater');
+        expect(update.kind).toBe('capability-gap');
+        expect(update.kind === 'capability-gap' && update.operation).toBe('update');
+        expect(update.kind === 'capability-gap' && update.status).toBe('unsupported');
+        expect(update.kind === 'capability-gap' && update.gaps.map((gap) => gap.capabilityId)).toEqual(['operation.update', 'operation.update']);
+        expect(retireScope.kind === 'bounded' && retireScope.mode).toBe('exact-package');
+        expect(retireScope.kind === 'bounded' && retireScope.affectedNativeIds).toEqual(['demo']);
+        expect(retire.kind).toBe('capability-gap');
+        expect(retire.kind === 'capability-gap' && retire.operation).toBe('retire');
+        expect(retire.kind === 'capability-gap' && retire.status).toBe('unverified');
+        expect(retire.kind === 'capability-gap' && retire.gaps.map((gap) => gap.capabilityId)).toEqual(['operation.retire', 'profile']);
+        expect(readFileSync(join(managed, 'payload.txt'), 'utf8')).toBe('installed\n');
+      } finally {
+        if (before === undefined) delete process.env.OPEN_PLUGIN_KIMI_BIN;
+        else process.env.OPEN_PLUGIN_KIMI_BIN = before;
+      }
+    });
+  });
+
+  test('stages a native install, reads a restart back as effective, and rolls it back', async () => {
+    await withKimi(async ({ home, root, plugin }) => {
+      await withKimiNative(home, async () => {
+        const adapter = createLifecycleHostAdapter(kimiLifecycle);
+        const target = { kind: 'kimi', instance: 'default' } as const;
+        const version = await adapter.probeVersion(target);
+        const observed = await adapter.observeTarget(target);
+        const packageRoot = plugin.dir;
+        const packageFingerprint = fingerprintTree(packageRoot);
+        const inventory = inventoryPackageSemantics({ ...plugin, version: '1.0.0', contentFingerprint: packageFingerprint });
+        expect(inventory.requiredSemantics).toContain('ordinary-skills');
+        expect(inventory.requiredSemantics).toContain('mcp');
+        const snapshot = createFrozenPackageSnapshot({
+          operationId: 'op-install',
+          attemptId: 'attempt-install',
+          scopeId: 'kimi:default',
+          target,
+          action: 'install',
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+          immutableRevision: 'local-demo-revision',
+          snapshotRoot: root,
+          packageRoot,
+          relativePackagePath: 'source',
+          snapshotFingerprint: fingerprintTree(root),
+          packageFingerprint,
+          inventory,
+        });
+        const pins = createResolvedLifecyclePins([]);
+        const nativeScope = await adapter.observeNativeMutationScope({
+          targetObservation: observed,
+          operation: 'install',
+          packageName: 'demo',
+          nativeId: 'demo',
+          sourceType: 'local',
+        });
+        const nativeProjection = await adapter.observeNativeProjection({
+          targetObservation: observed,
+          operation: 'install',
+          snapshot,
+          pins,
+        });
+        const decision = adapter.decideRoute({
+          target,
+          operationId: 'op-install',
+          attemptId: 'attempt-install',
+          scopeId: 'kimi:default',
+          packageName: 'demo',
+          nativeId: 'demo',
+          version,
+          sourceType: 'local',
+          targetObservation: observed,
+          nativeScope,
+          nativeProjection,
+          planCoverage: createLifecyclePlanCoverage(observed, [{
+            nativeId: 'demo',
+            operationId: 'op-install',
+            operation: 'install',
+            mutationGroupId: 'group-install',
+            authorization: 'planned-create',
+          }]),
+          operation: 'install',
+          snapshot,
+          pins,
+        });
+        if (decision.kind !== 'selected' || decision.route !== 'native') {
+          throw new Error(`install route was not selected: ${decision.kind}`);
+        }
+        const staged = await adapter.stageActivation({ selection: decision, snapshot, pins });
+        const directed = await adapter.applyLifecycleDirectives(staged);
+        const pinned = await adapter.applyPins(directed);
+        const prepared = await adapter.sealActivation(pinned);
+        process.env.KIMI_FAIL_ENABLE = '1';
+        let enableFailure: unknown;
+        try { await adapter.apply(prepared); } catch (error) { enableFailure = error; }
+        finally { delete process.env.KIMI_FAIL_ENABLE; }
+        expect(enableFailure instanceof LifecycleHostPhaseError).toBe(true);
+        if (!(enableFailure instanceof LifecycleHostPhaseError)) throw new Error('failed enable did not surface a phase error');
+        expect(enableFailure.phase).toBe('apply');
+        expect(enableFailure.mutationStarted).toBe(true);
+        expect(existsSync(join(home, '.kimi-code', 'plugins', 'managed', 'demo'))).toBe(false);
+        const receipt = await adapter.apply(prepared);
+        const managed = join(home, '.kimi-code', 'plugins', 'managed', 'demo');
+        const installedSkill = readFileSync(join(managed, 'skills/ordinary/SKILL.md'), 'utf8');
+        const read = await adapter.readback(prepared.handle);
+        const verified = adapter.verify(prepared.handle, read);
+        const registryFile = join(home, '.kimi-code', 'plugins', 'installed.json');
+        const registry = JSON.parse(readFileSync(registryFile, 'utf8')) as { version: number; plugins: Array<Record<string, unknown>> };
+        registry.plugins.push({ id: 'sibling', root: join(home, '.kimi-code', 'plugins', 'managed', 'sibling'), enabled: true });
+        writeFileSync(registryFile, JSON.stringify(registry));
+        const rolled = await adapter.rollback(prepared.handle);
+        const restored = await adapter.readback(prepared.handle);
+        const rollbackVerified = adapter.verifyRollback(prepared.handle, restored);
+        const cleaned = await adapter.cleanup(prepared.handle, 'verified-rollback');
+        expect(receipt.changed).toBe(true);
+        expect(read.transition).toEqual({ requirement: 'restart', status: 'effective' });
+        expect(read.presence).toBe('present');
+        expect(read.enablement).toBe('enabled');
+        expect(installedSkill).toContain('Body');
+        expect(verified.phase).toBe('verified');
+        expect(rolled.changed).toBe(true);
+        expect(restored.presence).toBe('absent');
+        expect(restored.installedFingerprint).toBe(null);
+        expect(rollbackVerified.phase).toBe('rollback-verified');
+        expect(cleaned.completed).toBe(true);
+        expect(existsSync(managed)).toBe(false);
+        const surviving = JSON.parse(readFileSync(registryFile, 'utf8')) as { plugins: Array<{ id: string }> };
+        expect(surviving.plugins.map((row) => row.id)).toEqual(['sibling']);
+        expect(existsSync(join(home, '.kimi-code', 'plugins', '.plgnz-kimi-lifecycle'))).toBe(false);
+      });
+    });
+  });
+
+  test('probes the default Kimi binary through the isolated home when OPEN_PLUGIN_KIMI_BIN is unset', async () => {
+    await withKimi(async ({ home }) => {
+      const isolated = join(home, 'isolated');
+      const binary = join(isolated, '.local', 'share', 'kimi-code', 'bin', 'kimi');
+      const decoyHome = join(home, 'real-home');
+      const decoy = join(decoyHome, '.local', 'share', 'kimi-code', 'bin', 'kimi');
+      mkdirSync(join(isolated, '.local', 'share', 'kimi-code', 'bin'), { recursive: true });
+      mkdirSync(join(decoyHome, '.local', 'share', 'kimi-code', 'bin'), { recursive: true });
+      writeFileSync(binary, '#!/bin/sh\necho 2.0.1\n');
+      writeFileSync(decoy, '#!/bin/sh\necho 9.9.9\n');
+      chmodSync(binary, 0o755);
+      chmodSync(decoy, 0o755);
+      const beforeBin = process.env.OPEN_PLUGIN_KIMI_BIN;
+      const beforePluginHome = process.env.OPEN_PLUGIN_HOME;
+      const beforeHome = process.env.HOME;
+      delete process.env.OPEN_PLUGIN_KIMI_BIN;
+      process.env.OPEN_PLUGIN_HOME = isolated;
+      process.env.HOME = decoyHome;
+      try {
+        const version = await createLifecycleHostAdapter(kimiLifecycle).probeVersion({ kind: 'kimi', instance: 'default' });
+        expect(version).toEqual({ kind: 'detected', version: '2.0.1', probeId: 'kimi-bin:2.0.1' });
+      } finally {
+        if (beforeBin === undefined) delete process.env.OPEN_PLUGIN_KIMI_BIN;
+        else process.env.OPEN_PLUGIN_KIMI_BIN = beforeBin;
+        if (beforePluginHome === undefined) delete process.env.OPEN_PLUGIN_HOME;
+        else process.env.OPEN_PLUGIN_HOME = beforePluginHome;
+        if (beforeHome === undefined) delete process.env.HOME;
+        else process.env.HOME = beforeHome;
+      }
     });
   });
 
