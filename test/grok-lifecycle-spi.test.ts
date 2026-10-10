@@ -1,0 +1,318 @@
+import { describe, expect, test } from 'bun:test';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fingerprintTree } from '../src/fingerprint';
+import { grok } from '../src/hosts/grok';
+import { createGrokLifecycleAdapter } from '../src/hosts/grok-writer';
+import type {
+  FrozenPackageSnapshot,
+  LifecycleHostAdapter,
+  LifecycleTargetIdentity,
+  PreparedActivationMutation,
+} from '../src/lifecycle-host';
+import {
+  LifecycleHostPhaseError,
+  createFrozenPackageSnapshot,
+  createLifecyclePlanCoverage,
+  createResolvedLifecyclePins,
+} from '../src/lifecycle-runtime';
+import type { PackageSemanticInventory } from '../src/semantic-inventory';
+import { writeFiles } from './util';
+
+const grokTarget: LifecycleTargetIdentity = { kind: 'grok', instance: 'default' };
+
+function writeFakeGrok(root: string): string {
+  const program = join(root, 'fake-grok.mjs');
+  const binary = join(root, 'fake-grok');
+  writeFileSync(program, String.raw`
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const home = join(process.env.HOME, '.grok');
+const state = join(home, 'fake-marketplaces.json');
+const registry = join(home, 'installed-plugins', 'registry.json');
+const log = join(home, 'command-log.txt');
+const read = (path, fallback) => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : fallback;
+const write = (path, value) => { mkdirSync(path.slice(0, path.lastIndexOf('/')), { recursive: true }); writeFileSync(path, JSON.stringify(value)); };
+mkdirSync(home, { recursive: true });
+appendFileSync(log, process.argv.slice(2).join(' ') + '\n');
+const markets = () => read(state, []);
+const registryValue = () => read(registry, { version: 1, repos: {} });
+const saveRegistry = value => write(registry, value);
+const args = process.argv.slice(2);
+if (args[0] === '--version') {
+  const version = process.env.GROK_FAKE_VERSION ?? '1.0.41';
+  if (version === 'unknown') process.exit(1);
+  if (version === 'unparseable') { console.log('grok not-a-version'); process.exit(0); }
+  console.log('grok ' + version + ' (' + (process.env.GROK_FAKE_BUILD ?? 'fixturebuild') + ')');
+  process.exit(0);
+}
+if (args[0] === 'plugin' && args[1] === 'validate') process.exit(0);
+if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'list') { console.log(JSON.stringify(markets())); process.exit(0); }
+if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add') { const root = args[3]; write(state, [...markets(), { name: root.split('/').at(-1), kind: 'local', source: { path: root } }]); process.exit(0); }
+if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'remove') { const root = args[3]; write(state, markets().filter(row => row.source.path !== root)); const value = registryValue(); for (const [key, repo] of Object.entries(value.repos)) if (repo.marketplace?.source_url_or_path === root) delete value.repos[key]; saveRegistry(value); process.exit(0); }
+const install = name => { const row = markets().find(item => item.name === args[2].split('@local/')[1]); if (!row) process.exit(2); const source = join(row.source.path, 'plugins', name); if (!existsSync(source)) process.exit(3); const target = join(home, 'installed-plugins', name + '-native'); rmSync(target, { recursive: true, force: true }); cpSync(source, target, { recursive: true }); const value = registryValue(); value.repos[name] = { path: target, plugins: { [name]: {} }, kind: { type: 'Local', source_path: source }, marketplace: { source_url_or_path: row.source.path, source_display_name: row.name, plugin_subdir: 'plugins/' + name } }; saveRegistry(value); };
+if (args[0] === 'plugin' && args[1] === 'install') { install(args[2].split('@')[0]); process.exit(0); }
+if (args[0] === 'plugin' && args[1] === 'update') {
+  const value = registryValue();
+  const repo = value.repos[args[2]];
+  if (!repo || !existsSync(repo.kind.source_path)) process.exit(4);
+  rmSync(repo.path, { recursive: true, force: true });
+  cpSync(repo.kind.source_path, repo.path, { recursive: true });
+  saveRegistry(value);
+  if (process.env.GROK_FAKE_FAIL_AFTER_WRITE === '1') process.exit(1);
+  process.exit(0);
+}
+if (args[0] === 'plugin' && args[1] === 'enable') process.exit(0);
+if (args[0] === 'inspect' && args[1] === '--json') { const value = registryValue(); console.log(JSON.stringify({ plugins: Object.entries(value.repos).map(([name, repo]) => ({ name, path: repo.path, enabled: true })) })); process.exit(0); }
+process.exit(9);
+`);
+  writeFileSync(binary, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(program)} "$@"\n`);
+  chmodSync(binary, 0o755);
+  return binary;
+}
+
+function isolated<T>(run: (home: string, root: string) => Promise<T>): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), 'plgnz-grok-spi-'));
+  const home = join(root, 'home');
+  const previous = {
+    OPEN_PLUGIN_HOME: process.env.OPEN_PLUGIN_HOME,
+    OPEN_PLUGIN_GROK_ROOT: process.env.OPEN_PLUGIN_GROK_ROOT,
+    OPEN_PLUGIN_GROK_BIN: process.env.OPEN_PLUGIN_GROK_BIN,
+    GROK_FAKE_VERSION: process.env.GROK_FAKE_VERSION,
+    GROK_FAKE_BUILD: process.env.GROK_FAKE_BUILD,
+    GROK_FAKE_FAIL_AFTER_WRITE: process.env.GROK_FAKE_FAIL_AFTER_WRITE,
+  };
+  process.env.OPEN_PLUGIN_HOME = home;
+  process.env.OPEN_PLUGIN_GROK_ROOT = join(home, '.grok');
+  process.env.OPEN_PLUGIN_GROK_BIN = writeFakeGrok(root);
+  process.env.GROK_FAKE_VERSION = '1.0.41';
+  process.env.GROK_FAKE_BUILD = 'fixturebuild';
+  delete process.env.GROK_FAKE_FAIL_AFTER_WRITE;
+  return run(home, root).finally(() => {
+    for (const [key, prior] of Object.entries(previous)) {
+      if (prior === undefined) delete process.env[key];
+      else process.env[key] = prior;
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+}
+
+function inventory(packageName: string, packageFingerprint: string): PackageSemanticInventory {
+  return {
+    schemaVersion: 1,
+    package: { name: packageName, version: '1.0.0', fingerprint: packageFingerprint },
+    components: { skills: [], mcp: [], hooks: [], commands: [], agents: [], resources: [], permissionsPreprocessing: [] },
+    componentDefinitions: [],
+    invocationPolicies: [],
+    componentInvocationPolicies: [],
+    autoUpdate: [],
+    manifestPaths: [],
+    hookDeclarations: [],
+    requiredSemantics: [],
+  };
+}
+
+function snapshot(root: string, input: {
+  operationId: string;
+  attemptId: string;
+  action: 'install' | 'update';
+  bytes: string;
+}): FrozenPackageSnapshot & { readonly action: 'install' | 'update' } {
+  const snapshotRoot = join(root, input.attemptId);
+  const packageRoot = join(snapshotRoot, 'demo');
+  writeFiles(packageRoot, {
+    'plugin.json': '{"name":"demo","version":"1.0.0","description":"Demo"}\n',
+    'resources/value.txt': input.bytes,
+  });
+  const packageFingerprint = fingerprintTree(packageRoot);
+  return createFrozenPackageSnapshot({
+    operationId: input.operationId,
+    attemptId: input.attemptId,
+    scopeId: 'scope-demo',
+    target: grokTarget,
+    action: input.action,
+    packageName: 'demo',
+    nativeId: 'demo@catalog',
+    sourceType: 'local',
+    immutableRevision: `revision-${input.attemptId}`,
+    snapshotRoot,
+    packageRoot,
+    relativePackagePath: 'demo',
+    snapshotFingerprint: fingerprintTree(snapshotRoot),
+    packageFingerprint,
+    inventory: inventory('demo', packageFingerprint),
+  }) as FrozenPackageSnapshot & { readonly action: 'install' | 'update' };
+}
+
+async function prepare(
+  adapter: LifecycleHostAdapter,
+  packaged: FrozenPackageSnapshot & { readonly action: 'install' | 'update' },
+): Promise<PreparedActivationMutation> {
+  const operation = packaged.action === 'install' ? 'install' : 'update';
+  const version = await adapter.probeVersion(grokTarget);
+  const observed = await adapter.observeTarget(grokTarget);
+  const pins = createResolvedLifecyclePins([]);
+  const nativeScope = await adapter.observeNativeMutationScope({
+    targetObservation: observed,
+    operation,
+    packageName: packaged.packageName,
+    nativeId: packaged.nativeId,
+    sourceType: packaged.sourceType,
+  });
+  const nativeProjection = await adapter.observeNativeProjection({
+    targetObservation: observed,
+    operation,
+    snapshot: packaged,
+    pins,
+  });
+  const existing = observed.installations.find((item) => item.nativeId === packaged.nativeId);
+  const decision = adapter.decideRoute({
+    target: grokTarget,
+    operationId: packaged.operationId,
+    attemptId: packaged.attemptId,
+    scopeId: packaged.scopeId,
+    packageName: packaged.packageName,
+    nativeId: packaged.nativeId,
+    version,
+    sourceType: packaged.sourceType,
+    targetObservation: observed,
+    nativeScope,
+    nativeProjection,
+    planCoverage: createLifecyclePlanCoverage(observed, [{
+      nativeId: packaged.nativeId,
+      operationId: packaged.operationId,
+      operation,
+      mutationGroupId: `group:${packaged.operationId}`,
+      authorization: existing?.ownership.kind === 'owned' ? 'observed-owned' : 'planned-create',
+    }]),
+    snapshot: packaged,
+    pins,
+    operation,
+  });
+  if (decision.kind !== 'selected' || decision.route !== 'native') {
+    throw new Error(`expected a native ${operation} route`);
+  }
+  const staged = await adapter.stageActivation({ selection: decision, snapshot: packaged, pins });
+  const directed = await adapter.applyLifecycleDirectives(staged);
+  const pinned = await adapter.applyPins(directed);
+  return adapter.sealActivation(pinned);
+}
+
+async function failure(run: Promise<unknown>): Promise<unknown> {
+  try {
+    await run;
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+describe('Grok lifecycle SPI', () => {
+  test('reads the grok binary version and rolls a failed native update back without another route', async () => {
+    await isolated(async (home, root) => {
+      const adapter = createGrokLifecycleAdapter();
+      expect(await adapter.probeVersion(grokTarget)).toEqual({
+        kind: 'detected',
+        version: '1.0.41',
+        probeId: 'grok:1.0.41:fixturebuild',
+      });
+      process.env.GROK_FAKE_VERSION = '1.0.24';
+      process.env.GROK_FAKE_BUILD = 'olderbuild';
+      expect(await adapter.probeVersion(grokTarget)).toEqual({
+        kind: 'detected',
+        version: '1.0.24',
+        probeId: 'grok:1.0.24:olderbuild',
+      });
+      process.env.GROK_FAKE_VERSION = 'unparseable';
+      expect(await adapter.probeVersion(grokTarget)).toEqual({ kind: 'unparseable' });
+      process.env.GROK_FAKE_VERSION = 'unknown';
+      expect(await adapter.probeVersion(grokTarget)).toEqual({ kind: 'unknown' });
+
+      process.env.GROK_FAKE_VERSION = '1.0.41';
+      process.env.GROK_FAKE_BUILD = 'fixturebuild';
+      const installed = await prepare(adapter, snapshot(root, {
+        operationId: 'op-install',
+        attemptId: 'attempt-install',
+        action: 'install',
+        bytes: 'one\n',
+      }));
+      expect(installed.handle.route).toBe('native');
+      expect(installed.handle.detectedVersion).toBe('1.0.41');
+      await adapter.apply(installed);
+      const active = join(home, '.grok', 'installed-plugins', 'demo-native', 'resources', 'value.txt');
+      expect(readFileSync(active, 'utf8')).toBe('one\n');
+      adapter.verify(installed.handle, await adapter.readback(installed.handle));
+
+      const marker = join(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))[0].source.path, '.plgnz-install.json');
+      const markerBefore = readFileSync(marker, 'utf8');
+      const logBefore = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8');
+      process.env.GROK_FAKE_FAIL_AFTER_WRITE = '1';
+      const update = await prepare(adapter, snapshot(root, {
+        operationId: 'op-update',
+        attemptId: 'attempt-update',
+        action: 'update',
+        bytes: 'two\n',
+      }));
+      const error = await failure(adapter.apply(update));
+      expect(error).toBeInstanceOf(LifecycleHostPhaseError);
+      if (!(error instanceof LifecycleHostPhaseError)) return;
+      expect(error.phase).toBe('apply');
+      expect(error.mutationStarted).toBe(true);
+      expect(readFileSync(active, 'utf8')).toBe('two\n');
+      delete process.env.GROK_FAKE_FAIL_AFTER_WRITE;
+      await adapter.rollback(update.handle);
+      adapter.verifyRollback(update.handle, await adapter.readback(update.handle));
+      expect(readFileSync(active, 'utf8')).toBe('one\n');
+      expect(readFileSync(marker, 'utf8')).toBe(markerBefore);
+      const added = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').slice(logBefore.length);
+      expect(added).toContain('plugin update demo');
+      expect(added).not.toContain('plugin install');
+      expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo@catalog']);
+    });
+  });
+
+  test('leaves a stale direct-local install unmanaged and unchanged', async () => {
+    await isolated(async (home, root) => {
+      const installed = join(home, '.grok', 'installed-plugins', 'legacy-demo');
+      const source = join(root, 'legacy-source');
+      writeFiles(installed, {
+        'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
+        'resources/value.txt': 'stale-installed\n',
+      });
+      writeFiles(source, {
+        'plugin.json': '{"name":"demo","version":"1.0.0"}\n',
+        'resources/value.txt': 'stale-source\n',
+      });
+      writeFiles(join(home, '.grok'), {
+        'installed-plugins/registry.json': JSON.stringify({
+          version: 1,
+          repos: {
+            demo: {
+              path: installed,
+              plugins: { demo: {} },
+              kind: { type: 'Local', source_path: source },
+            },
+          },
+        }),
+      });
+      const adapter = createGrokLifecycleAdapter();
+      const observed = await adapter.observeTarget(grokTarget);
+      expect(observed.installations.map((item) => ({ nativeId: item.nativeId, ownership: item.ownership.kind }))).toEqual([
+        { nativeId: 'demo', ownership: 'unmanaged' },
+      ]);
+      const prepared = await prepare(adapter, snapshot(root, {
+        operationId: 'op-stale',
+        attemptId: 'attempt-stale',
+        action: 'install',
+        bytes: 'fresh\n',
+      }));
+      const error = await failure(adapter.apply(prepared));
+      expect(error).toBeInstanceOf(LifecycleHostPhaseError);
+      expect(readFileSync(join(installed, 'resources', 'value.txt'), 'utf8')).toBe('stale-installed\n');
+      expect(readFileSync(join(source, 'resources', 'value.txt'), 'utf8')).toBe('stale-source\n');
+      expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo']);
+      expect(readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8')).not.toContain('plugin install');
+    });
+  });
+});
