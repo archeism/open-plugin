@@ -111,6 +111,54 @@ describe("yaml byte parity (capability yaml-parity)", () => {
   });
 });
 
+describe("yaml merge-key and adversarial differential coverage", () => {
+  test("merge keys expand exactly as Bun.YAML.parse expands them", () => {
+    const docs = [
+      "<<: {disable-model-invocation: true}\ndescription: x",
+      "base: &b {a: 1}\nitem:\n  <<: *b\n  c: 2",
+      "x:\n  <<: {user-invocable: false}\n  name: y",
+    ];
+    for (const doc of docs) expect(yamlParse(doc)).toEqual(Bun.YAML.parse(doc));
+  });
+
+  test("a merge-keyed invocation policy reaches the consumer seam (Codex sidecar policy)", async () => {
+    const { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { projectPluginForCodex } = await import("../src/conversion");
+    const root = mkdtempSync(join(tmpdir(), "plugnz-merge-e2e-"));
+    try {
+      writeFileSync(join(root, "plugin.json"), JSON.stringify({ name: "demo", version: "1.0.0" }));
+      mkdirSync(join(root, "skills", "guarded"), { recursive: true });
+      writeFileSync(join(root, "skills", "guarded", "SKILL.md"),
+        "---\nname: guarded\ndescription: guarded skill\n<<: {disable-model-invocation: true}\n---\nBody.\n");
+      const out = mkdtempSync(join(tmpdir(), "plugnz-merge-e2e-out-"));
+      projectPluginForCodex(root, out);
+      const sidecar = join(out, "skills", "guarded", "agents", "openai.yaml");
+      if (!existsSync(sidecar)) throw new Error("manual policy must produce the Codex sidecar");
+      const policy = readFileSync(sidecar, "utf8");
+      if (!/allow_implicit_invocation:\s*false/.test(policy)) throw new Error(`sidecar must disable implicit invocation, got:\n${policy}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("every Basic Multilingual Plane codepoint stringifies byte-identically", () => {
+    // Differential fuzz beyond the house corpus: single embedded codepoint
+    // and codepoint-only strings, covering named escapes, separators,
+    // quoting triggers, and plain Unicode in one sweep.
+    const probe = [0x00, 0x07, 0x08, 0x0b, 0x0c, 0x1b, 0x7f, 0x85, 0xa0, 0x2028, 0x2029, 0xad, 0xfeff, 0x200b, 0x3000];
+    for (let cp = 0x20; cp < 0x2100; cp++) probe.push(cp);
+    for (const cp of [0x3000, 0x1f600, 0xfffd, 0x4e2d, 0x1f1fa]) probe.push(cp);
+    for (const cp of probe) {
+      const ch = String.fromCodePoint(cp);
+      for (const s of [ch, `a${ch}b`]) {
+        const ours = yamlStringify(s);
+        const theirs = Bun.YAML.stringify(s);
+        if (ours !== theirs) throw new Error(`U+${cp.toString(16)} diverges: ours ${JSON.stringify(ours)} bun ${JSON.stringify(theirs)}`);
+      }
+    }
+  });
+});
+
 describe("runtime.spawn failure settlement", () => {
   test("a vanished binary settles exited with -1 and reports exitCode immediately", async () => {
     const { spawn } = await import("../src/runtime");

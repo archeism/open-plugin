@@ -11,7 +11,10 @@
 import { parse as parseYaml } from 'yaml';
 
 export function yamlParse(text: string): unknown {
-  return parseYaml(text);
+  // merge: true reproduces Bun.YAML's YAML 1.1 merge-key expansion — without
+  // it a `<<:` policy map stays a literal `<<` property and every consumer
+  // (semantic inventory, Codex sidecar policy) misses the restriction.
+  return parseYaml(text, { merge: true });
 }
 
 const BOOL_NULL_WORDS = new Set([
@@ -22,7 +25,7 @@ const BOOL_NULL_WORDS = new Set([
 ]);
 /** Anything Bun's own scalar resolver reads back as a non-string. */
 const SCALAR_LOOKALIKE = /^(?:[-+]?(?:0[xX][0-9a-fA-F]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$/u;
-const LEADING_INDICATORS = new Set("-?:,[]{}#&*!|>'\"%@`".split(""));
+const LEADING_INDICATORS = new Set("-?:,[]{}#&*!|>'\"%@`<".split(""));
 const MERGE_KEYS = new Set(["<<", "="]); // "=" observed plain; merge key quoted
 
 function escapeQuoted(value: string): string {
@@ -34,6 +37,16 @@ function escapeQuoted(value: string): string {
     else if (char === "\n") out += "\\n";
     else if (char === "\r") out += "\\r";
     else if (char === "\t") out += "\\t";
+    else if (char === "\0") out += "\\0";
+    else if (char === "\x07") out += "\\a";
+    else if (char === "\x08") out += "\\b";
+    else if (char === "\x0b") out += "\\v";
+    else if (char === "\x0c") out += "\\f";
+    else if (char === "\x1b") out += "\\e";
+    else if (char === "\x85") out += "\\N";
+    else if (char === "\xa0") out += "\\_";
+    else if (char === "\u2028") out += "\\L";
+    else if (char === "\u2029") out += "\\P";
     else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, "0")}`;
     else out += char;
   }
@@ -46,11 +59,19 @@ function needsQuotes(value: string): boolean {
   if (SCALAR_LOOKALIKE.test(value)) return true;
   if (LEADING_INDICATORS.has(value[0]!)) return true;
   if (MERGE_KEYS.has(value)) return value === "<<";
-  if (value.trim() !== value) return true;
+  if (value === ".") return true; // YAML document-end marker as a whole scalar
+  // ASCII space at either edge quotes; every other whitespace codepoint
+  // (U+2000–U+200A, U+1680, U+202F, U+205F, U+3000, U+FEFF) passes plain —
+  // JS trim() strips those, so it must not drive this rule. NEL/NBSP/LS/PS
+  // quote anywhere via the codepoint loop below.
+  if (value[0] === " " || value.endsWith(" ")) return true;
   for (const char of value) {
     const code = char.charCodeAt(0);
     if (char === "\"" || char === "'") return true;
     if (code < 0x20 || code === 0x7f) return true;
+    // NEL, NBSP, line and paragraph separators: Bun quotes and emits the
+    // named escapes \\N \\_ \\L \\P rather than passing them through.
+    if (code === 0x85 || code === 0xa0 || code === 0x2028 || code === 0x2029) return true;
   }
   // Observed anywhere-in-string quoting set: flow structure, comment,
   // backtick, and both quote characters. Mid-string |>&*!%@?-=;\() and bare

@@ -31,7 +31,20 @@ test -f "$T/prefix/node_modules/plugnz/dist/plugnz.mjs"
 test ! -d "$T/prefix/node_modules/plugnz/src"
 
 echo "== version via shebang exec (env-resolved node) =="
-env PATH="$STRICT" "$BIN" --version --json | grep -q '"name":"plugnz"'
+EXPECTED="$(env PATH="$STRICT" "$BIN" --version --json)"
+echo "$EXPECTED" | grep -q '"name":"plugnz"'
+
+echo "== npx launcher (bun absent) =="
+# Real npx, not the .bin path: resolves the installed package's bin through
+# npm's launcher under the bun-free PATH.
+test "$(cd "$T/prefix" && env PATH="$STRICT" "$NVM_BIN/npx" --no-install plugnz --version --json)" = "$EXPECTED"
+echo "ok: npx launcher byte-equal"
+
+echo "== bunx launcher =="
+# The bundle must run under Bun's launcher as well, closing the both-ways
+# promise (this leg intentionally has bun on PATH).
+test "$(cd "$T/prefix" && bunx --no-install plugnz --version --json)" = "$EXPECTED"
+echo "ok: bunx launcher byte-equal"
 
 mkdir -p "$T/home/source/plugins/demo/skills/example" "$T/home/.cursor"
 printf '{ "name": "demo", "version": "1.0.0", "description": "tarball smoke" }\n' > "$T/home/source/plugins/demo/plugin.json"
