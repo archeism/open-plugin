@@ -541,7 +541,7 @@ function captureRollback(nativeId: string, attemptId: string, operationId: strin
   mkdirSync(reference, { recursive: true });
   const target = managedPackageDir(nativeId);
   if (existsSync(target)) cpSync(target, join(reference, 'package'), { recursive: true });
-  writeFileSync(join(reference, 'state.json'), JSON.stringify({ lock: snapshot(lockPath()) ?? null, link: currentLinkTarget(managedLink(nativeId)) } satisfies RollbackState));
+  writeFileSync(join(reference, 'state.json'), JSON.stringify({ lock: captureLockRow(nativeId), link: currentLinkTarget(managedLink(nativeId)) } satisfies RollbackState));
   return resolve(reference);
 }
 
@@ -554,7 +554,30 @@ function restoreRollback(nativeId: string, reference: string): void {
   const link = managedLink(nativeId);
   rmSync(link, { recursive: true, force: true });
   if (state.link !== null) { mkdirSafe(dirname(link)); symlinkSync(state.link, link, 'dir'); }
-  restore(lockPath(), state.lock ?? undefined);
+  restoreLockRow(state.lock);
+}
+
+function captureLockRow(nativeId: string): LockRowRollback {
+  const packageName = npmName(nativeId);
+  if (!existsSync(lockPath())) return { packageName, present: false, row: null };
+  const lock = readDoc(lockPath(), {}, 'lockfile');
+  const plugins = isDoc(lock.plugins) ? lock.plugins : {};
+  if (!Object.hasOwn(plugins, packageName)) return { packageName, present: false, row: null };
+  return { packageName, present: true, row: plugins[packageName] };
+}
+
+function restoreLockRow(saved: LockRowRollback): void {
+  const file = lockPath();
+  if (!existsSync(file)) {
+    if (!saved.present) return;
+    writeDoc(file, { plugins: { [saved.packageName]: saved.row } });
+    return;
+  }
+  const current = readDoc(file, { plugins: {} }, 'lockfile');
+  const plugins = { ...(isDoc(current.plugins) ? current.plugins : {}) };
+  if (saved.present) plugins[saved.packageName] = saved.row;
+  else delete plugins[saved.packageName];
+  writeDoc(file, { ...current, plugins });
 }
 
 function currentLinkTarget(path: string): string | null {
@@ -639,7 +662,8 @@ async function retireManaged(handle: DurableLifecycleOperation): Promise<Mutatio
   return { receiptId, changed: true };
 }
 
-type RollbackState = { lock: string | null; link: string | null };
+type LockRowRollback = { packageName: string; present: boolean; row: unknown };
+type RollbackState = { lock: LockRowRollback; link: string | null };
 
 function captureRecorded(
   activation: { target: LifecycleTargetIdentity; scopeId: string; packageName: string; nativeId: string },
