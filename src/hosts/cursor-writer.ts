@@ -1,16 +1,45 @@
 /** Cursor's native local-plugin lifecycle writer. */
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { accessSync, constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createCapabilityEvidenceProfile } from '../capability-evidence';
+import { discoverCommands } from '../conversion';
+import { fingerprintTree } from '../fingerprint';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
-import { cursorRoot } from '../paths';
+import type {
+  CleanupDisposition,
+  CleanupReference,
+  DurableLifecycleOperation,
+  LifecycleHostDefinition,
+  LifecycleReadbackData,
+  LifecycleTargetIdentity,
+  TargetInventoryData,
+  TargetOwnershipObservation,
+  TargetVersionObservation,
+} from '../lifecycle-host';
+import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
+import { pinPluginMcpFiles } from '../mcp-write';
+import { cursorRoot, homeRoot } from '../paths';
+import { CryptoHasher, spawnSync } from '../runtime';
+import type { SourceType } from '../semantic-inventory';
 import type { PluginSource, ResolvedSource } from '../source';
 import { cursor, localDir, mcpCandidates } from './cursor';
-import { pinPluginMcpFiles } from '../mcp-write';
-import { discoverCommands } from '../conversion';
 
 const OWNERSHIP = '.plgnz-install.json';
-type Ownership = { source: string; pluginId: string; fingerprint: string };
+const CURSOR_MANAGED_VERSION = '2.4.0';
+const MARKETPLACE_REFRESH_UNVERIFIED = 'cursor-marketplace-refresh';
+const RELOAD_REQUIRED: LifecycleReadbackData['transition'] = { requirement: 'reload', status: 'effective' };
+
+type Ownership = {
+  source: string;
+  pluginId: string;
+  fingerprint: string;
+  scopeId?: string;
+  sourceType?: SourceType;
+  sourceRevision?: string;
+  sourceLocator?: string | null;
+  proof?: 'created' | 'adopted';
+};
 
 export const cursorWriter: HostWriter = {
   ...cursor,
@@ -177,7 +206,17 @@ function readOwnership(target: string): Ownership | null {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('marker must be an object');
     const record = value as Record<string, unknown>;
     if (typeof record['source'] !== 'string' || typeof record['pluginId'] !== 'string' || typeof record['fingerprint'] !== 'string') throw new Error('marker fields are invalid');
-    return { source: record['source'], pluginId: record['pluginId'], fingerprint: record['fingerprint'] };
+    const ownership: Ownership = { source: record['source'], pluginId: record['pluginId'], fingerprint: record['fingerprint'] };
+    const scopeId = optionalMarkerString(record, 'scopeId');
+    if (scopeId !== undefined) ownership.scopeId = scopeId;
+    const sourceRevision = optionalMarkerString(record, 'sourceRevision');
+    if (sourceRevision !== undefined) ownership.sourceRevision = sourceRevision;
+    if (record['sourceType'] !== undefined) ownership.sourceType = markerSourceType(record['sourceType']);
+    if (record['sourceLocator'] === null) ownership.sourceLocator = null;
+    else if (typeof record['sourceLocator'] === 'string') ownership.sourceLocator = record['sourceLocator'];
+    else if (record['sourceLocator'] !== undefined) throw new Error('marker fields are invalid');
+    if (record['proof'] !== undefined) ownership.proof = markerProof(record['proof']);
+    return ownership;
   } catch (error) {
     throw new Error(`invalid plgnz ownership marker: ${marker} (${(error as Error).message})`);
   }
@@ -282,4 +321,537 @@ function assertSafeIdentity(id: string): void {
 
 function validIdentity(id: string): boolean {
   return /^[a-z0-9][a-z0-9._-]*$/iu.test(id);
+}
+
+function optionalMarkerString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0) throw new Error('marker fields are invalid');
+  return value;
+}
+
+function markerSourceType(value: unknown): SourceType {
+  if (value === 'local' || value === 'git') return value;
+  throw new Error('marker fields are invalid');
+}
+
+function markerProof(value: unknown): 'created' | 'adopted' {
+  if (value === 'created' || value === 'adopted') return value;
+  throw new Error('marker fields are invalid');
+}
+
+const cursorManagedProfile = createCapabilityEvidenceProfile({
+  host: 'cursor',
+  detectedVersion: CURSOR_MANAGED_VERSION,
+  sourceTypes: ['local', 'git'],
+  operations: ['install', 'update', 'disable', 'retire'],
+  route: 'managed',
+  operationStatus: 'supported',
+  semantics: {
+    'ordinary-skills': 'supported',
+    mcp: 'supported',
+    hooks: 'unverified',
+    commands: 'supported',
+    agents: 'unverified',
+    'model-invocation-control': 'supported',
+    'user-invocation-control': 'unsupported',
+    'auto-update-control': 'supported',
+    resources: 'supported',
+    'permissions-preprocessing': 'unverified',
+    retirement: 'supported',
+    'retention-safety': 'supported',
+    readback: 'supported',
+    rollback: 'supported',
+    'activation-reload': 'supported',
+    'reversible-disable': 'unverified',
+  },
+  evidence: [
+    'docs/hosts/cursor.md',
+    'docs/evidence/personal-cursor-composition-20260923.md',
+    'docs/research/native-plugin-update-capabilities-2026-10-09.md',
+  ],
+});
+
+const cursorLifecycleDefinition: LifecycleHostDefinition = {
+  id: 'cursor',
+  evidenceProfiles: [cursorManagedProfile],
+  async probeVersion(target) {
+    assertCursorTarget(target);
+    return probeCursorVersion();
+  },
+  async observeTarget(target) {
+    assertCursorTarget(target);
+    return inventoryLocalStore(target);
+  },
+  async observeNativeMutationScope() {
+    return { kind: 'unavailable' };
+  },
+  async observeNativeProjection() {
+    return { kind: 'unverified', reasonId: MARKETPLACE_REFRESH_UNVERIFIED };
+  },
+  async revalidateTargetPrecondition(handle) {
+    assertCursorTarget(handle.target);
+    return {
+      version: probeCursorVersion(),
+      targetObservationId: createTargetInventoryObservation('cursor', inventoryLocalStore(handle.target)).observationId,
+    };
+  },
+  async stageActivation(request) {
+    assertSafeIdentity(request.snapshot.nativeId);
+    const preparation = lifecycleDir('prepare', request.snapshot.attemptId, request.snapshot.operationId);
+    const stagingRoot = resolve(join(preparation, 'stage'));
+    rmSync(stagingRoot, { recursive: true, force: true });
+    mkdirSync(preparation, { recursive: true });
+    stagePlugin(request.snapshot.packageRoot, stagingRoot, request.snapshot.nativeId);
+    writeOwnership(stagingRoot, lifecycleMarker(request));
+    return { stagingId: operationKey(request.snapshot.attemptId, request.snapshot.operationId), stagingRoot };
+  },
+  async applyLifecycleDirectives() {
+    return ['cursor-local-no-native-updater'];
+  },
+  async applyPins(projection) {
+    return applyRecordedPins(projection.stagingRoot, projection.pins);
+  },
+  async captureActivationPreparation(projection, projectedFingerprint) {
+    const prior = projectReadback({
+      adapterId: projection.adapterId,
+      target: projection.target,
+      scopeId: projection.scopeId,
+      packageName: projection.packageName,
+      nativeId: projection.nativeId,
+      routeWhenAbsent: 'none',
+    });
+    const active = resolve(managedPluginDir(projection.nativeId));
+    return {
+      prior,
+      expected: {
+        adapterId: projection.adapterId,
+        target: projection.target,
+        scopeId: projection.scopeId,
+        packageName: projection.packageName,
+        nativeId: projection.nativeId,
+        route: projection.route,
+        presence: 'present',
+        enablement: 'enabled',
+        activation: 'active',
+        transition: RELOAD_REQUIRED,
+        installedFingerprint: projectedFingerprint,
+        contentRoots: [{ label: 'local', path: active, fingerprint: projectedFingerprint }],
+        retention: prior.retention,
+      },
+      rollbackReference: captureRollback(projection.attemptId, projection.operationId, projection.nativeId, prior),
+      rollbackCoverageOperationIds: projection.affectedOperationIds,
+    };
+  },
+  async captureDisablePreparation() {
+    throw new Error('Cursor local projection has no reversible disable switch');
+  },
+  async captureRetirementPreparation(request) {
+    const prior = projectReadback({
+      adapterId: 'cursor',
+      target: request.activation.target,
+      scopeId: request.activation.scopeId,
+      packageName: request.activation.packageName,
+      nativeId: request.activation.nativeId,
+      routeWhenAbsent: request.selection.route,
+    });
+    return {
+      prior,
+      rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId, prior),
+      rollbackCoverageOperationIds: request.selection.affectedOperationIds,
+      transition: RELOAD_REQUIRED,
+    };
+  },
+  async apply(prepared) {
+    const handle = prepared.handle;
+    const target = managedPluginDir(handle.nativeId);
+    refuseForeignScope(target, handle.scopeId, handle.nativeId);
+    if (existsSync(target) && fingerprintTree(target) === fingerprintTree(prepared.stagingRoot)) {
+      return { receiptId: receipt('apply', handle), changed: false };
+    }
+    const root = localDir();
+    mkdirSync(root, { recursive: true });
+    const scratch = join(root, `.plgnz-cursor-stage-${operationKey(handle.attemptId, handle.operationId)}`);
+    rmSync(scratch, { recursive: true, force: true });
+    try {
+      cpSync(prepared.stagingRoot, scratch, { recursive: true });
+      activate(scratch, target, root).commit();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    return { receiptId: receipt('apply', handle), changed: true };
+  },
+  async disable() {
+    throw new Error('Cursor local projection has no reversible disable switch');
+  },
+  async retire(prepared) {
+    const handle = prepared.handle;
+    const target = managedPluginDir(handle.nativeId);
+    if (!existsSync(target)) return { receiptId: receipt('retire', handle), changed: false };
+    refuseForeignScope(target, handle.scopeId, handle.nativeId);
+    rmSync(target, { recursive: true, force: true });
+    return { receiptId: receipt('retire', handle), changed: true };
+  },
+  async readback(handle) {
+    return projectReadback({
+      adapterId: handle.adapterId,
+      target: handle.target,
+      scopeId: handle.scopeId,
+      packageName: handle.packageName,
+      nativeId: handle.nativeId,
+      routeWhenAbsent: absentRoute(handle.action, handle.route),
+    });
+  },
+  async rollback(handle) {
+    const priorPath = join(handle.rollbackReference, 'prior.json');
+    const prior = JSON.parse(readFileSync(priorPath, 'utf8')) as LifecycleReadbackData;
+    const root = localDir();
+    const target = managedPluginDir(handle.nativeId);
+    const backup = join(handle.rollbackReference, 'active');
+    const restore = prior.presence === 'present' && existsSync(backup);
+    if (!restore) {
+      if (prior.presence === 'present' || !existsSync(target)) return { receiptId: receipt('rollback', handle), changed: false };
+      refuseForeignScope(target, handle.scopeId, handle.nativeId);
+      rmSync(target, { recursive: true, force: true });
+      return { receiptId: receipt('rollback', handle), changed: true };
+    }
+    if (existsSync(target)) {
+      refuseForeignScope(target, handle.scopeId, handle.nativeId);
+      if (fingerprintTree(target) === fingerprintTree(backup)) return { receiptId: receipt('rollback', handle), changed: false };
+    }
+    mkdirSync(root, { recursive: true });
+    const scratch = join(root, `.plgnz-cursor-stage-${operationKey(handle.attemptId, handle.operationId)}`);
+    rmSync(scratch, { recursive: true, force: true });
+    try {
+      cpSync(backup, scratch, { recursive: true });
+      activate(scratch, target, root).commit();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    return { receiptId: receipt('rollback', handle), changed: true };
+  },
+  async cleanup(reference: CleanupReference, _disposition: CleanupDisposition) {
+    rmSync(lifecycleDir('prepare', reference.attemptId, reference.operationId), { recursive: true, force: true });
+    rmSync(lifecycleDir('rollback', reference.attemptId, reference.operationId), { recursive: true, force: true });
+    return { cleanupId: `cleanup:${reference.attemptId}:${reference.operationId}`, completed: true };
+  },
+};
+
+export const cursorManagedLifecycle = createLifecycleHostAdapter(cursorLifecycleDefinition);
+
+function assertCursorTarget(target: LifecycleTargetIdentity): void {
+  if (target.kind !== 'cursor' || target.instance !== 'default') throw new Error('Cursor lifecycle target must be cursor/default');
+}
+
+function probeCursorVersion(): TargetVersionObservation {
+  const binary = cursorProbeBinary();
+  if (binary === undefined) return { kind: 'unknown' };
+  const result = spawnSync([binary, '--version'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: 10_000,
+    env: { ...process.env, HOME: homeRoot(), PATH: cursorProbePath() },
+  });
+  const version = cursorVersion(decodeStdout(result.stdout));
+  if (result.exitCode !== 0 || version === undefined) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `cursor-${version}` };
+}
+
+function cursorProbeBinary(): string | undefined {
+  const override = process.env['OPEN_PLUGIN_CURSOR_BIN'];
+  if (override !== undefined && override.length > 0) return existsSync(override) ? override : undefined;
+  return whichOnPath(cursorProbePath(), 'cursor');
+}
+
+function cursorProbePath(): string {
+  const isolated = process.env['OPEN_PLUGIN_HOME'];
+  if (isolated !== undefined && isolated.length > 0) return join(homeRoot(), 'bin');
+  return process.env['PATH'] ?? '';
+}
+
+function whichOnPath(pathEnv: string, name: string): string | undefined {
+  for (const dir of pathEnv.split(delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function cursorVersion(stdout: string): string | undefined {
+  const line = stdout.split(/\r?\n/u).map((item) => item.trim()).find((item) => item.length > 0);
+  if (line === undefined) return undefined;
+  const branded = /^Cursor (\d+\.\d+\.\d+)$/u.exec(line);
+  if (branded?.[1] !== undefined) return branded[1];
+  const bare = /^(\d+\.\d+\.\d+)$/u.exec(line);
+  return bare?.[1];
+}
+
+function decodeStdout(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => String.fromCharCode(byte)).join('');
+}
+
+function inventoryLocalStore(target: LifecycleTargetIdentity): TargetInventoryData {
+  const root = localDir();
+  if (!existsSync(root)) return { target, installations: [] };
+  const installations: TargetInventoryData['installations'][number][] = [];
+  for (const entry of readdirSync(root)) {
+    if (!validIdentity(entry)) continue;
+    const dir = join(root, entry);
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const installation = readLocalInstallation(entry, dir);
+    if (installation !== undefined) installations.push(installation);
+  }
+  return { target, installations };
+}
+
+function readLocalInstallation(entry: string, dir: string): TargetInventoryData['installations'][number] | undefined {
+  const manifestPath = join(dir, '.cursor-plugin', 'plugin.json');
+  if (!existsSync(manifestPath)) return undefined;
+  let manifest: { name: string; version?: string } | undefined;
+  let marker: Ownership | null = null;
+  let unreadable = false;
+  try {
+    manifest = parseManifest(manifestPath);
+  } catch {
+    unreadable = true;
+  }
+  try {
+    marker = readOwnership(dir);
+  } catch {
+    unreadable = true;
+    marker = null;
+  }
+  let digest: string;
+  try {
+    digest = fingerprintTree(dir);
+  } catch {
+    unreadable = true;
+    digest = unreadableFingerprint(entry);
+  }
+  if (manifest === undefined || unreadable) {
+    return {
+      nativeId: entry,
+      packageName: manifest?.name ?? null,
+      ownership: { kind: 'ambiguous', proofIds: [`cursor-unreadable-${entry}`] },
+      presence: 'present',
+      enablement: 'unknown',
+      activation: 'unknown',
+      installedFingerprint: digest,
+      installedVersion: manifest?.version ?? null,
+      source: null,
+      contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
+    };
+  }
+  return {
+    nativeId: entry,
+    packageName: manifest.name,
+    ownership: ownershipOf(entry, marker),
+    presence: 'present',
+    enablement: 'enabled',
+    activation: 'active',
+    installedFingerprint: digest,
+    installedVersion: manifest.version ?? null,
+    source: sourceOf(marker),
+    contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
+  };
+}
+
+function unreadableFingerprint(nativeId: string): string {
+  const hash = new CryptoHasher('sha256');
+  hash.update('cursor-unreadable\0');
+  hash.update(nativeId);
+  return hash.digest('hex');
+}
+
+function ownershipOf(nativeId: string, marker: Ownership | null): TargetOwnershipObservation {
+  if (marker === null || marker.scopeId === undefined) return { kind: 'unmanaged' };
+  if (!ownsNativeDirectory(marker.pluginId, nativeId)) return { kind: 'ambiguous', proofIds: [`cursor-marker-${nativeId}`] };
+  return {
+    kind: 'owned',
+    proof: marker.proof === 'adopted' ? 'adopted' : 'created',
+    scopeId: marker.scopeId,
+    proofId: `cursor-${nativeId}-${marker.scopeId}`,
+  };
+}
+
+function sourceOf(marker: Ownership | null): TargetInventoryData['installations'][number]['source'] {
+  if (marker?.sourceType === undefined || marker.sourceRevision === undefined) return null;
+  switch (marker.sourceType) {
+    case 'local':
+      return { type: 'local', immutableRevision: marker.sourceRevision, locator: null };
+    case 'git':
+      return { type: 'git', immutableRevision: marker.sourceRevision, locator: marker.sourceLocator ?? null };
+    default: {
+      const unreachable: never = marker.sourceType;
+      throw new Error(`unsupported cursor source type: ${String(unreachable)}`);
+    }
+  }
+}
+
+function lifecycleMarker(request: { snapshot: { nativeId: string; scopeId: string; sourceType: SourceType; immutableRevision: string; packageFingerprint: string; nativeGit?: { locator: string } } }): Ownership {
+  const locator = request.snapshot.nativeGit?.locator ?? null;
+  return {
+    source: locator ?? request.snapshot.immutableRevision,
+    pluginId: request.snapshot.nativeId,
+    fingerprint: request.snapshot.packageFingerprint,
+    scopeId: request.snapshot.scopeId,
+    sourceType: request.snapshot.sourceType,
+    sourceRevision: request.snapshot.immutableRevision,
+    sourceLocator: request.snapshot.sourceType === 'local' ? null : locator,
+    proof: 'created',
+  };
+}
+
+function applyRecordedPins(stage: string, pins: readonly { server: string; executable: string }[]): string[] {
+  for (const pin of pins) {
+    let found = false;
+    for (const file of [join(stage, '.mcp.json'), join(stage, 'mcp.json')]) {
+      if (!existsSync(file)) continue;
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
+      const servers = (parsed as Record<string, unknown>)['mcpServers'];
+      if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) continue;
+      const definition = (servers as Record<string, unknown>)[pin.server];
+      if (typeof definition !== 'object' || definition === null || Array.isArray(definition)) continue;
+      if (typeof (definition as Record<string, unknown>)['command'] !== 'string') continue;
+      (definition as Record<string, unknown>)['command'] = pin.executable;
+      writeFileSync(file, JSON.stringify(parsed, null, 2));
+      found = true;
+    }
+    if (!found) throw new Error(`Cursor pin server is absent from the staged projection: ${pin.server}`);
+  }
+  return pins.map((pin) => pin.server);
+}
+
+function projectReadback(identity: {
+  adapterId: string;
+  target: LifecycleTargetIdentity;
+  scopeId: string;
+  packageName: string;
+  nativeId: string;
+  routeWhenAbsent: LifecycleReadbackData['route'];
+}): LifecycleReadbackData {
+  const retention = {
+    pluginData: retainedResource(identity.nativeId, 'data'),
+    inactiveMetadata: retainedResource(identity.nativeId, 'metadata'),
+  };
+  const dir = join(localDir(), identity.nativeId);
+  if (!existsSync(dir)) {
+    return {
+      adapterId: identity.adapterId,
+      target: identity.target,
+      scopeId: identity.scopeId,
+      packageName: identity.packageName,
+      nativeId: identity.nativeId,
+      route: identity.routeWhenAbsent,
+      presence: 'absent',
+      enablement: 'disabled',
+      activation: 'inactive',
+      transition: RELOAD_REQUIRED,
+      installedFingerprint: null,
+      contentRoots: [],
+      retention,
+    };
+  }
+  const digest = fingerprintTree(dir);
+  return {
+    adapterId: identity.adapterId,
+    target: identity.target,
+    scopeId: identity.scopeId,
+    packageName: identity.packageName,
+    nativeId: identity.nativeId,
+    route: 'managed',
+    presence: 'present',
+    enablement: 'enabled',
+    activation: 'active',
+    transition: RELOAD_REQUIRED,
+    installedFingerprint: digest,
+    contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
+    retention,
+  };
+}
+
+function retainedResource(nativeId: string, kind: 'data' | 'metadata'): LifecycleReadbackData['retention']['pluginData'] {
+  const dir = retentionDir(nativeId, kind);
+  if (!existsSync(dir)) return { state: 'absent', fingerprint: null };
+  const stat = lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Cursor retained ${kind} is not a directory: ${dir}`);
+  return { state: 'present', fingerprint: fingerprintTree(dir) };
+}
+
+function retentionDir(nativeId: string, kind: 'data' | 'metadata'): string {
+  assertSafeIdentity(nativeId);
+  const dir = resolve(join(cursorRoot(), 'plugins', 'retained', nativeId, kind));
+  const root = resolve(cursorRoot());
+  if (dir !== root && !dir.startsWith(`${root}/`)) throw new Error(`Cursor retention path escapes its store: ${dir}`);
+  return dir;
+}
+
+function captureRollback(attemptId: string, operationId: string, nativeId: string, prior: LifecycleReadbackData): string {
+  const reference = lifecycleDir('rollback', attemptId, operationId);
+  rmSync(reference, { recursive: true, force: true });
+  mkdirSync(reference, { recursive: true });
+  const active = join(localDir(), nativeId);
+  if (existsSync(active)) cpSync(active, join(reference, 'active'), { recursive: true });
+  writeFileSync(join(reference, 'prior.json'), `${JSON.stringify(prior)}\n`);
+  return reference;
+}
+
+function lifecycleDir(kind: 'prepare' | 'rollback', attemptId: string, operationId: string): string {
+  return resolve(join(cursorRoot(), 'plugins', '.plgnz-lifecycle', kind, operationKey(attemptId, operationId)));
+}
+
+function operationKey(attemptId: string, operationId: string): string {
+  const hash = new CryptoHasher('sha256');
+  hash.update(attemptId);
+  hash.update('\0');
+  hash.update(operationId);
+  return hash.digest('hex');
+}
+
+function absentRoute(action: DurableLifecycleOperation['action'], route: DurableLifecycleOperation['route']): LifecycleReadbackData['route'] {
+  switch (action) {
+    case 'remove':
+    case 'retire-orphan':
+      return route;
+    case 'install':
+    case 'update':
+    case 'route-migrate':
+    case 'disable-nonconforming':
+      return 'none';
+    default: {
+      const unreachable: never = action;
+      throw new Error(`unsupported cursor lifecycle action: ${String(unreachable)}`);
+    }
+  }
+}
+
+function refuseForeignScope(target: string, scopeId: string, nativeId: string): void {
+  if (!existsSync(target)) return;
+  const marker = readOwnership(target);
+  if (marker === null || marker.scopeId !== scopeId || !ownsNativeDirectory(marker.pluginId, nativeId)) {
+    throw new Error(`Cursor local plugin ${nativeId} is not owned by deployment scope ${scopeId}`);
+  }
+}
+
+function managedPluginDir(nativeId: string): string {
+  assertSafeIdentity(nativeId);
+  const root = localDir();
+  const target = join(root, nativeId);
+  assertManagedDirectory(root, target);
+  return target;
+}
+
+function receipt(kind: 'apply' | 'retire' | 'rollback', handle: { attemptId: string; operationId: string }): string {
+  return `${kind}:${handle.attemptId}:${handle.operationId}`;
 }
