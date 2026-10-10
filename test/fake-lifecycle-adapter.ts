@@ -48,6 +48,7 @@ export class FakeLifecycleHost {
   nativeProjection: NativeProjectionData = { kind: 'equivalent', proofId: 'fixture-projection-equivalence' };
   nativeProjectionFor: ((request: NativeProjectionRequest) => NativeProjectionData) | null = null;
   failPhase: string | null = null;
+  failStageFrom: number | null = null;
   failureValue: unknown = new Error('injected fake lifecycle failure');
   readbackFingerprintOverride: string | null = null;
   omitObservedSource = false;
@@ -443,8 +444,14 @@ export class FakeLifecycleHost {
     };
   }
 
+  private stageCount = 0;
+
   private hit(phase: string): void {
     this.events.push(phase);
+    if (phase === 'stage') {
+      this.stageCount += 1;
+      if (this.failStageFrom !== null && this.stageCount >= this.failStageFrom) throw this.failureValue;
+    }
     if (this.failPhase === phase) throw this.failureValue;
   }
 

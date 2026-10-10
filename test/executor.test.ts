@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCapabilityEvidenceProfile, type CapabilityStatus } from '../src/capability-evidence';
@@ -868,6 +868,146 @@ describe('lifecycle executor', () => {
       });
     });
   });
+
+
+
+  test('a readback mismatch rolls the mutation back and returns a report', async () => {
+    const root = temp('readback-mismatch');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const install = plan.operations.find((row) => row.operation.package === 'alpha');
+      if (install === undefined) throw new Error('expected an install operation');
+      codex.fake.readbackFingerprintOverride = 'f'.repeat(64);
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      const attempt = loaded.state.attempts.find((row) => row.id === plan.attemptId);
+      const outcome = executed.report.outcomes[0];
+      expect(executed.exitCode).toBe(1);
+      expect(outcome?.result).toBe('pending');
+      expect(outcome?.resourceState).toBe('potentially-changed');
+      expect(outcome?.changed).toBe(true);
+      expect(outcome?.reason?.category).toBe('readback');
+      expect(outcome?.reason?.code).toBe('readback.mismatch');
+      expect(executed.report.summary.mutationStarted).toBe(true);
+      expect(executed.report.summary.recoveryId).toBe(install.operation.operationId);
+      expect(executed.report.summary.readbackId).toBe(install.operation.operationId);
+      expect(attempt?.journal[0]?.state).toBe('rolled-back');
+      expect(attempt?.mutationStarted).toBe(true);
+      expect(loaded.state.activations).toEqual([]);
+      expect(existsSync(join(codex.fake.root, 'host', 'active', 'alpha'))).toBe(false);
+      expect(codex.fake.events.includes('rollback')).toBe(true);
+    });
+  });
+
+
+  test('a pins failure removes the staged preparation and does not apply', async () => {
+    const root = temp('pins-cleanup');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const before = codex.fake.hostMutationState();
+      codex.fake.failPhase = 'pins';
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      expect(executed.exitCode).toBe(1);
+      expect(codex.fake.events.includes('managed:apply')).toBe(false);
+      expect(codex.fake.hostMutationState()).toBe(before);
+      expect(hasDirectoryNamed(join(codex.fake.root, 'preparation'), 'stage')).toBe(false);
+      expect(readLifecycleState().state.attempts[0]?.mutationStarted).toBe(false);
+      expect(readLifecycleState().state.attempts[0]?.journal[0]?.state).toBe('pending');
+    });
+  });
+
+
+  test('lastConverged stays unset when another desired pair in the scope did not complete', async () => {
+    const root = temp('partial-scope');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const source = join(root, 'collection');
+    writePlugin(source, 'alpha');
+    writePlugin(source, 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+    codex.fake.failStageFrom = 2;
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(realpathSync(source), 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      expect(plan.operations).toHaveLength(2);
+
+      await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      expect(loaded.state.scopes[0]?.lastConverged).toBeUndefined();
+      expect(loaded.state.attempts[0]?.journal.map((row) => row.state)).toEqual(['completed', 'pending']);
+    });
+  });
+
+
+  test('re-running an earlier attempt after a later attempt moved state is refused', async () => {
+    const root = temp('stale-attempt');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const beta = writePlugin(join(root, 'sources'), 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const firstPlan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const first = await executeLifecycle({ plan: firstPlan, hosts: [codex.planner], now });
+      expect(first.exitCode).toBe(0);
+      const secondPlan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(beta, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const second = await executeLifecycle({ plan: secondPlan, hosts: [codex.planner], now });
+      expect(second.exitCode).toBe(0);
+      const settled = readLifecycleState();
+      const host = codex.fake.hostMutationState();
+
+      const replay = await executeLifecycle({ plan: firstPlan, hosts: [codex.planner], now });
+
+      expect(replay.exitCode).toBe(1);
+      expect(replay.report.outcomes[0]?.reason?.diagnostic).toBe(
+        `plan '${firstPlan.attemptId}' does not match state generation ${settled.state.stateGeneration}`,
+      );
+      expect(readLifecycleState().state.stateGeneration).toBe(settled.state.stateGeneration);
+      expect(readLifecycleState().state.attempts).toHaveLength(settled.state.attempts.length);
+      expect(codex.fake.hostMutationState()).toBe(host);
+    });
+  });
 });
 
 function temp(label: string): string {
@@ -938,4 +1078,14 @@ function writePlugin(root: string, name: string): string {
   writeFileSync(join(dir, 'plugin.json'), JSON.stringify({ name, version: '1.0.0' }));
   writeFileSync(join(dir, 'skills', 'a', 'SKILL.md'), '# skill\n');
   return realpathSync(dir);
+}
+
+function hasDirectoryNamed(dir: string, name: string): boolean {
+  if (!existsSync(dir)) return false;
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    if (!statSync(path).isDirectory()) continue;
+    if (entry === name || hasDirectoryNamed(path, name)) return true;
+  }
+  return false;
 }
