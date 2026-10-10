@@ -15,7 +15,7 @@ import { inventoryPackageSemantics, type PackageSemanticInventory } from './sema
 import { CryptoHasher } from './runtime';
 import { resolveSource, type FrozenSource, type PluginSource } from './source';
 import type { SourceBinding } from './source-reference';
-import { readLifecycleState, type DeploymentScopeRecord, type JournalEntryRecord, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
+import { readLifecycleState, type ActivationRecord, type DeploymentScopeRecord, type JournalEntryRecord, type JournalState, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
 import { writeLifecycleState } from './state-write';
 
 export interface ExecuteLifecycleInput {
@@ -30,6 +30,11 @@ export interface ExecuteLifecycleResult {
 }
 
 type FrozenPlan = Extract<LifecyclePlan, { kind: 'frozen' }>;
+type OperationStep = {
+  readonly outcome: LifecycleOperationOutcome;
+  readonly stop: boolean;
+  readonly reason: LifecycleReason | null;
+};
 
 export async function executeLifecycle(input: ExecuteLifecycleInput): Promise<ExecuteLifecycleResult> {
   switch (input.plan.kind) {
@@ -62,7 +67,7 @@ async function executeFrozen(
     }
     const result = await runOperation(plan, row.operation, hosts, ledger);
     outcomes.push(result.outcome);
-    if (result.stop) stopped = result.reason;
+    if (result.stop && result.reason !== null) stopped = result.reason;
   }
   return finish(parseLifecycleReport({
     schemaVersion: 1,
@@ -78,7 +83,7 @@ async function runOperation(
   operation: LifecyclePlanOperation,
   hosts: readonly PlannerHost[],
   ledger: Ledger,
-): Promise<{ readonly outcome: LifecycleOperationOutcome; readonly stop: boolean; readonly reason: LifecycleReason }> {
+): Promise<OperationStep> {
   switch (operation.action) {
     case 'install':
       return runInstall(plan, operation, hosts, ledger);
@@ -106,7 +111,8 @@ async function runInstall(
   operation: LifecyclePlanOperation,
   hosts: readonly PlannerHost[],
   ledger: Ledger,
-): Promise<{ readonly outcome: LifecycleOperationOutcome; readonly stop: boolean; readonly reason: LifecycleReason }> {
+): Promise<OperationStep> {
+  if (ledger.journalState(plan.attemptId, operation.operationId) === 'completed') return succeeded(operation, false);
   const nativeId = operation.nativeId;
   if (nativeId === null) {
     return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' has no native identity`));
@@ -127,25 +133,65 @@ async function runInstall(
   } catch (error) {
     return stop(operation, thrownReason(error));
   }
+  let receipt: Awaited<ReturnType<PlannerHost['adapter']['apply']>> | undefined;
+  let verified: ReturnType<PlannerHost['adapter']['verify']> | undefined;
   try {
-    await host.adapter.stageActivation({
+    const staged = await host.adapter.stageActivation({
       selection: prepared.selection,
       snapshot: prepared.snapshot,
       pins: prepared.pins,
     });
+    const directed = await host.adapter.applyLifecycleDirectives(staged);
+    const pinned = await host.adapter.applyPins(directed);
+    const sealed = await host.adapter.sealActivation(pinned);
+    ledger.markApplying(plan, operation);
+    receipt = await host.adapter.apply(sealed);
+    const observation = await host.adapter.readback(receipt.handle);
+    verified = host.adapter.verify(receipt.handle, observation);
+    const projected = verified.handle.projectedFingerprint;
+    const installed = verified.observation.installedFingerprint;
+    if (projected === null || installed === null) {
+      return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' readback has no fingerprint`));
+    }
+    ledger.confirmActivation(plan, operation, {
+      scopeId: operation.scope.id,
+      packageId: operation.package,
+      nativeId,
+      sourceRelativeDir: sourceRelativeDir(plan, operation),
+      sourceRevision: verified.handle.sourceRevision,
+      route: { kind: verified.handle.route, evidenceKey: { kind: 'capability-profile', key: verified.handle.evidenceId } },
+      ownership: {
+        kind: 'created',
+        proofKey: { kind: 'managed-marker', key: contentAddress(receipt.receiptId) },
+        verifiedAt: ledger.timestamp(),
+      },
+      fingerprints: {
+        source: prepared.snapshot.packageFingerprint,
+        projected,
+        installed,
+      },
+      activationState: 'active',
+      readbackState: 'verified',
+      pins: [],
+      activatedAt: ledger.timestamp(),
+      readbackAt: ledger.timestamp(),
+      createdAt: ledger.timestamp(),
+      updatedAt: ledger.timestamp(),
+    });
   } catch (error) {
     return stop(operation, thrownReason(error));
+  }
+  if (receipt === undefined || verified === undefined) {
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' produced no verified activation`));
   }
   try {
-    ledger.markStagedUnactivated(plan, operation);
-  } catch (error) {
-    return stop(operation, thrownReason(error));
+    await host.adapter.cleanup(verified.handle, 'verified-commit');
+  } catch {
+    ledger.markCleanupPending(plan, operation);
+    return pendingCleanup(operation);
   }
-  return stop(operation, createLifecycleReason(
-    'internal',
-    'internal.invariant',
-    `install '${operation.operationId}' was staged and not activated`,
-  ));
+  ledger.markCompleted(plan, operation);
+  return succeeded(operation, receipt.changed);
 }
 
 async function prepareInstall(
@@ -336,23 +382,78 @@ class Ledger {
     this.save();
   }
 
-  markStagedUnactivated(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+  timestamp(): string {
+    return this.now;
+  }
+
+  journalState(attemptId: string, operationId: string): JournalState | undefined {
+    return this.state.attempts.find((attempt) => attempt.id === attemptId)?.journal.find((row) => row.operationId === operationId)?.state;
+  }
+
+  markApplying(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'applying', 'applying', true));
+  }
+
+  confirmActivation(plan: FrozenPlan, operation: LifecyclePlanOperation, activation: ActivationRecord): void {
+    this.state = {
+      ...this.state,
+      activations: [...this.state.activations.filter((row) => activationKey(row) !== activationKey(activation)), activation],
+    };
+    this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'readback-verified', 'readback', true));
+  }
+
+  markCleanupPending(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.state = {
+      ...this.state,
+      activations: this.state.activations.map((row) => row.packageId === operation.package && row.scopeId === operation.scope.id
+        ? {
+          ...row,
+          pending: { operation: 'install', phase: 'cleanup', attemptId: plan.attemptId, startedAt: this.now },
+          updatedAt: this.now,
+        }
+        : row),
+    };
+    this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'cleanup-pending', 'finalizing', true));
+  }
+
+  markCompleted(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.state = {
+      ...this.state,
+      scopes: this.state.scopes.map((scope) => scope.id === operation.scope.id && scope.desired !== undefined
+        ? { ...scope, lastConverged: scope.desired, updatedAt: this.now }
+        : scope),
+    };
+    this.replaceAttempt(plan, (attempt) => ({
+      ...this.journaled(attempt, operation.operationId, 'completed', 'completed', true),
+      completedAt: this.now,
+    }));
+  }
+
+  private replaceAttempt(plan: FrozenPlan, update: (attempt: LifecycleAttemptRecord) => LifecycleAttemptRecord): void {
     const existing = this.state.attempts.find((attempt) => attempt.id === plan.attemptId);
     if (existing === undefined) return;
-    const attempt: LifecycleAttemptRecord = {
-      ...existing,
-      phase: 'failed',
-      mutationStarted: false,
-      journal: existing.journal.map((row) => row.operationId === operation.operationId
-        ? { ...row, state: 'not-attempted', updatedAt: this.now }
-        : row),
-      updatedAt: this.now,
-    };
+    const attempt = update(existing);
     this.state = {
       ...this.state,
       attempts: this.state.attempts.map((row) => row.id === attempt.id ? attempt : row),
     };
     this.save();
+  }
+
+  private journaled(
+    attempt: LifecycleAttemptRecord,
+    operationId: string,
+    state: JournalState,
+    phase: LifecycleAttemptRecord['phase'],
+    mutationStarted: boolean,
+  ): LifecycleAttemptRecord {
+    return {
+      ...attempt,
+      phase,
+      mutationStarted,
+      journal: attempt.journal.map((row) => row.operationId === operationId ? { ...row, state, updatedAt: this.now } : row),
+      updatedAt: this.now,
+    };
   }
 
   private mergedScopes(plan: FrozenPlan, attemptId: string): DeploymentScopeRecord[] {
@@ -429,6 +530,52 @@ class Ledger {
 
 function finish(report: LifecycleReport): ExecuteLifecycleResult {
   return { report, exitCode: exitCodeForLifecycleReport(report) };
+}
+
+function activationKey(activation: ActivationRecord): string {
+  return `${activation.scopeId}\0${activation.packageId}\0${activation.nativeId}`;
+}
+
+function sourceRelativeDir(plan: FrozenPlan, operation: LifecyclePlanOperation): string {
+  const desired = plan.scopes.find((scope) => scope.scope.id === operation.scope.id)?.desired;
+  return desired?.packages.find((pkg) => pkg.packageId === operation.package)?.sourceRelativeDir ?? '.';
+}
+
+function contentAddress(value: string): string {
+  const hash = new CryptoHasher('sha256');
+  hash.update(value);
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function succeeded(operation: LifecyclePlanOperation, changed: boolean): OperationStep {
+  return {
+    stop: false,
+    reason: null,
+    outcome: {
+      ...operation,
+      result: 'succeeded',
+      resourceState: 'present',
+      activationState: 'active-conforming',
+      changed,
+      reason: null,
+    },
+  };
+}
+
+function pendingCleanup(operation: LifecyclePlanOperation): OperationStep {
+  const reason = createLifecycleReason('recovery', 'recovery.required', `cleanup for '${operation.operationId}' is still pending after the confirmed activation`);
+  return {
+    stop: true,
+    reason,
+    outcome: {
+      ...operation,
+      result: 'pending',
+      resourceState: 'present',
+      activationState: 'active-conforming',
+      changed: true,
+      reason,
+    },
+  };
 }
 
 function stop(
@@ -522,11 +669,13 @@ function digest(parts: readonly string[]): string {
 function summaryFor(outcomes: readonly LifecycleOperationOutcome[]): LifecycleReport['summary'] {
   const failed = outcomes.find((outcome) => outcome.result !== 'succeeded');
   const changed = outcomes.some((outcome) => outcome.changed);
+  const pending = outcomes.find((outcome) => outcome.result === 'pending');
+  const mutationStarted = changed || pending !== undefined;
   if (failed === undefined) {
     return {
       result: 'converged',
       terminalPhase: 'complete',
-      mutationStarted: false,
+      mutationStarted,
       changed,
       failureCategory: null,
       reason: null,
@@ -536,12 +685,12 @@ function summaryFor(outcomes: readonly LifecycleOperationOutcome[]): LifecycleRe
   }
   return {
     result: 'incomplete',
-    terminalPhase: 'apply',
-    mutationStarted: false,
+    terminalPhase: pending === undefined ? 'apply' : 'finalize',
+    mutationStarted,
     changed,
     failureCategory: failed.reason?.category ?? 'internal',
     reason: null,
-    recoveryId: null,
+    recoveryId: pending?.operationId ?? null,
     readbackId: null,
   };
 }

@@ -386,36 +386,133 @@ describe('lifecycle executor', () => {
 
       const loaded = readLifecycleState();
       const attempt = loaded.state.attempts.find((row) => row.id === plan.attemptId);
+      const hostAfter = codex.fake.hostMutationState();
       expect(loaded.state.attempts).toHaveLength(1);
-      expect(attempt?.phase).toBe('failed');
-      expect(attempt?.mutationStarted).toBe(false);
-      expect(attempt?.journal).toEqual([{
-        operationId: install.operation.operationId,
-        scopeId: install.operation.scope.id,
-        packageId: 'alpha',
-        nativeId: 'alpha',
-        action: 'install',
-        state: 'not-attempted',
-        startedAt: now,
-        updatedAt: now,
-      }]);
-      expect(codex.fake.events.includes('stage')).toBe(true);
-      expect(codex.fake.events.includes('managed:apply')).toBe(false);
-      expect(codex.fake.hostMutationState()).toBe(before);
-      expect(executed.exitCode).toBe(1);
-      expect(executed.report.outcomes[0]?.reason?.diagnostic).toBe(
-        `install '${install.operation.operationId}' was staged and not activated`,
-      );
+      expect(attempt?.phase).toBe('completed');
+      expect(attempt?.mutationStarted).toBe(true);
+      expect(attempt?.journal[0]?.state).toBe('completed');
+      expect(codex.fake.events.filter((event) => event === 'managed:apply')).toHaveLength(1);
+      expect(hostAfter === before).toBe(false);
+      expect(executed.exitCode).toBe(0);
 
       const again = await executeLifecycle({ plan, hosts: [codex.planner], now });
       const reloaded = readLifecycleState();
       const replayed = reloaded.state.attempts.filter((row) => row.id === plan.attemptId);
       expect(replayed).toHaveLength(1);
       expect(replayed[0]?.journal).toHaveLength(1);
-      expect(replayed[0]?.journal[0]?.state).toBe('not-attempted');
-      expect(replayed[0]?.mutationStarted).toBe(false);
+      expect(replayed[0]?.journal[0]?.state).toBe('completed');
+      expect(codex.fake.events.filter((event) => event === 'managed:apply')).toHaveLength(1);
+      expect(codex.fake.hostMutationState()).toBe(hostAfter);
+      expect(again.exitCode).toBe(0);
+    });
+  });
+
+  test('a dry-run of a fully executable convergent plan exits 0 and writes no journal, and a capability plan exits 1', async () => {
+    const root = temp('dry-run');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const beta = writePlugin(join(root, 'sources'), 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+    const unverified = boundHost('kimi', join(root, 'kimi'), []);
+
+    await withHome(home, async () => {
+      const convergent = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: true,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const before = codex.fake.hostMutationState();
+      const executed = await executeLifecycle({ plan: convergent, hosts: [codex.planner], now });
+      expect(executed.exitCode).toBe(0);
+      expect(readLifecycleState().state.attempts).toEqual([]);
+      expect(readLifecycleState().state.stateGeneration).toBe(0);
       expect(codex.fake.hostMutationState()).toBe(before);
-      expect(again.exitCode).toBe(1);
+
+      const capability = await planLifecycle({
+        manifest: manifest([syncEntry(beta, 'kimi')]),
+        dryRun: true,
+        validatedAt: now,
+        hosts: [unverified.planner],
+      });
+      const unverifiedBefore = unverified.fake.hostMutationState();
+      const gap = await executeLifecycle({ plan: capability, hosts: [unverified.planner], now });
+      expect(gap.exitCode).toBe(1);
+      expect(readLifecycleState().state.attempts).toEqual([]);
+      expect(unverified.fake.hostMutationState()).toBe(unverifiedBefore);
+    });
+  });
+
+  test('a second run of the same attempt continues from the journal instead of repeating a finished mutation', async () => {
+    const root = temp('retry');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const applies = () => codex.fake.events.filter((event) => event === 'managed:apply').length;
+
+      const first = await executeLifecycle({ plan, hosts: [codex.planner], now });
+      const hostAfter = codex.fake.hostMutationState();
+      const loaded = readLifecycleState();
+      expect(first.exitCode).toBe(0);
+      expect(applies()).toBe(1);
+      expect(loaded.state.attempts).toHaveLength(1);
+      expect(loaded.state.attempts[0]?.journal[0]?.state).toBe('completed');
+      expect(loaded.state.activations.some((row) => row.packageId === 'alpha' && row.activationState === 'active')).toBe(true);
+
+      const second = await executeLifecycle({ plan, hosts: [codex.planner], now });
+      expect(second.exitCode).toBe(0);
+      expect(applies()).toBe(1);
+      expect(codex.fake.hostMutationState()).toBe(hostAfter);
+      expect(readLifecycleState().state.attempts.filter((row) => row.id === plan.attemptId)).toHaveLength(1);
+    });
+  });
+
+  test('cleanup failure after a confirmed activation keeps that activation and records pending cleanup', async () => {
+    const root = temp('cleanup');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const before = codex.fake.hostMutationState();
+      codex.fake.failPhase = 'cleanup:verified-commit';
+
+      const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      const activation = loaded.state.activations.find((row) => row.packageId === 'alpha');
+      const attempt = loaded.state.attempts.find((row) => row.id === plan.attemptId);
+      expect(executed.exitCode).toBe(1);
+      expect(codex.fake.events.includes('managed:apply')).toBe(true);
+      expect(codex.fake.hostMutationState() === before).toBe(false);
+      expect(activation?.activationState).toBe('active');
+      expect(activation?.readbackState).toBe('verified');
+      expect(activation?.pending).toEqual({
+        operation: 'install',
+        phase: 'cleanup',
+        attemptId: plan.attemptId,
+        startedAt: now,
+      });
+      expect(attempt?.mutationStarted).toBe(true);
+      expect(attempt?.phase).toBe('finalizing');
+      expect(attempt?.journal[0]?.state).toBe('cleanup-pending');
     });
   });
 });
