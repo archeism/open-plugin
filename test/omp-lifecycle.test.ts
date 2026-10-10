@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { omp } from '../src/hosts/omp';
@@ -30,7 +30,7 @@ function fixture(files: Record<string, string> = {}): { plugin: PluginSource; re
 }
 
 async function isolated(run: (root: string) => Promise<void>): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), 'plgnz-omp-home-'));
+  const root = mkdtempSync(join(process.env['OPEN_PLUGIN_TEST_OMP_HOME_PARENT'] ?? tmpdir(), 'plgnz-omp-home-'));
   const old = process.env['OPEN_PLUGIN_OMP_ROOT'];
   process.env['OPEN_PLUGIN_OMP_ROOT'] = join(root, '.omp');
   try { await run(root); }
@@ -42,6 +42,36 @@ async function isolated(run: (root: string) => Promise<void>): Promise<void> {
 async function failure(run: () => Promise<unknown>): Promise<Error> { try { await run(); } catch (error) { return error as Error; } throw new Error('expected failure'); }
 
 describe('OMP native extension-package lifecycle', () => {
+  test('installs and updates without using the system temporary directory and cleans destination staging', async () => isolated(async root => {
+    const incoming = fixture(); const previous = process.env['TMPDIR'];
+    const unavailable = join(root, 'unavailable-system-temp'); process.env['TMPDIR'] = unavailable;
+    try {
+      await ompWriter.add(incoming.plugin, incoming.resolved);
+      writeFileSync(join(incoming.plugin.dir, 'resources/value.txt'), 'two\n'); incoming.plugin.contentFingerprint = 'two';
+      await ompWriter.add(incoming.plugin, incoming.resolved);
+      expect(readFileSync(join(owned(root), 'resources/value.txt'), 'utf8')).toBe('two\n');
+      expect(await ompWriter.add(incoming.plugin, incoming.resolved)).toBe('unchanged');
+      expect(readdirSync(dirname(owned(root)))).toEqual([slug]);
+      expect(existsSync(unavailable)).toBe(false);
+      expect(process.env['TMPDIR']).toBe(unavailable);
+    } finally { if (previous === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = previous; }
+  }));
+
+  test('a successful dry-run leaves an absent native store absent', async () => isolated(async root => {
+    const incoming = fixture();
+    expect(await ompWriter.add(incoming.plugin, incoming.resolved, { dryRun: true })).toBeUndefined();
+    expect(existsSync(join(root, '.omp'))).toBe(false);
+  }));
+
+  test('refuses staging through a symlinked managed store without modifying its contents', async () => isolated(async root => {
+    const incoming = fixture(); const foreign = join(root, 'foreign');
+    writeFiles(foreign, { 'keep.txt': 'keep\n' }); mkdirSync(join(root, '.omp/plugins'), { recursive: true });
+    symlinkSync(foreign, dirname(owned(root)), 'dir');
+    expect((await failure(() => ompWriter.add(incoming.plugin, incoming.resolved))).message).toContain('managed path is unsafe');
+    expect(readdirSync(foreign)).toEqual(['keep.txt']);
+    expect(readFileSync(join(foreign, 'keep.txt'), 'utf8')).toBe('keep\n');
+  }));
+
   test('projects ordinary skills, commands, and manual-only skills into one native package', async () => isolated(async root => {
     const incoming = fixture();
     writeFiles(join(root, '.omp'), { 'marketplaces.json': '{"marketplaces":[{"name":"user"}]}' });
@@ -75,6 +105,7 @@ describe('OMP native extension-package lifecycle', () => {
     expect((await failure(() => ompWriter.add(incoming.plugin, incoming.resolved))).message).toContain('user-invocable: false');
     expect(readFileSync(join(owned(root), 'resources/value.txt'), 'utf8')).toBe('two\n');
     expect(readFileSync(join(owned(root), 'commands/demo-plugin:run.md'), 'utf8')).toContain('run $1');
+    expect(readdirSync(dirname(owned(root)))).toEqual([slug]);
   }));
 
   test('rolls back the old directory and link when activation fails after moving the directory aside', async () => isolated(async root => {
@@ -85,6 +116,7 @@ describe('OMP native extension-package lifecycle', () => {
     finally { delete process.env['OPEN_PLUGIN_TEST_OMP_ACTIVATION_FAILURE']; }
     expect(readFileSync(join(owned(root), 'resources/value.txt'), 'utf8')).toBe('one\n');
     expect(resolve(dirname(link(root)), readlinkSync(link(root)))).toBe(owned(root));
+    expect(readdirSync(dirname(owned(root)))).toEqual([slug]);
   }));
 
   test('migrates a selected legacy marketplace row only with adoption and removes legacy bytes after activation', async () => isolated(async root => {

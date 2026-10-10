@@ -38,7 +38,11 @@ export const ompWriter: HostWriter = {
     if (owner !== null && (owner.source !== resolved.sourceUri || owner.pluginId !== id || owner.packageName !== packageName)) throw new Error(`OMP plugin ${id} belongs to another source; refusing to replace it`);
     assertOwnedLink(link, target, owner !== null);
 
-    const stage = mkdtempSync(join(tmpdir(), '.plgnz-omp-package-'));
+    // Activation uses rename, so real installs must stage on the target's
+    // filesystem. Dry-runs still project in system temp without creating a store.
+    const stageParent = opts?.dryRun ? tmpdir() : managed;
+    if (!opts?.dryRun) mkdirSafe(stageParent);
+    const stage = mkdtempSync(join(stageParent, '.plgnz-omp-package-'));
     try {
       projectPluginForOmp(plugin.dir, stage, { packageName, version, activeRoot: target, namespace: plugin.name });
       writeFileSync(join(stage, MARKER), JSON.stringify({ source: resolved.sourceUri, pluginId: id, fingerprint: plugin.contentFingerprint ?? '', packageName } satisfies Ownership));
