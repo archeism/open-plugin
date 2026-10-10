@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCapabilityEvidenceProfile, type CapabilityStatus } from '../src/capability-evidence';
@@ -513,6 +513,48 @@ describe('lifecycle executor', () => {
       expect(attempt?.mutationStarted).toBe(true);
       expect(attempt?.phase).toBe('finalizing');
       expect(attempt?.journal[0]?.state).toBe('cleanup-pending');
+    });
+  });
+
+  test('a dry-run from A and B to only A plans retirement of B and writes nothing', async () => {
+    const root = temp('retire-b');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const collection = realpathSync(mkdirTemp(join(root, 'sources')));
+    writePlugin(collection, 'alpha');
+    writePlugin(collection, 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+
+    await withHome(home, async () => {
+      const installed = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(collection, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+      expect(applied.exitCode).toBe(0);
+
+      const before = readFileSync(stateFile(), 'utf8');
+      const hostBefore = codex.fake.hostMutationState();
+      const narrowed = expectFrozen(await planLifecycle({
+        manifest: manifest([{
+          operation: 'sync',
+          source: { kind: 'local', locator: collection },
+          target: { kind: 'codex', instance: 'default' },
+          selectors: [{ package: 'alpha', adoptExisting: false }],
+        }]),
+        dryRun: true,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const retirements = narrowed.operations.filter((row) => row.operation.action === 'retire-orphan');
+      expect(retirements.map((row) => row.operation.package)).toEqual(['beta']);
+      const executed = await executeLifecycle({ plan: narrowed, hosts: [codex.planner], now });
+      expect(executed.report.summary.mutationStarted).toBe(false);
+      expect(readFileSync(stateFile(), 'utf8')).toBe(before);
+      expect(codex.fake.hostMutationState()).toBe(hostBefore);
+      expect(readLifecycleState().state.attempts.some((attempt) => attempt.id === narrowed.attemptId)).toBe(false);
     });
   });
 });
