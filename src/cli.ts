@@ -1,11 +1,10 @@
-/**
- * CLI entrypoint. Verbs: add, doctor, pin, update, list, remove, targets
- * (AGENTS.md verbs list).
- */
 import { runDoctor, formatFinding, type DoctorFinding } from './doctor';
 import { hosts } from './hosts';
 import { cleanupWriters, writers } from './hosts/writers';
-import { resolveSource, type PluginSource } from './source';
+import { resolveSource, type PluginSource, type SourceBinding } from './source';
+import { runFrozenLifecycle } from './lifecycle-command';
+import { lifecyclePlannerHosts } from './lifecycle-hosts';
+import { parseSyncManifest, SyncManifestValidationError } from './sync-manifest';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
 import { retirementTombstone } from './owned-activation';
 import { writeLifecycleState, writeState } from './state-write';
@@ -50,6 +49,8 @@ verbs:
                                     copy-based hosts and re-applies recorded pins
   list                              list installed plugins per host
   remove <plugin>                   remove an installed plugin
+  sync <source> --target <host>…    reconcile each source × target scope from the frozen plan
+                                    [--plugin <name>…] [--dry-run]
   targets [--all]                   list detected agent hosts; --all includes frozen consumer profiles
 
 mutation output:
@@ -57,7 +58,6 @@ mutation output:
   --legacy-json                     one-release InstallOutcome[] compatibility output
 `;
 
-/** Flags shared by `pin` and `update`. */
 interface VerbFlags {
   positionals: string[];
   targets: string[];
@@ -583,6 +583,68 @@ async function withLogsOnStderr<T>(fn: () => Promise<T>): Promise<T> {
 function fail(message: string, code: number): never {
   console.error(message);
   process.exit(code);
+}
+
+function emitValidatedReport(report: LifecycleReport, json: boolean): number {
+  const validated = parseLifecycleReport(report);
+  console.log(json ? JSON.stringify(validated, null, 2) : renderLifecycleReport(validated));
+  return exitCodeForLifecycleReport(validated);
+}
+
+function renderLifecycleReport(report: LifecycleReport): string {
+  const header = report.command.dryRun ? `${report.command.name} dry-run` : report.command.name;
+  const rows = report.plan.map((operation) => {
+    const outcome = report.outcomes.find((candidate) => candidate.operationId === operation.operationId);
+    return [operation.operationId, operation.scope.target.kind, operation.package, operation.action, outcome?.result ?? 'missing'].join('\t');
+  });
+  const summary = ['summary', report.summary.result, report.summary.terminalPhase, `mutationStarted=${report.summary.mutationStarted}`].join('\t');
+  const diagnostic = report.summary.reason === null ? [] : [report.summary.reason.diagnostic];
+  return [header, ...rows, summary, ...diagnostic].join('\n');
+}
+
+async function runSync(argv: string[], json: boolean): Promise<number> {
+  const flags = parseFlags(argv);
+  const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting']));
+  if (disallowed !== undefined) return emitValidatedReport(usageReport('sync', flags.dryRun, disallowed), json);
+  if (flags.positionals.length !== 1) return emitValidatedReport(usageReport('sync', flags.dryRun, 'sync requires one source'), json);
+  if (flags.targets.length === 0) return emitValidatedReport(usageReport('sync', flags.dryRun, 'sync requires at least one --target'), json);
+  if (flags.adoptExisting && flags.plugins.length === 0) {
+    return emitValidatedReport(usageReport('sync', flags.dryRun, '--adopt-existing requires --plugin'), json);
+  }
+  const source = flags.positionals[0]!;
+  let binding: SourceBinding;
+  try {
+    binding = resolveSource(source).snapshot.binding;
+  } catch (error) {
+    return emitValidatedReport(usageReport('sync', flags.dryRun, unknownErrorDiagnostic(error)), json);
+  }
+  let manifest;
+  try {
+    manifest = parseSyncManifest({
+      schemaVersion: 1,
+      entries: flags.targets.map((kind) => ({
+        operation: 'sync',
+        source: binding,
+        target: { kind, instance: 'default' },
+        ...(flags.plugins.length === 0 ? {} : {
+          selectors: flags.plugins.map((packageName) => ({ package: packageName, adoptExisting: flags.adoptExisting })),
+        }),
+      })),
+    });
+  } catch (error) {
+    if (error instanceof SyncManifestValidationError) {
+      return emitValidatedReport(usageReport('sync', flags.dryRun, error.reason.diagnostic, error.reason.code), json);
+    }
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const executed = await runFrozenLifecycle({
+    manifest,
+    dryRun: flags.dryRun,
+    hosts: lifecyclePlannerHosts,
+    now,
+  });
+  return emitValidatedReport(executed.report, json);
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -1655,6 +1717,8 @@ export async function main(argv: string[]): Promise<number> {
       return exitCodeForLifecycleReport(report);
     }
   }
+
+  if (verb === 'sync') return runSync(args.slice(1), wantsJson);
 
   fail(`plugnz: unknown verb '${verb}'\n\n${USAGE}`, 2);
 }
