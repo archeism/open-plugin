@@ -215,4 +215,212 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('applied sync installs the frozen package and records the scope', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"Harness fixture"}\n';
+      const source = harness.source('applied-sync', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: Harness fixture\n---\n\nDemo body.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(3));
+
+      const result = harness.run(
+        ['sync', source, '--target', 'cursor', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      const operationIds = report.plan.map((operation) => operation.operationId);
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        command: report.command.name,
+        dryRun: report.command.dryRun,
+        outcomeIds: report.outcomes.map((outcome) => outcome.operationId),
+        rows: report.outcomes.map((outcome) => ({
+          package: outcome.package,
+          nativeId: outcome.nativeId,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+          changed: outcome.changed,
+        })),
+        summary: report.summary,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        nativeInvocations: result.nativeInvocations['cursor'],
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        command: 'sync',
+        dryRun: false,
+        outcomeIds: operationIds,
+        rows: [{
+          package: 'demo',
+          nativeId: 'demo',
+          action: 'install',
+          route: 'managed',
+          result: 'succeeded',
+          resourceState: 'present',
+          activationState: 'active-conforming',
+          changed: true,
+        }],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: true,
+          changed: true,
+          failureCategory: null,
+          reason: null,
+          recoveryId: null,
+          readbackId: null,
+        },
+        installed: pluginJson,
+        nativeInvocations: versionSteps(3).map(() => ({ args: ['--version'] })),
+      });
+    });
+  });
+
+  test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('retire-sync', {
+        'plugin.json': '{"name":"demo","version":"1.0.0","description":"Harness fixture"}\n',
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: Harness fixture\n---\n\nDemo body.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(8));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const installedReport = parseLifecycleReport(JSON.parse(installed.stdout));
+      const scopeId = installedReport.outcomes[0]?.scope.id;
+      expect(installed.exitCode).toBe(0);
+      expect(scopeId).toMatch(/^scope-v1-[0-9a-f]{64}$/u);
+
+      const retired = harness.run(['retire-source', scopeId!, '--target', 'cursor', '--json'], { env });
+      const report = parseLifecycleReport(JSON.parse(retired.stdout));
+      const operationIds = report.plan.map((operation) => operation.operationId);
+      expect({
+        exitCode: retired.exitCode,
+        stderr: retired.stderr,
+        command: report.command.name,
+        dryRun: report.command.dryRun,
+        outcomeIds: report.outcomes.map((outcome) => outcome.operationId),
+        rows: report.outcomes.map((outcome) => ({
+          package: outcome.package,
+          scopeId: outcome.scope.id,
+          action: outcome.action,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+          changed: outcome.changed,
+        })),
+        summary: report.summary,
+        pluginRemoved: retired.stores.cursor.after.files['plugins/local/demo/plugin.json'] === undefined,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        command: 'retire-source',
+        dryRun: false,
+        outcomeIds: operationIds,
+        rows: [{
+          package: 'demo',
+          scopeId,
+          action: 'retire-orphan',
+          result: 'succeeded',
+          resourceState: 'absent',
+          activationState: 'inactive',
+          changed: true,
+        }],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: true,
+          changed: true,
+          failureCategory: null,
+          reason: null,
+          recoveryId: null,
+          readbackId: null,
+        },
+        pluginRemoved: true,
+      });
+    });
+  });
+
+  test('batch sync --manifest applies the frozen package', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"Harness fixture"}\n';
+      const source = harness.source('batch-apply', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: Harness fixture\n---\n\nDemo body.\n',
+      });
+      const manifest = join(harness.source('batch-file', {
+        'manifest.json': `${JSON.stringify({
+          schemaVersion: 1,
+          entries: [{
+            operation: 'sync',
+            source: { kind: 'local', locator: source },
+            target: { kind: 'cursor', instance: 'default' },
+          }],
+        })}\n`,
+      }), 'manifest.json');
+      const cursor = harness.fakeNative('cursor', versionSteps(3));
+      const result = harness.run(
+        ['sync', '--manifest', manifest, '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      const operationIds = report.plan.map((operation) => operation.operationId);
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        command: report.command.name,
+        dryRun: report.command.dryRun,
+        outcomeIds: report.outcomes.map((outcome) => outcome.operationId),
+        rows: report.outcomes.map((outcome) => ({
+          package: outcome.package,
+          nativeId: outcome.nativeId,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          changed: outcome.changed,
+        })),
+        summary: {
+          result: report.summary.result,
+          terminalPhase: report.summary.terminalPhase,
+          mutationStarted: report.summary.mutationStarted,
+          changed: report.summary.changed,
+        },
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        command: 'sync',
+        dryRun: false,
+        outcomeIds: operationIds,
+        rows: [{
+          package: 'demo',
+          nativeId: 'demo',
+          action: 'install',
+          route: 'managed',
+          result: 'succeeded',
+          changed: true,
+        }],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: true,
+          changed: true,
+        },
+        installed: pluginJson,
+      });
+    });
+  });
 });
+
+function versionSteps(count: number): { args: string[]; stdout: string }[] {
+  return Array.from({ length: count }, () => ({ args: ['--version'], stdout: '2.4.0\n' }));
+}
