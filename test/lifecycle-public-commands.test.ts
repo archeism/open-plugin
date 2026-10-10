@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { bytesToText, snapshotTree, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
 import { parseLifecycleReport } from '../src/lifecycle-report';
@@ -510,6 +510,132 @@ describe('public lifecycle commands', () => {
         data: retainedData,
         metadata: retainedMetadata,
       });
+    });
+  });
+
+  test('scenario 3 failures write nothing; two scope records load as corrupt state, and a failed version probe escapes as an uncaught protocol error', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('scenario-3', {
+        'plugin.json': '{"name":"kept","version":"1.0.0","description":"kept"}\n',
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const other = harness.source('scenario-3-other', {
+        'plugin.json': '{"name":"kept","version":"1.0.0","description":"other source"}\n',
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: other source\n---\n\nOther.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const broken = harness.fakeNative('cursor-broken', versionSteps(8).map(() => ({
+        args: ['--version'],
+        stderr: 'probe failed\n',
+        exitCode: 1,
+      })));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const statePath = join(harness.home, 'state.json');
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      expect(installed.exitCode).toBe(0);
+      const cursorBefore = snapshotTree(cursorStore);
+      const stateBefore = readFileSync(statePath, 'utf8');
+
+      const closed = (label: string, result: ReturnType<typeof harness.run>, stateExpected: string, code: string) => {
+        const report = result.stdout.trim().startsWith('{') ? parseLifecycleReport(JSON.parse(result.stdout)) : null;
+        expect({
+          label,
+          failed: result.exitCode !== 0,
+          code: report?.summary.reason?.code ?? null,
+          mutationStarted: report?.summary.mutationStarted ?? null,
+          changed: report?.summary.changed ?? null,
+          cursor: snapshotTree(cursorStore),
+          state: readFileSync(statePath, 'utf8'),
+        }).toEqual({
+          label,
+          failed: true,
+          code,
+          mutationStarted: false,
+          changed: false,
+          cursor: cursorBefore,
+          state: stateExpected,
+        });
+      };
+
+      closed(
+        'invalid-selection',
+        harness.run(['sync', source, '--target', 'cursor', '--plugin', 'not-in-source', '--json'], { env }),
+        stateBefore,
+        'usage.invalid-selection',
+      );
+
+      const collision = join(harness.source('scenario-3-collision', {}), 'manifest.json');
+      writeFileSync(collision, JSON.stringify({
+        schemaVersion: 1,
+        entries: [
+          { operation: 'sync', source: { kind: 'local', locator: source }, target: { kind: 'cursor', instance: 'default' } },
+          { operation: 'sync', source: { kind: 'local', locator: other }, target: { kind: 'cursor', instance: 'default' } },
+        ],
+      }));
+      closed('collision', harness.run(['sync', '--manifest', collision, '--json'], { env }), stateBefore, 'internal.ambiguous-ownership');
+
+      const brokenProbe = harness.run(
+        ['sync', source, '--target', 'cursor', '--json'],
+        { env: { ...env, OPEN_PLUGIN_CURSOR_BIN: broken.path } },
+      );
+      expect({
+        exitCode: brokenProbe.exitCode,
+        stdout: brokenProbe.stdout,
+        protocol: brokenProbe.stderr.includes('protocol.contradictory-outcome'),
+        cursor: snapshotTree(cursorStore),
+        state: readFileSync(statePath, 'utf8'),
+      }).toEqual({
+        exitCode: 1,
+        stdout: '',
+        protocol: true,
+        cursor: cursorBefore,
+        state: stateBefore,
+      });
+
+      const schema = join(harness.source('scenario-3-schema', {}), 'manifest.json');
+      writeFileSync(schema, JSON.stringify({
+        schemaVersion: 2,
+        entries: [
+          { operation: 'sync', source: { kind: 'local', locator: source }, target: { kind: 'cursor', instance: 'default' } },
+          { operation: 'sync', source: { kind: 'local', locator: other }, target: { kind: 'codex', instance: 'default' } },
+        ],
+      }));
+      closed('deterministic-bug', harness.run(['sync', '--manifest', schema, '--json'], { env }), stateBefore, 'usage.invalid-argument');
+
+      const recorded = JSON.parse(stateBefore) as {
+        scopes: Array<{ id: string }>;
+        activations: Array<{ scopeId: string }>;
+      };
+      const scope = recorded.scopes[0]!;
+      const duplicateId = `${scope.id.slice(0, -1)}${scope.id.endsWith('a') ? 'b' : 'a'}`;
+      recorded.scopes.push({ ...structuredClone(scope), id: duplicateId });
+      recorded.activations.push(
+        ...recorded.activations
+          .filter((activation) => activation.scopeId === scope.id)
+          .map((activation) => ({ ...structuredClone(activation), scopeId: duplicateId })),
+      );
+      const duplicated = JSON.stringify(recorded);
+      writeFileSync(statePath, duplicated);
+      const ambiguous = join(harness.source('scenario-3-ambiguous', {}), 'manifest.json');
+      writeFileSync(ambiguous, JSON.stringify({
+        schemaVersion: 1,
+        entries: [
+          { operation: 'sync', source: { kind: 'local', locator: source }, target: { kind: 'cursor', instance: 'default' } },
+          { operation: 'sync', source: { kind: 'local', locator: other }, target: { kind: 'cursor', instance: 'one' } },
+        ],
+      }));
+      closed('ambiguous-ownership', harness.run(['sync', '--manifest', ambiguous, '--json'], { env }), duplicated, 'internal.corrupt-state');
+
+      const garbage = '{ not json';
+      writeFileSync(statePath, garbage);
+      closed(
+        'corrupt-state',
+        harness.run(['sync', source, '--target', 'cursor', '--json'], { env }),
+        garbage,
+        'internal.corrupt-state',
+      );
     });
   });
 
