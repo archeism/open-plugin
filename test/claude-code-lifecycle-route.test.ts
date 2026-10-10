@@ -373,7 +373,7 @@ describe('claude-code lifecycle route', () => {
     await withClaude(async (root) => {
       seedMarketplace(root, true);
       const registry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
-        plugins: Record<string, Array<{ version: string }>>;
+        plugins: Record<string, Array<{ scope: string; installPath: string; version: string; gitCommitSha: string }>>;
       };
       registry.plugins['other@market'] = [{
         scope: 'user',
@@ -391,11 +391,12 @@ describe('claude-code lifecycle route', () => {
       settings.theme = 'light';
       settings.enabledPlugins['third@market'] = true;
       writeFileSync(join(root, 'settings.json'), `${JSON.stringify(settings)}\n`);
-      registry.plugins['other@market'][0]!.version = '0.2.0';
       const liveRegistry = JSON.parse(readFileSync(join(root, 'plugins/installed_plugins.json'), 'utf8')) as {
         plugins: Record<string, Array<{ version: string }>>;
       };
-      liveRegistry.plugins['other@market'][0]!.version = '0.2.0';
+      const sibling = liveRegistry.plugins['other@market']?.[0];
+      if (sibling === undefined) throw new Error('sibling Claude registry row disappeared');
+      sibling.version = '0.2.0';
       writeFileSync(join(root, 'plugins/installed_plugins.json'), `${JSON.stringify(liveRegistry)}\n`);
 
       await host.rollback(installed.handle);

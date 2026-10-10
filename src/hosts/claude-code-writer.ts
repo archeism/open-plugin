@@ -702,7 +702,7 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
     }),
     observeNativeProjection: async (request) => nativeProjection(contracts, request, detectedVersion),
     revalidateTargetPrecondition: async (handle) => ({
-      version,
+      version: claudeVersionObservation(observeClaudeCodeVersion()),
       targetObservationId: createTargetInventoryObservation('claude-code', {
         target: handle.target,
         installations: observeClaudeInstallations(),
@@ -728,7 +728,7 @@ function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpd
         scopeId: projection.scopeId,
       }));
       writeFileSync(join(projection.stagingRoot, '.plgnz-lifecycle.json'), JSON.stringify({ route: projection.route }));
-      return disableMarketplaceAutoUpdate(projection.nativeId)
+      return marketplaceAutoUpdateTarget(projection.nativeId)
         ? ['claude-code.auto-update', 'claude-code.ownership']
         : ['claude-code.ownership'];
     },
@@ -1125,8 +1125,17 @@ function captureRollback(attemptId: string, operationId: string, nativeId: strin
   const reference = lifecyclePath('.plgnz-rollback', attemptId, operationId);
   rmSync(reference, { recursive: true, force: true });
   mkdirSync(reference, { recursive: true });
-  saveOptional(join(pluginsDir(), 'installed_plugins.json'), join(reference, 'registry.json'));
-  saveOptional(join(pluginsDir(), '..', 'settings.json'), join(reference, 'settings.json'));
+  const registry = readRegistry(join(pluginsDir(), 'installed_plugins.json'));
+  writeFileSync(join(reference, 'registry-entry.json'), JSON.stringify(registry.plugins[nativeId] ?? null));
+  const enabled = enabledPlugins();
+  writeFileSync(join(reference, 'enabled.json'), JSON.stringify(
+    Object.hasOwn(enabled, nativeId) ? { state: 'present', value: enabled[nativeId] } : { state: 'absent' },
+  ));
+  const marketplace = marketplaceName(nativeId);
+  const extra = readSettings(join(pluginsDir(), '..', 'settings.json'))['extraKnownMarketplaces'];
+  const entry = marketplace !== undefined && isRecord(extra) ? extra[marketplace] ?? null : null;
+  writeFileSync(join(reference, 'marketplace-setting.json'), JSON.stringify({ marketplace: marketplace ?? null, entry }));
+  saveOptional(join(pluginsDir(), 'known_marketplaces.json'), join(reference, 'marketplaces.json'));
   const installPath = recordedInstallPath(nativeId);
   if (installPath !== undefined && existsSync(installPath)) {
     cpSync(installPath, join(reference, 'install'), { recursive: true });
@@ -1167,6 +1176,7 @@ function mutateInstall(handle: DurableLifecycleOperation, stagingRoot: string): 
   try {
     writeRegistry(registryFile, registryWithEntry(readRegistry(registryFile), handle.nativeId, installPath, slotVersion(handle.packageVersion, handle.sourceRevision), source));
     writeSettings(settingsFile, settingsWithEnabled(readSettings(settingsFile), handle.nativeId, true));
+    disableMarketplaceAutoUpdate(handle.nativeId);
   } catch (error) {
     rmSync(installPath, { recursive: true, force: true });
     throw error;
@@ -1199,18 +1209,20 @@ function dropUserRow(nativeId: string): void {
 function restoreRollback(handle: DurableLifecycleOperation): { receiptId: string; changed: boolean } {
   const reference = handle.rollbackReference;
   const registryFile = join(pluginsDir(), 'installed_plugins.json');
-  const settingsFile = join(pluginsDir(), '..', 'settings.json');
   const appliedSlot = cacheSlot(handle.nativeId, slotVersion(handle.packageVersion, handle.sourceRevision));
   const savedPath = join(reference, 'install-path.txt');
   const previousSlot = existsSync(savedPath) ? readFileSync(savedPath, 'utf8') : undefined;
   if (previousSlot !== undefined && resolve(previousSlot) !== appliedSlot && !existsSync(appliedSlot)) {
     throw new Error(`claude-code rollback cannot remove the updated cache slot: ${appliedSlot}`);
   }
-  const beforeRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
+  const beforeEntry = JSON.stringify(readRegistry(registryFile).plugins[handle.nativeId] ?? null);
+  const beforeEnabled = JSON.stringify(enabledPlugins()[handle.nativeId] ?? null);
+  const beforeMarkets = existsSync(join(pluginsDir(), 'known_marketplaces.json'))
+    ? readFileSync(join(pluginsDir(), 'known_marketplaces.json'), 'utf8')
+    : '';
   const beforeApplied = existsSync(appliedSlot) ? fingerprintTree(appliedSlot) : null;
   const beforePrevious = previousSlot !== undefined && existsSync(previousSlot) ? fingerprintTree(previousSlot) : null;
-  restoreOptional(registryFile, join(reference, 'registry.json'));
-  restoreOptional(settingsFile, join(reference, 'settings.json'));
+  restorePluginSlice(handle.nativeId, reference);
   if (previousSlot !== undefined && resolve(previousSlot) !== appliedSlot) rmSync(appliedSlot, { recursive: true, force: true });
   const installPath = previousSlot ?? recordedInstallPath(handle.nativeId) ?? appliedSlot;
   const backup = join(reference, 'install');
@@ -1219,46 +1231,107 @@ function restoreRollback(handle: DurableLifecycleOperation): { receiptId: string
     mkdirSync(dirname(installPath), { recursive: true });
     cpSync(backup, installPath, { recursive: true });
   }
-  const afterRegistry = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : '';
+  const afterEntry = JSON.stringify(readRegistry(registryFile).plugins[handle.nativeId] ?? null);
+  const afterEnabled = JSON.stringify(enabledPlugins()[handle.nativeId] ?? null);
+  const afterMarkets = existsSync(join(pluginsDir(), 'known_marketplaces.json'))
+    ? readFileSync(join(pluginsDir(), 'known_marketplaces.json'), 'utf8')
+    : '';
   const afterApplied = existsSync(appliedSlot) ? fingerprintTree(appliedSlot) : null;
   const afterPrevious = previousSlot !== undefined && existsSync(previousSlot) ? fingerprintTree(previousSlot) : null;
   return {
     receiptId: `claude-rollback-${handle.operationId}`,
-    changed: beforeRegistry !== afterRegistry || beforeApplied !== afterApplied || beforePrevious !== afterPrevious,
+    changed: beforeEntry !== afterEntry || beforeEnabled !== afterEnabled || beforeMarkets !== afterMarkets || beforeApplied !== afterApplied || beforePrevious !== afterPrevious,
   };
 }
 
-function disableMarketplaceAutoUpdate(nativeId: string): boolean {
+function restorePluginSlice(nativeId: string, reference: string): void {
+  const registryFile = join(pluginsDir(), 'installed_plugins.json');
+  const savedRows: unknown = JSON.parse(readFileSync(join(reference, 'registry-entry.json'), 'utf8'));
+  const registry = readRegistry(registryFile);
+  const plugins = { ...registry.plugins };
+  if (savedRows === null) delete plugins[nativeId];
+  else plugins[nativeId] = savedRows;
+  writeRegistry(registryFile, { ...registry, plugins });
+
+  const enabledState = JSON.parse(readFileSync(join(reference, 'enabled.json'), 'utf8')) as { state?: unknown; value?: unknown };
+  const settingsFile = join(pluginsDir(), '..', 'settings.json');
+  const settings = readSettings(settingsFile);
+  const enabledMap = isRecord(settings['enabledPlugins']) ? { ...settings['enabledPlugins'] } : {};
+  if (enabledState.state === 'absent') delete enabledMap[nativeId];
+  else enabledMap[nativeId] = enabledState.value;
+  writeSettings(settingsFile, { ...settings, enabledPlugins: enabledMap });
+
+  const savedMarket = JSON.parse(readFileSync(join(reference, 'marketplace-setting.json'), 'utf8')) as {
+    marketplace?: unknown;
+    entry?: unknown;
+  };
+  if (typeof savedMarket.marketplace === 'string') {
+    const current = readSettings(settingsFile);
+    const extraRaw = current['extraKnownMarketplaces'];
+    const hadParent = isRecord(extraRaw);
+    const extra = hadParent ? { ...extraRaw } : {};
+    if (savedMarket.entry === null) {
+      if (hadParent && Object.hasOwn(extra, savedMarket.marketplace)) {
+        delete extra[savedMarket.marketplace];
+        writeSettings(settingsFile, { ...current, extraKnownMarketplaces: extra });
+      }
+    } else {
+      extra[savedMarket.marketplace] = savedMarket.entry;
+      writeSettings(settingsFile, { ...current, extraKnownMarketplaces: extra });
+    }
+  }
+  restoreOptional(join(pluginsDir(), 'known_marketplaces.json'), join(reference, 'marketplaces.json'));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function marketplaceName(nativeId: string): string | undefined {
   const at = nativeId.indexOf('@');
-  if (at === -1) return false;
-  const marketplace = nativeId.slice(at + 1);
-  if (marketplace.length === 0) return false;
-  let wrote = false;
+  if (at <= 0 || at === nativeId.length - 1) return undefined;
+  return nativeId.slice(at + 1);
+}
+
+function soleMarketplaceInstall(nativeId: string): boolean {
+  const marketplace = marketplaceName(nativeId);
+  if (marketplace === undefined) return false;
+  const registry = readRegistry(join(pluginsDir(), 'installed_plugins.json'));
+  return Object.entries(registry.plugins).every(([id, rows]) => id === nativeId || marketplaceName(id) !== marketplace || !hasUserRow(rows));
+}
+
+function hasUserRow(rows: unknown): boolean {
+  return Array.isArray(rows) && rows.some((row) => isRecord(row) && row['scope'] === 'user');
+}
+
+function marketplaceAutoUpdateTarget(nativeId: string): boolean {
+  if (!soleMarketplaceInstall(nativeId)) return false;
+  const marketplace = marketplaceName(nativeId);
+  if (marketplace === undefined) return false;
+  const known = readMarketplaces(join(pluginsDir(), 'known_marketplaces.json'))[marketplace];
+  if (isRecord(known)) return true;
+  const extra = readSettings(join(pluginsDir(), '..', 'settings.json'))['extraKnownMarketplaces'];
+  return isRecord(extra) && isRecord(extra[marketplace]);
+}
+
+function disableMarketplaceAutoUpdate(nativeId: string): boolean {
+  if (!marketplaceAutoUpdateTarget(nativeId)) return false;
+  const marketplace = marketplaceName(nativeId);
+  if (marketplace === undefined) return false;
   const marketplacesFile = join(pluginsDir(), 'known_marketplaces.json');
   const marketplaces = readMarketplaces(marketplacesFile);
   const current = marketplaces[marketplace];
-  if (typeof current === 'object' && current !== null && !Array.isArray(current)) {
-    const record = current as Record<string, unknown>;
-    if (record['autoUpdate'] !== false) {
-      writeMarketplaces(marketplacesFile, { ...marketplaces, [marketplace]: { ...record, autoUpdate: false } });
-    }
-    wrote = true;
+  if (isRecord(current) && current['autoUpdate'] !== false) {
+    writeMarketplaces(marketplacesFile, { ...marketplaces, [marketplace]: { ...current, autoUpdate: false } });
   }
   const settingsFile = join(pluginsDir(), '..', 'settings.json');
   const settings = readSettings(settingsFile);
   const extra = settings['extraKnownMarketplaces'];
-  if (typeof extra === 'object' && extra !== null && !Array.isArray(extra)) {
-    const entry = (extra as Record<string, unknown>)[marketplace];
-    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
-      const record = entry as Record<string, unknown>;
-      if (record['autoUpdate'] !== false) {
-        writeSettings(settingsFile, {
-          ...settings,
-          extraKnownMarketplaces: { ...extra as Record<string, unknown>, [marketplace]: { ...record, autoUpdate: false } },
-        });
-      }
-      wrote = true;
-    }
+  if (isRecord(extra) && isRecord(extra[marketplace]) && extra[marketplace]['autoUpdate'] !== false) {
+    writeSettings(settingsFile, {
+      ...settings,
+      extraKnownMarketplaces: { ...extra, [marketplace]: { ...extra[marketplace], autoUpdate: false } },
+    });
   }
-  return wrote;
+  return true;
 }
