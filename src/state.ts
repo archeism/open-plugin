@@ -17,14 +17,10 @@ import {
   type PersistedTargetIdentity,
 } from './target-identity';
 
+import { CryptoHasher } from './runtime';
+
 export type { PersistedTargetIdentity } from './target-identity';
 
-declare const Bun: {
-  CryptoHasher: new (algorithm: 'sha256') => {
-    update(input: string | Uint8Array): void;
-    digest(encoding: 'hex'): string;
-  };
-};
 
 export type DeploymentScopeId = string;
 
@@ -786,7 +782,7 @@ function legacyRelativeDir(record: InstallRecord): string | undefined {
 }
 
 function digest(value: string): string {
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   hash.update(value);
   return hash.digest('hex').slice(0, 24);
 }

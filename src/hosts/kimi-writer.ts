@@ -8,7 +8,9 @@ import { normalizeCommandSources } from '../conversion';
 import { kimi, mcpCandidates, pluginsDir } from './kimi';
 import { pinPluginMcpFiles } from '../mcp-write';
 
-declare const Bun: any;
+import { yamlParse, yamlStringify } from '../yaml';
+import { spawnSync as bunShapedSpawnSync, sleep, spawn as runtimeSpawn, reservePort as runtimeReservePort } from '../runtime';
+
 declare const TextDecoder: any;
 declare const Response: any;
 
@@ -196,7 +198,7 @@ function prepareCommands(stage: string, supplied?: string): string | undefined {
   return selected;
 }
 function assertKimiSkillPolicies(dir: string): void { for (const name of readdirSync(dir)) { const path = join(dir, name); const stat = lstatSync(path); if (stat.isDirectory()) assertKimiSkillPolicies(path); else if (stat.isFile() && name === 'SKILL.md') { const frontmatter = openingFrontmatter(readFileSync(path, 'utf8'), path); if (frontmatter !== undefined && ['user-invocable', 'user_invocable'].some(key => Object.hasOwn(frontmatter, key))) throw new Error(`Kimi does not support user-invocable skill policy: ${path}`); const hyphen = frontmatter?.['disable-model-invocation'], underscore = frontmatter?.disable_model_invocation; if (hyphen !== undefined && underscore !== undefined && hyphen !== underscore) throw new Error(`Kimi disable-model-invocation aliases conflict: ${path}`); for (const value of [hyphen, underscore]) if (value !== undefined && typeof value !== 'boolean') throw new Error(`Kimi disable-model-invocation must be boolean: ${path}`); } } }
-function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) return undefined; let parsed: unknown; try { parsed = Bun.YAML.parse(match[1] ?? ''); } catch { throw new Error(`Kimi skill frontmatter has invalid YAML: ${path}`); } if (!isObject(parsed)) throw new Error(`Kimi skill frontmatter must be an object: ${path}`); return parsed; }
+function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) return undefined; let parsed: unknown; try { parsed = yamlParse(match[1] ?? ''); } catch { throw new Error(`Kimi skill frontmatter has invalid YAML: ${path}`); } if (!isObject(parsed)) throw new Error(`Kimi skill frontmatter must be an object: ${path}`); return parsed; }
 function assertMarkdownCommandTree(dir: string): void { for (const name of readdirSync(dir)) { const path = join(dir, name); const stat = lstatSync(path); if (stat.isSymbolicLink()) throw new Error(`Kimi command source contains symlink: ${path}`); if (stat.isDirectory()) assertMarkdownCommandTree(path); else if (!stat.isFile() || !name.endsWith('.md')) throw new Error(`Kimi command projection cannot preserve non-Markdown resource: ${path}`); else assertKimiCommand(path); } }
 function assertKimiCommand(path: string): void { const raw = readFileSync(path, 'utf8'); const frontmatter = openingFrontmatter(raw, path); if (frontmatter === undefined) throw new Error(`Kimi command needs YAML frontmatter: ${path}`); for (const key of Object.keys(frontmatter)) if (!['name', 'description'].includes(key)) throw new Error(`Kimi command metadata is unsupported: ${key} in ${path}`); const body = raw.slice(raw.indexOf('\n---', 4) + 4); if (/!`[\s\S]*?`|@\{|\$\d+(?!\w)/u.test(body)) throw new Error(`Kimi command preprocessing is unsupported: ${path}`); }
 function containsMarkdown(dir: string): boolean { return readdirSync(dir).some(name => { const path = join(dir, name); return statSync(path).isDirectory() ? containsMarkdown(path) : name.endsWith('.md'); }); }
@@ -229,13 +231,13 @@ function resolveKimiBinary(): string {
   const explicit = process.env['OPEN_PLUGIN_KIMI_BIN'];
   const binary = explicit ?? join(process.env['HOME'] ?? '.', '.local', 'share', 'kimi-code', 'bin', 'kimi');
   if (!existsSync(binary)) throw new Error(`current Kimi Code binary not found: ${binary}`);
-  const result = Bun.spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
+  const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
   const version = new TextDecoder().decode(result.stdout).trim();
   const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);
   if (result.exitCode !== 0 || match === null || Number(match[1]) === 0) throw new Error(`current Kimi Code binary required; legacy or unsupported binary: ${binary}`);
   return binary;
 }
-async function reservePort(): Promise<number> { const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') }); const port = server.port; server.stop(true); return port; }
+async function reservePort(): Promise<number> { return runtimeReservePort(); }
 async function nativeInstall(source: string, home: string, binary: string): Promise<void> {
   if (!isAbsolute(home) || !isAbsolute(source)) throw new Error('Kimi native source and home must be absolute');
   await withKimiServer(home, binary, request => { request('POST', '/api/v1/plugins', { source }); request('POST', `/api/v1/plugins/${encodeURIComponent(source.split('/').at(-1) ?? '')}:enable`); });
@@ -246,18 +248,18 @@ async function nativeRemove(home: string, binary: string, id: string): Promise<v
 }
 async function withKimiServer(home: string, binary: string, operation: (request: (method: string, path: string, body?: unknown) => Record<string, unknown>) => void): Promise<void> {
   const port = await reservePort(); const base = `http://127.0.0.1:${port}`;
-  const child = Bun.spawn([binary, 'web', '--no-open', '--port', String(port), '--log-level', 'silent'], { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, KIMI_CODE_HOME: home, NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' } });
+  const child = runtimeSpawn([binary, 'web', '--no-open', '--port', String(port), '--log-level', 'silent'], { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, KIMI_CODE_HOME: home, NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' } });
   let token: string | undefined;
   try {
     let healthy = false;
-    for (let attempt = 0; attempt < 90; attempt += 1) { if (child.exitCode !== null) throw new Error(`Kimi web exited before becoming healthy (exit ${child.exitCode})`); try { const value = curlJson(`${base}/api/v1/healthz`); if (value.code === 0 && isObject(value.data) && value.data.ok === true) { healthy = true; break; } } catch {} await Bun.sleep(50); }
+    for (let attempt = 0; attempt < 90; attempt += 1) { if (child.exitCode !== null) throw new Error(`Kimi web exited before becoming healthy (exit ${child.exitCode})`); try { const value = curlJson(`${base}/api/v1/healthz`); if (value.code === 0 && isObject(value.data) && value.data.ok === true) { healthy = true; break; } } catch {} await sleep(50); }
     if (!healthy) throw new Error('Kimi web server did not become healthy within the lifecycle deadline');
     token = readFileSync(join(home, 'server.token'), 'utf8').trim(); if (!token) throw new Error('Kimi server did not create its bearer token');
     const request = (method: string, path: string, body?: unknown): Record<string, unknown> => { const value = curlJson(`${base}${path}`, method, token, body); if (value.code !== 0) throw new Error(`Kimi ${method} ${path}: ${String(value.msg ?? value.code)}`); return value; };
     operation(request);
   } finally {
     if (token) { try { curlJson(`${base}/api/v1/shutdown`, 'POST', token); } catch {} }
-    await Promise.race([child.exited, Bun.sleep(100)]); if (child.exitCode === null) { child.kill(); await Promise.race([child.exited, Bun.sleep(1_000)]); }
+    await Promise.race([child.exited, sleep(100)]); if (child.exitCode === null) { child.kill(); await Promise.race([child.exited, sleep(1_000)]); }
   }
 }
-function curlJson(url: string, method = 'GET', token?: string, body?: unknown): Record<string, unknown> { const args = ['--noproxy', '*', '--silent', '--show-error', '--max-time', '2', '--request', method, ...(token === undefined ? [] : ['--header', `Authorization: Bearer ${token}`]), ...(body === undefined ? [] : ['--header', 'Content-Type: application/json', '--data', JSON.stringify(body)]), url]; const result = Bun.spawnSync(['curl', ...args], { stdout: 'pipe', stderr: 'pipe' }); const text = new TextDecoder().decode(result.stdout); if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr).trim() || `curl exit ${result.exitCode}`); try { const value: unknown = JSON.parse(text); if (!isObject(value)) throw new Error('must be an object'); return value; } catch (error) { throw new Error(`Kimi returned invalid JSON: ${(error as Error).message}`); } }
+function curlJson(url: string, method = 'GET', token?: string, body?: unknown): Record<string, unknown> { const args = ['--noproxy', '*', '--silent', '--show-error', '--max-time', '2', '--request', method, ...(token === undefined ? [] : ['--header', `Authorization: Bearer ${token}`]), ...(body === undefined ? [] : ['--header', 'Content-Type: application/json', '--data', JSON.stringify(body)]), url]; const result = bunShapedSpawnSync(['curl', ...args], { stdout: 'pipe', stderr: 'pipe' }); const text = new TextDecoder().decode(result.stdout); if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr).trim() || `curl exit ${result.exitCode}`); try { const value: unknown = JSON.parse(text); if (!isObject(value)) throw new Error('must be an object'); return value; } catch (error) { throw new Error(`Kimi returned invalid JSON: ${(error as Error).message}`); } }

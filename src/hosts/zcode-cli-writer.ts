@@ -9,7 +9,9 @@ import { assertZcodeNativeRegistryReadable, readZcodeEnabledPluginIds, readZcode
 import { normalizeCommandTree } from '../conversion';
 import { zcodeCliRoot } from '../paths';
 
-declare const Bun: any;
+import { yamlParse, yamlStringify } from '../yaml';
+import { CryptoHasher } from '../runtime';
+
 
 const MARKER = '.plgnz-install.json';
 type Ownership = { owner: 'plgnz'; schema: 1; logicalId: string; nativeId: string; fingerprint: string; source: string; resourcePath: string };
@@ -186,7 +188,7 @@ function validateRootManifest(root: string): void {
 }
 function sourceName(root: string): string { const name = readJson(join(root, 'plugin.json'))?.['name']; if (typeof name !== 'string') throw new Error(`ZCode projection requires plugin.json name: ${root}`); return name; }
 function readJson(file: string): Record<string, unknown> | null { try { const value: unknown = JSON.parse(readFileSync(file, 'utf8')); return isObject(value) ? value : null; } catch { return null; } }
-function frontmatter(raw: string, file: string): { values: Record<string, unknown>; end: number } { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) throw new Error(`ZCode command or user-only skill needs YAML frontmatter: ${file}`); let value: unknown; try { value = Bun.YAML.parse(match[1] ?? ''); } catch { throw new Error(`ZCode invalid YAML frontmatter: ${file}`); } if (!isObject(value)) throw new Error(`ZCode YAML frontmatter must be a mapping: ${file}`); return { values: value, end: match[0].length }; }
+function frontmatter(raw: string, file: string): { values: Record<string, unknown>; end: number } { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) throw new Error(`ZCode command or user-only skill needs YAML frontmatter: ${file}`); let value: unknown; try { value = yamlParse(match[1] ?? ''); } catch { throw new Error(`ZCode invalid YAML frontmatter: ${file}`); } if (!isObject(value)) throw new Error(`ZCode YAML frontmatter must be a mapping: ${file}`); return { values: value, end: match[0].length }; }
 function hasSkill(root: string): boolean { const dir = join(root, 'skills'); return existsSync(dir) && readdirSync(dir).some(name => existsSync(join(dir, name, 'SKILL.md'))); }
 function hasCommand(root: string): boolean { const dir = join(root, 'commands'); return existsSync(dir) && commandNames(dir).length > 0; }
 function commandNames(dir: string, prefix = ''): string[] { if (!existsSync(dir)) return []; const out: string[] = []; for (const name of readdirSync(dir)) { const path = join(dir, name); if (statSync(path).isDirectory()) out.push(...commandNames(path, prefix === '' ? name : `${prefix}:${name}`)); else if (name.endsWith('.md')) out.push(`${prefix === '' ? '' : `${prefix}:`}${name.slice(0, -3)}`); } return out; }
@@ -231,7 +233,7 @@ function proveActive(native: string, logical: string, source: string, fingerprin
 function restorePrior(native: string, market: string, prior: NonNullable<ReturnType<typeof nativeById>>): void { runOfficialZcode(['plugins', 'marketplace', 'update', market]); runOfficialZcode(['plugins', 'update', native]); const restored = nativeById(native); if (restored?.version !== prior.version || readZcodeEnabledPluginIds().get(native) !== true) throw new Error(`Official ZCode could not restore prior ${native}`); }
 function removeCandidate(native: string, logical: string, source: string, fingerprint: string): void { const row = nativeById(native); const marker = row === undefined ? null : readZcodeOwnership(row.installPath); if (row !== undefined && marker?.logicalId === logical && marker.source === source && marker.fingerprint === fingerprint) runOfficialZcode(['plugins', 'uninstall', native, '--force']); }
 function versionFor(plugin: PluginSource, fingerprint: string): string { const canonical = plugin.version ?? '0.0.0'; if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(canonical)) throw new Error(`ZCode needs canonical semver before plgnz metadata: ${canonical}`); return `${canonical}+plgnz.${fingerprint.slice(0, 16).toLowerCase()}`; }
-function ownedMarketplace(logical: string): string { const h = new Bun.CryptoHasher('sha256'); h.update(logical); return `plgnz-${h.digest('hex').slice(0, 16)}`; }
+function ownedMarketplace(logical: string): string { const h = new CryptoHasher('sha256'); h.update(logical); return `plgnz-${h.digest('hex').slice(0, 16)}`; }
 function requireFingerprint(plugin: PluginSource): string { const fp = plugin.contentFingerprint ?? fingerprintTree(plugin.dir); if (!/^[0-9a-f]{16,}$/iu.test(fp)) throw new Error('ZCode requires a content fingerprint'); return fp.toLowerCase(); }
 function moveAside(path: string): { rollback(): void; commit(): void } { if (!existsSync(path)) return { rollback: () => {}, commit: () => {} }; const backup = `${path}.plgnz-backup-${Date.now()}`; renameSync(path, backup); return { rollback: () => { if (!existsSync(path)) renameSync(backup, path); }, commit: () => rmSync(backup, { recursive: true, force: true }) }; }
 function assertName(value: string, label: string): void { if (!/^[a-z0-9][a-z0-9._-]*$/iu.test(value)) throw new Error(`ZCode unsafe ${label}: ${value}`); }

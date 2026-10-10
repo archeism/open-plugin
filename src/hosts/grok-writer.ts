@@ -11,11 +11,13 @@ import { pinPluginMcpFiles } from '../mcp-write';
 import { homeRoot, grokRoot } from '../paths';
 import { grok, MARKER, canonical, localSourceOf, marketplacesRoot, namesOf, ownership, provenanceOf, registryIsReadable, repos, type GrokOwnership } from './grok';
 
-declare const Bun: { YAML: { parse(input: string): unknown; stringify(value: unknown): string }; CryptoHasher: new (algorithm: string) => { update(value: string): void; digest(encoding: 'hex'): string } };
+import { yamlParse, yamlStringify } from '../yaml';
+import { CryptoHasher } from '../runtime';
+
 
 type MarketplaceRow = { name?: unknown; kind?: unknown; source?: { path?: unknown } };
 const stableId = (plugin: PluginSource) => plugin.marketplace === undefined ? plugin.name : `${plugin.name}@${plugin.marketplace}`;
-const digest = (value: string) => { const hash = new Bun.CryptoHasher('sha256'); hash.update(value); return hash.digest('hex').slice(0, 16); };
+const digest = (value: string) => { const hash = new CryptoHasher('sha256'); hash.update(value); return hash.digest('hex').slice(0, 16); };
 function canonicalJson(value: unknown): string | undefined {
   if (Array.isArray(value)) return `array:${JSON.stringify(value.map(item => canonicalJson(item)))}`;
   if (value !== null && typeof value === 'object') return `object:${JSON.stringify(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonicalJson(item)]))}`;
@@ -187,7 +189,7 @@ function projectGrokSource(dir: string): void {
     const sidecar = join(skill, 'agents', 'openai.yaml');
     let sidecarManual: boolean | undefined;
     if (existsSync(sidecar)) {
-      const parsed: unknown = Bun.YAML.parse(readFileSync(sidecar, 'utf8'));
+      const parsed: unknown = yamlParse(readFileSync(sidecar, 'utf8'));
       const policy = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>)['policy'] : undefined;
       if (policy !== undefined) {
         if (!policy || typeof policy !== 'object' || Array.isArray(policy) || typeof (policy as Record<string, unknown>)['allow_implicit_invocation'] !== 'boolean') throw new Error(`invalid Grok invocation sidecar: ${sidecar}`);
@@ -246,7 +248,7 @@ function projectGrokSource(dir: string): void {
   if (existsSync(legacyMcp) && !existsSync(nativeMcp)) cpSync(legacyMcp, nativeMcp);
   if (existsSync(nativeMcp)) { const value = JSON.parse(readFileSync(nativeMcp, 'utf8')) as Record<string, unknown>; const servers = value?.['mcpServers']; if (!value || typeof value !== 'object' || !servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error(`invalid Grok MCP declaration: ${nativeMcp}`); }
 }
-function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) return undefined; let value: unknown; try { value = Bun.YAML.parse(match[1] ?? ''); } catch { throw new Error(`Grok skill frontmatter has invalid YAML: ${path}`); } if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Grok skill frontmatter must be an object: ${path}`); return value as Record<string, unknown>; }
+function openingFrontmatter(raw: string, path: string): Record<string, unknown> | undefined { const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw); if (match === null) return undefined; let value: unknown; try { value = yamlParse(match[1] ?? ''); } catch { throw new Error(`Grok skill frontmatter has invalid YAML: ${path}`); } if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Grok skill frontmatter must be an object: ${path}`); return value as Record<string, unknown>; }
 function normalizeBooleanPolicy(metadata: Record<string, unknown>, native: string, alias: string, path: string): boolean | undefined {
   const first = metadata[native], second = metadata[alias];
   if (first !== undefined && second !== undefined && first !== second) throw new Error(`conflicting Grok invocation policy spellings: ${path}`);
@@ -258,7 +260,7 @@ function normalizeBooleanPolicy(metadata: Record<string, unknown>, native: strin
 function withFrontmatter(raw: string, metadata: Record<string, unknown>, path: string): string {
   const match = /^---\r?\n[\s\S]*?\r?\n---(?=\r?\n|$)/u.exec(raw);
   if (match === null) throw new Error(`Grok frontmatter required: ${path}`);
-  return `---\n${Bun.YAML.stringify(metadata).trimEnd()}\n---${raw.slice(match[0].length)}`;
+  return `---\n${yamlStringify(metadata).trimEnd()}\n---${raw.slice(match[0].length)}`;
 }
 type LegacyInstall = { source: string; fingerprint: string; link?: string };
 function legacyCandidate(plugin: PluginSource, adopt: boolean, prior: string | undefined): LegacyInstall | undefined {

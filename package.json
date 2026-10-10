@@ -9,23 +9,26 @@
     "url": "git+https://github.com/archeism/plugnz.git"
   },
   "bin": {
-    "plugnz": "bin/plugnz.mjs",
-    "plgnz": "bin/plugnz.mjs"
+    "plugnz": "dist/plugnz.mjs",
+    "plgnz": "dist/plugnz.mjs"
   },
   "scripts": {
     "test": "bun test",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "build": "bun scripts/build.mjs",
+    "prepublishOnly": "bun run build"
   },
   "files": [
-    "bin",
-    "src",
+    "dist",
     "README.md",
     "LICENSE"
   ],
-  "dependencies": {
-    "smol-toml": "^1.8.0"
-  },
   "devDependencies": {
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "smol-toml": "^1.8.0",
+    "yaml": "2"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

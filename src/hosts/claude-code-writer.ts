@@ -8,8 +8,9 @@ import { tomlCommandMarkdown } from '../conversion';
 import { claudeCode, mcpCandidates, pluginsDir } from './claude-code';
 import { pinPluginMcpFiles } from '../mcp-write';
 
+import { CryptoHasher } from '../runtime';
+
 const OWNERSHIP = '.plgnz-install.json';
-declare const Bun: { CryptoHasher: new (algorithm: 'sha256') => { update(input: string | Uint8Array): void; digest(encoding: 'hex'): string } };
 type Ownership = { source: string; pluginId: string; fingerprint: string; adopted?: true };
 type Registry = { version: number; plugins: Record<string, unknown> };
 
@@ -584,7 +585,7 @@ function sameTree(left: string, right: string): boolean {
 
 function bytesKey(path: string): string {
   const readBytes = readFileSync as unknown as (file: string) => Uint8Array;
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   hash.update(readBytes(path));
   return hash.digest('hex');
 }

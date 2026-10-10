@@ -13,7 +13,8 @@ import {
   type SourceType,
 } from './semantic-inventory';
 
-declare const Bun: { CryptoHasher: new (algorithm: string) => { update(value: string): void; digest(format: 'hex'): string } };
+import { CryptoHasher } from './runtime';
+
 
 export type CapabilityStatus = 'supported' | 'unsupported' | 'unverified';
 export type CapabilityRoute = 'managed' | 'native';
@@ -303,7 +304,7 @@ export function createCapabilityEvidenceProfile(
     hookPolicy,
     evidence,
   };
-  const hash = new Bun.CryptoHasher('sha256');
+  const hash = new CryptoHasher('sha256');
   hash.update(JSON.stringify(addressable));
   const evidenceId = `sha256:${hash.digest('hex')}`;
   return Object.freeze({

@@ -1,3 +1,7 @@
+declare function setTimeout(callback: () => void, ms: number): unknown;
+declare function clearTimeout(handle: unknown): void;
+declare const performance: { now(): number };
+
 /**
  * Minimal ambient declarations for the node builtins and globals this project
  * uses, so `tsc --noEmit` passes under strict mode with a zero-dependency
@@ -35,6 +39,7 @@ declare module 'node:fs' {
 }
 
 declare module 'node:path' {
+  export const delimiter: string;
   export function join(...parts: string[]): string;
   export function resolve(...parts: string[]): string;
   export function relative(from: string, to: string): string;
@@ -56,6 +61,14 @@ declare module 'node:child_process' {
   ): SpawnSyncResult;
 }
 
+declare module 'node:crypto' {
+  export interface Hash {
+    update(value: string | Uint8Array): Hash;
+    digest(format: 'hex'): string;
+  }
+  export function createHash(algorithm: string): Hash;
+}
+
 declare module 'node:os' {
   export function tmpdir(): string;
 }
@@ -73,6 +86,7 @@ declare module 'bun:test' {
     toMatch(pattern: RegExp): void;
     toHaveLength(expected: number): void;
     toBeGreaterThan(expected: number): void;
+    toBeLessThan(expected: number): void;
     toBeUndefined(): void;
   };
 }
@@ -107,4 +121,37 @@ interface ImportMeta {
   /** Absolute directory of the current module (Bun / bundler convention). */
   readonly dir: string;
   readonly url: string;
+}
+
+/** Runtime-bridge surfaces: buffer-shaped spawnSync overload (ambient module
+ * declarations merge), async spawn, and the loopback port probe. */
+declare module 'node:child_process' {
+  export interface SpawnSyncBufferResult {
+    status: number | null;
+    stdout?: Uint8Array;
+    stderr?: Uint8Array;
+  }
+  export function spawnSync(
+    command: string,
+    args: string[],
+    options: { cwd?: string; env?: Record<string, string | undefined>; timeout?: number; killSignal?: 'SIGKILL'; stdio?: unknown; maxBuffer?: number; encoding: 'buffer' },
+  ): SpawnSyncBufferResult;
+  export interface ChildProcessLike {
+    exitCode: number | null;
+    on(event: 'exit', listener: (code: number | null) => void): ChildProcessLike;
+    on(event: 'error', listener: (error: Error) => void): ChildProcessLike;
+    kill(): void;
+  }
+  export function spawn(command: string, args: string[], options: { env?: Record<string, string | undefined>; cwd?: string; stdio?: unknown }): ChildProcessLike;
+}
+
+declare module 'node:net' {
+  export interface NetServer {
+    unref(): NetServer;
+    on(event: 'error', listener: (error: Error) => void): NetServer;
+    listen(port: number, host: string, callback: () => void): void;
+    address(): { port: number } | string | null;
+    close(callback?: () => void): void;
+  }
+  export function createServer(): NetServer;
 }

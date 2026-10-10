@@ -10,7 +10,8 @@ import { hermes, hermesPluginsDir } from './hermes';
 import { hermesConfigPath, hermesRoot } from '../paths';
 import { pinPluginMcpFiles } from '../mcp-write';
 
-declare const Bun: { YAML: { parse(input: string): unknown; stringify(value: unknown): string } };
+import { yamlParse, yamlStringify } from '../yaml';
+
 
 const MARKER = '.plgnz-install.json';
 type Ownership = { source: string; pluginId: string; fingerprint: string };
@@ -120,7 +121,7 @@ function validateCompanion(root: string, expected: string): void {
   assertTree(root);
   const manifest = join(root, 'plugin.yaml');
   if (!existsSync(manifest) || !existsSync(join(root, '__init__.py'))) throw new Error(`Hermes native companion is incomplete: ${root}`);
-  const value: unknown = Bun.YAML.parse(readFileSync(manifest, 'utf8'));
+  const value: unknown = yamlParse(readFileSync(manifest, 'utf8'));
   if (!value || typeof value !== 'object' || Array.isArray(value) || (value as Record<string, unknown>).name !== expected) throw new Error(`Hermes companion identity does not match ${expected}`);
 }
 
@@ -155,7 +156,7 @@ function updatePluginConfig(enable: string[], disable: string[]): void {
   const exists = existsSync(actual); const original = exists ? readFileSync(actual, 'utf8') : '';
   let parsed: Record<string, unknown> = {};
   if (original.trim() !== '') {
-    const value: unknown = Bun.YAML.parse(original);
+    const value: unknown = yamlParse(original);
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Hermes config is not a mapping: ${configured}`);
     parsed = value as Record<string, unknown>;
   }
@@ -172,8 +173,8 @@ function updatePluginConfig(enable: string[], disable: string[]): void {
   for (const id of enable) { enabled.add(id); disabled.delete(id); }
   for (const id of disable) { enabled.delete(id); disabled.add(id); }
   plugins['enabled'] = [...enabled].sort(); plugins['disabled'] = [...disabled].sort(); parsed['plugins'] = plugins;
-  const next = Bun.YAML.stringify(parsed);
-  const verified: unknown = Bun.YAML.parse(next);
+  const next = yamlStringify(parsed);
+  const verified: unknown = yamlParse(next);
   if (!verified || typeof verified !== 'object' || Array.isArray(verified)) throw new Error(`Hermes config serialization failed: ${configured}`);
   const verifiedPlugins = (verified as Record<string, unknown>)['plugins'];
   if (!verifiedPlugins || typeof verifiedPlugins !== 'object' || Array.isArray(verifiedPlugins) ||
