@@ -141,10 +141,38 @@ describe("yaml merge-key and adversarial differential coverage", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  test("tagged scalars parse to raw strings exactly as Bun does", () => {
+    const docs = [
+      "d: !!timestamp 2026-10-10",
+      "d: !!timestamp 2026-10-10T10:30:00Z",
+      "b: !!binary aGVsbG8=",
+      "i: !!int 42",
+      "s: !!str 42",
+      "n: !!null null",
+    ];
+    for (const doc of docs) expect(yamlParse(doc)).toEqual(Bun.YAML.parse(doc));
+    // A !!timestamp frontmatter value must survive a full parse->stringify
+    // roundtrip as its source text, never collapse into {}.
+    const roundtrip = yamlStringify(yamlParse("description: !!timestamp 2026-10-10"));
+    expect(roundtrip).toBe("{description: 2026-10-10}");
+  });
+
+  test("the byte-grammar contract declares which Bun versions verified it", () => {
+    // Grammar is an observed Bun implementation detail, not a spec: U+2028
+    // serializes differently on Bun 1.3.x than on the 1.4.x line this
+    // writer's grammar was derived and swept under. The published artifact
+    // is Bun-independent (the bundle embeds this writer); this contract only
+    // governs the dev-time differential gate. Update GRAMMAR_VERIFIED_BUN
+    // after re-probing whenever Bun's serialization shifts.
+    const version = (Bun as unknown as { version: string }).version;
+    const ok = /^1\.(4|5|6|7|8|9)\./.test(version) || /^2\./.test(version);
+    if (!ok) throw new Error(
+      `byte-grammar contract not verified under Bun ${version}: the differential sweep is derived from Bun >= 1.4 serialization (U+2028 differs on 1.3.x). Pin dev Bun >= 1.4 to run this gate, or re-derive the grammar and update the contract in test/yaml-parity.test.ts.`,
+    );
+  });
+
   test("every Basic Multilingual Plane codepoint stringifies byte-identically", () => {
-    // Differential fuzz beyond the house corpus: single embedded codepoint
-    // and codepoint-only strings, covering named escapes, separators,
-    // quoting triggers, and plain Unicode in one sweep.
+    if (!(/^1\.(4|5|6|7|8|9)\./.test((Bun as unknown as { version: string }).version) || /^2\./.test((Bun as unknown as { version: string }).version))) return; // guarded by the contract test above
     const probe = [0x00, 0x07, 0x08, 0x0b, 0x0c, 0x1b, 0x7f, 0x85, 0xa0, 0x2028, 0x2029, 0xad, 0xfeff, 0x200b, 0x3000];
     for (let cp = 0x20; cp < 0x2100; cp++) probe.push(cp);
     for (const cp of [0x3000, 0x1f600, 0xfffd, 0x4e2d, 0x1f1fa]) probe.push(cp);

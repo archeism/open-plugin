@@ -10,11 +10,19 @@
  */
 import { parse as parseYaml } from 'yaml';
 
+// Bun.YAML parses tagged scalars to plain strings — !!timestamp stays the
+// source text (yaml@2 would produce a Date) and !!binary stays base64 (yaml@2
+// would produce a Buffer) — so both tags resolve to their raw text here.
+const bunStringTags = [
+  { tag: "tag:yaml.org,2002:timestamp", resolve(value: string): string { return value; } },
+  { tag: "tag:yaml.org,2002:binary", resolve(value: string): string { return value; } },
+];
+
 export function yamlParse(text: string): unknown {
   // merge: true reproduces Bun.YAML's YAML 1.1 merge-key expansion — without
   // it a `<<:` policy map stays a literal `<<` property and every consumer
   // (semantic inventory, Codex sidecar policy) misses the restriction.
-  return parseYaml(text, { merge: true });
+  return parseYaml(text, { merge: true, customTags: bunStringTags });
 }
 
 const BOOL_NULL_WORDS = new Set([
