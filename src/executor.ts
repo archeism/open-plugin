@@ -205,7 +205,7 @@ async function runInstall(
       updatedAt: ledger.timestamp(),
     });
   } catch (error) {
-    return mutatedFailure(operation, thrownReason(error));
+    return recoverApplied(plan, operation, host, ledger, verified.handle, thrownReason(error));
   }
   try {
     await host.adapter.cleanup(verified.handle, 'verified-commit');
@@ -441,10 +441,12 @@ class Ledger {
   }
 
   markRolledBack(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.adoptMovedGeneration();
     this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'rolled-back', 'failed', true));
   }
 
   markRollbackRequired(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.adoptMovedGeneration();
     this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'rollback', 'recovery-required', true));
   }
 
@@ -551,6 +553,13 @@ class Ledger {
       createdAt: existing.createdAt,
       updatedAt: this.now,
     };
+  }
+
+  private adoptMovedGeneration(): void {
+    const loaded = readLifecycleState();
+    if (loaded.state.stateGeneration === this.baselineGeneration) return;
+    this.state = loaded.state;
+    this.baselineGeneration = loaded.state.stateGeneration;
   }
 
   private save(): void {

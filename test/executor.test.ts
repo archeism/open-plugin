@@ -556,6 +556,51 @@ describe('lifecycle executor', () => {
     });
   });
 
+  test('a generation move before activation confirmation rolls the mutation back', async () => {
+    const root = temp('generation-during-confirm');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+    await withHome(home, async () => {
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const moving: PlannerHost = {
+        ...codex.planner,
+        adapter: {
+          ...codex.planner.adapter,
+          apply: async (prepared) => {
+            const receipt = await codex.planner.adapter.apply(prepared);
+            const loaded = readLifecycleState();
+            writeLifecycleState(
+              { ...loaded.state, stateGeneration: loaded.state.stateGeneration + 1 },
+              { globalPreflight: 'succeeded' },
+            );
+            return receipt;
+          },
+        },
+      };
+      const executed = await executeLifecycle({ plan, hosts: [moving], now });
+
+      const loaded = readLifecycleState();
+      const attempt = loaded.state.attempts.find((row) => row.id === plan.attemptId);
+      const outcome = executed.report.outcomes[0];
+      expect(executed.exitCode).toBe(1);
+      expect(outcome?.result).toBe('failed');
+      expect(outcome?.resourceState).toBe('potentially-changed');
+      expect(outcome?.changed).toBe(true);
+      expect(attempt?.journal[0]?.state).toBe('rolled-back');
+      expect(loaded.state.activations).toEqual([]);
+      expect(existsSync(join(codex.fake.root, 'host', 'active', 'alpha'))).toBe(false);
+      expect(codex.fake.events.includes('rollback')).toBe(true);
+    });
+  });
+
   test('a pins failure removes the staged preparation and does not apply', async () => {
     const root = temp('pins-cleanup');
     const home = join(root, 'home');
