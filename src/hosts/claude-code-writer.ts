@@ -5,11 +5,23 @@ import { tmpdir } from 'node:os';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import type { PluginSource, ResolvedSource } from '../source';
 import { tomlCommandMarkdown } from '../conversion';
-import { claudeCode, mcpCandidates, pluginsDir } from './claude-code';
+import { claudeCode, mcpCandidates, observeClaudeCodeVersion, pluginsDir } from './claude-code';
 import { pinPluginMcpFiles } from '../mcp-write';
 
+import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
+import { fingerprintTree } from '../fingerprint';
+import { createLifecycleHostAdapter } from '../lifecycle-runtime';
+import type {
+  LifecycleHostAdapter,
+  LifecycleHostDefinition,
+  NativeProjectionData,
+  NativeProjectionRequest,
+  TargetInstallationData,
+  TargetVersionObservation,
+} from '../lifecycle-host';
+import { PACKAGE_SEMANTICS, type PackageSemantic } from '../semantic-inventory';
+import { validateSourceBinding } from '../source-reference';
 import { CryptoHasher } from '../runtime';
-
 const OWNERSHIP = '.plgnz-install.json';
 type Ownership = { source: string; pluginId: string; fingerprint: string; adopted?: true };
 type Registry = { version: number; plugins: Record<string, unknown> };
@@ -593,4 +605,271 @@ function bytesKey(path: string): string {
 function assertNoSymlinks(dir: string): void {
   if (lstatSync(dir).isSymbolicLink()) throw new Error(`Claude Code cache contains symlink: ${dir}`);
   for (const entry of readdirSync(dir)) { const path = join(dir, entry); const stat = lstatSync(path); if (stat.isSymbolicLink()) throw new Error(`Claude Code cache contains symlink: ${path}`); if (stat.isDirectory()) assertNoSymlinks(path); }
+}
+
+export interface ClaudeNativeRemoteUpdateContract {
+  readonly version: string;
+  readonly source: 'git';
+  readonly action: 'update';
+  readonly consumesExactSnapshot: boolean;
+  readonly forcesSameVersionBytes: boolean;
+  readonly rollbackProven: boolean;
+  readonly readbackProven: boolean;
+}
+
+export type ClaudeManagedHold =
+  | 'snapshot-not-exact'
+  | 'same-version-bytes'
+  | 'rollback-unproven'
+  | 'readback-unproven'
+  | 'retirement-discards-metadata'
+  | 'native-not-pinned';
+
+export type ClaudeRouteEvidence =
+  | { readonly route: 'native'; readonly proofId: string }
+  | { readonly route: 'managed'; readonly hold: ClaudeManagedHold };
+
+interface ClaudeRouteFacts {
+  readonly detectedVersion: string | undefined;
+  readonly operation: 'install' | 'update' | 'disable' | 'retire';
+  readonly sourceType: 'local' | 'git';
+  readonly pins: readonly { readonly server: string }[];
+  readonly snapshot: {
+    readonly immutableRevision: string;
+    readonly packageVersion: string | null;
+    readonly nativeGit: { readonly locator: string; readonly resolvedRevision: string } | undefined;
+  } | undefined;
+  readonly installed: {
+    readonly version: string | null;
+    readonly sourceType: 'local' | 'git';
+    readonly immutableRevision: string;
+    readonly locator: string | null;
+  } | undefined;
+}
+
+export const claudeProvenNativeRemoteUpdates: readonly ClaudeNativeRemoteUpdateContract[] = [];
+
+export function createClaudeCodeLifecycleHost(input?: {
+  contracts?: readonly ClaudeNativeRemoteUpdateContract[];
+}): LifecycleHostAdapter {
+  return createLifecycleHostAdapter(claudeCodeLifecycleDefinition(input?.contracts ?? claudeProvenNativeRemoteUpdates));
+}
+
+export function claudeRouteEvidence(
+  contracts: readonly ClaudeNativeRemoteUpdateContract[],
+  facts: ClaudeRouteFacts,
+): ClaudeRouteEvidence {
+  if (facts.operation === 'retire') return { route: 'managed', hold: 'retirement-discards-metadata' };
+  const contract = contracts.find((candidate) =>
+    candidate.version === facts.detectedVersion && candidate.source === 'git' && candidate.action === 'update');
+  if (facts.operation !== 'update' || facts.sourceType !== 'git' || contract === undefined) {
+    return { route: 'managed', hold: 'native-not-pinned' };
+  }
+  if (!contract.rollbackProven) return { route: 'managed', hold: 'rollback-unproven' };
+  if (!contract.readbackProven) return { route: 'managed', hold: 'readback-unproven' };
+  if (!contract.consumesExactSnapshot || !exactPinnedSnapshot(facts)) {
+    return { route: 'managed', hold: 'snapshot-not-exact' };
+  }
+  if (!contract.forcesSameVersionBytes) return { route: 'managed', hold: 'same-version-bytes' };
+  return { route: 'native', proofId: `claude-native-update-${contract.version}-git` };
+}
+
+function claudeCodeLifecycleDefinition(contracts: readonly ClaudeNativeRemoteUpdateContract[]): LifecycleHostDefinition {
+  const detected = observeClaudeCodeVersion();
+  return {
+    id: 'claude-code',
+    evidenceProfiles: claudeEvidenceProfiles(detected.kind === 'detected' ? detected.version : undefined, contracts),
+    probeVersion: async () => claudeVersionObservation(),
+    observeTarget: async (target) => ({ target, installations: observeClaudeInstallations() }),
+    observeNativeMutationScope: async (request) => ({
+      kind: 'bounded',
+      mode: 'exact-package',
+      affectedNativeIds: [request.nativeId],
+    }),
+    observeNativeProjection: async (request) => nativeProjection(contracts, request),
+    revalidateTargetPrecondition: async () => unsupportedLifecycleMutation('revalidation'),
+    stageActivation: async () => unsupportedLifecycleMutation('stage'),
+    applyLifecycleDirectives: async () => unsupportedLifecycleMutation('directives'),
+    applyPins: async () => unsupportedLifecycleMutation('pins'),
+    captureActivationPreparation: async () => unsupportedLifecycleMutation('activation-capture'),
+    captureDisablePreparation: async () => unsupportedLifecycleMutation('disable-capture'),
+    captureRetirementPreparation: async () => unsupportedLifecycleMutation('retirement-capture'),
+    apply: async () => unsupportedLifecycleMutation('apply'),
+    disable: async () => unsupportedLifecycleMutation('disable'),
+    retire: async () => unsupportedLifecycleMutation('retire'),
+    readback: async () => unsupportedLifecycleMutation('readback'),
+    rollback: async () => unsupportedLifecycleMutation('rollback'),
+    cleanup: async () => unsupportedLifecycleMutation('cleanup'),
+  };
+}
+
+function nativeProjection(
+  contracts: readonly ClaudeNativeRemoteUpdateContract[],
+  request: NativeProjectionRequest,
+): NativeProjectionData {
+  const detected = observeClaudeCodeVersion();
+  const evidence = claudeRouteEvidence(contracts, routeFacts(request, detected.kind === 'detected' ? detected.version : undefined));
+  switch (evidence.route) {
+    case 'native':
+      return { kind: 'equivalent', proofId: evidence.proofId };
+    case 'managed':
+      return { kind: 'requires-managed', reasonId: evidence.hold };
+    default: {
+      const unreachable: never = evidence;
+      return unreachable;
+    }
+  }
+}
+
+function routeFacts(request: NativeProjectionRequest, detectedVersion: string | undefined): ClaudeRouteFacts {
+  const activation = 'snapshot' in request ? undefined : request.activation;
+  const snapshot = 'snapshot' in request ? request.snapshot : undefined;
+  const nativeId = snapshot?.nativeId ?? activation?.nativeId ?? '';
+  const installed = request.targetObservation.installations.find((row) => row.nativeId === nativeId);
+  return {
+    detectedVersion,
+    operation: request.operation,
+    sourceType: snapshot?.sourceType ?? activation?.sourceType ?? 'local',
+    pins: 'snapshot' in request ? request.pins : [],
+    snapshot: snapshot === undefined ? undefined : {
+      immutableRevision: snapshot.immutableRevision,
+      packageVersion: snapshot.inventory.package.version,
+      nativeGit: snapshot.nativeGit,
+    },
+    installed: installed?.source == null ? undefined : {
+      version: installed.installedVersion,
+      sourceType: installed.source.type,
+      immutableRevision: installed.source.immutableRevision,
+      locator: installed.source.locator,
+    },
+  };
+}
+
+function exactPinnedSnapshot(facts: ClaudeRouteFacts): boolean {
+  const git = facts.snapshot?.nativeGit;
+  const installed = facts.installed;
+  return facts.pins.length === 0
+    && git !== undefined
+    && facts.snapshot !== undefined
+    && git.resolvedRevision === facts.snapshot.immutableRevision
+    && installed !== undefined
+    && installed.sourceType === 'git'
+    && installed.locator === git.locator;
+}
+
+function claudeVersionObservation(): TargetVersionObservation {
+  const observed = observeClaudeCodeVersion();
+  if (observed.kind === 'detected') return { kind: 'detected', version: observed.version, probeId: observed.probeId };
+  return { kind: observed.kind };
+}
+
+function claudeEvidenceProfiles(
+  version: string | undefined,
+  contracts: readonly ClaudeNativeRemoteUpdateContract[],
+): readonly CapabilityEvidenceProfile[] {
+  if (version === undefined) return [];
+  const managed = claudeProfile(version, 'managed', ['local', 'git'], ['install', 'update', 'disable', 'retire']);
+  const native = contracts.filter((contract) => contract.version === version && sandboxPasses(contract));
+  if (native.length > 1) throw new Error(`ambiguous Claude Code native update contract for ${version}`);
+  return native.length === 0 ? [managed] : [managed, claudeProfile(version, 'native', ['git'], ['update'])];
+}
+
+function sandboxPasses(contract: ClaudeNativeRemoteUpdateContract): boolean {
+  return contract.source === 'git'
+    && contract.action === 'update'
+    && contract.consumesExactSnapshot
+    && contract.forcesSameVersionBytes
+    && contract.rollbackProven
+    && contract.readbackProven;
+}
+
+function claudeProfile(
+  version: string,
+  route: 'managed' | 'native',
+  sourceTypes: readonly ['local' | 'git', ...('local' | 'git')[]],
+  operations: readonly ['install' | 'update' | 'disable' | 'retire', ...('install' | 'update' | 'disable' | 'retire')[]],
+): CapabilityEvidenceProfile {
+  return createCapabilityEvidenceProfile({
+    host: 'claude-code',
+    detectedVersion: version,
+    sourceTypes,
+    operations,
+    route,
+    operationStatus: 'supported',
+    semantics: claudeSemantics(),
+    evidence: [
+      'docs/hosts/claude-code.md',
+      'docs/research/native-plugin-update-capabilities-2026-10-09.md',
+    ],
+  });
+}
+
+function claudeSemantics(): Record<PackageSemantic, CapabilityStatus> {
+  return Object.fromEntries(PACKAGE_SEMANTICS.map((semantic) => [semantic, 'supported'])) as Record<PackageSemantic, CapabilityStatus>;
+}
+
+function observeClaudeInstallations(): TargetInstallationData[] {
+  const registry = readRegistry(join(pluginsDir(), 'installed_plugins.json'));
+  const settings = readSettings(join(pluginsDir(), '..', 'settings.json'));
+  const enabled = settings['enabledPlugins'];
+  const enabledPlugins = typeof enabled === 'object' && enabled !== null && !Array.isArray(enabled)
+    ? enabled as Record<string, unknown>
+    : {};
+  const installations: TargetInstallationData[] = [];
+  for (const [id, rows] of Object.entries(registry.plugins)) {
+    if (!Array.isArray(rows)) continue;
+    const users = rows.flatMap((row) => {
+      if (typeof row !== 'object' || row === null || Array.isArray(row)) return [];
+      const record = row as Record<string, unknown>;
+      return record['scope'] === 'user' ? [record] : [];
+    });
+    const row = users[0];
+    if (users.length !== 1 || row === undefined) continue;
+    const recordedPath = row['installPath'];
+    if (typeof recordedPath !== 'string') continue;
+    const installPath = resolve(recordedPath);
+    if (!existsSync(installPath)) continue;
+    const marker = readOwnership(installPath);
+    const digest = fingerprintTree(installPath);
+    const sha = row['gitCommitSha'];
+    const revision = typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sha) ? sha : undefined;
+    const locator = marker === null ? undefined : gitLocator(marker.source);
+    const on = enabledPlugins[id] === true;
+    const at = id.indexOf('@');
+    installations.push({
+      nativeId: id,
+      packageName: at === -1 ? id : id.slice(0, at),
+      ownership: marker?.pluginId === id
+        ? {
+          kind: 'owned',
+          proof: marker.adopted === true ? 'adopted' : 'created',
+          scopeId: `claude-code:${id}`,
+          proofId: `claude-code:${id}`,
+        }
+        : { kind: 'unmanaged' },
+      presence: 'present',
+      enablement: on ? 'enabled' : 'disabled',
+      activation: on ? 'active' : 'inactive',
+      installedFingerprint: digest,
+      installedVersion: typeof row['version'] === 'string' ? row['version'] : null,
+      source: revision !== undefined && locator !== undefined
+        ? { type: 'git', immutableRevision: revision, locator }
+        : null,
+      contentRoots: [{ label: 'plugin', path: installPath, fingerprint: digest }],
+    });
+  }
+  return installations;
+}
+
+function gitLocator(source: string): string | undefined {
+  try {
+    validateSourceBinding({ kind: 'git', locator: source, ref: 'a'.repeat(40) });
+    return source;
+  } catch {
+    return undefined;
+  }
+}
+
+function unsupportedLifecycleMutation(phase: string): never {
+  throw new Error(`claude-code lifecycle ${phase} is not implemented`);
 }

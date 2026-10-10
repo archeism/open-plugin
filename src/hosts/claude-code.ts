@@ -47,14 +47,33 @@ export function pluginsDir(): string {
 
 /** An explicit Claude Code binary permits first install before its config root exists. */
 
-export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
+const CLAUDE_CODE_VERSION = /^(\d+\.\d+\.\d+) \(Claude Code\)\s*$/u;
+
+export type ClaudeCodeVersionObservation =
+  | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'unparseable' };
+
+/** Live `claude --version` probe. Static consumer-profile metadata is not a version. */
+export function observeClaudeCodeVersion(
+  env: Record<string, string | undefined> = process.env,
+): ClaudeCodeVersionObservation {
   const binary = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
-  if (!binary || !existsSync(binary)) return false;
+  if (!binary || !existsSync(binary)) return { kind: 'unknown' };
   try {
     const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+    if (result.exitCode !== 0) return { kind: 'unparseable' };
     const stdout = [...result.stdout].map((byte) => String.fromCharCode(byte)).join('');
-    return result.exitCode === 0 && /^\d+\.\d+\.\d+ \(Claude Code\)\s*$/.test(stdout);
-  } catch { return false; }
+    const version = CLAUDE_CODE_VERSION.exec(stdout)?.[1];
+    if (version === undefined) return { kind: 'unparseable' };
+    return { kind: 'detected', version, probeId: `claude-code-cli-${version}` };
+  } catch {
+    return { kind: 'unknown' };
+  }
+}
+
+export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
+  return observeClaudeCodeVersion(env).kind === 'detected';
 }
 
 function userConfigFile(): string {
