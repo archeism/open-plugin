@@ -1506,6 +1506,87 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('add installs the source bytes, prints one lifecycle report, and leaves a foreign plugin', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"Harness fixture"}\n';
+      const foreignJson = '{"name":"foreign","version":"9.9.9","description":"not ours"}\n';
+      harness.writeHome({
+        '.cursor/.keep': '',
+        '.cursor/plugins/local/foreign/.cursor-plugin/plugin.json': foreignJson,
+      });
+      const source = harness.source('add-source', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: Harness fixture\n---\n\nDemo body.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(3));
+      const result = harness.run(
+        ['add', source, '--target', 'cursor', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        dryRun: report?.command.dryRun ?? null,
+        operationIds,
+        operationIdShape: operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          nativeId: outcome.nativeId,
+          coverage: outcome.coverage,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+          changed: outcome.changed,
+        })) ?? [],
+        summary: report === null ? null : {
+          result: report.summary.result,
+          terminalPhase: report.summary.terminalPhase,
+          mutationStarted: report.summary.mutationStarted,
+          changed: report.summary.changed,
+          failureCategory: report.summary.failureCategory,
+        },
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        foreign: bytesToText(result.stores.cursor.after.files['plugins/local/foreign/.cursor-plugin/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'add',
+        dryRun: false,
+        operationIds,
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          nativeId: 'demo',
+          coverage: 'desired-pair',
+          action: 'install',
+          route: 'managed',
+          result: 'succeeded',
+          resourceState: 'present',
+          activationState: 'active-conforming',
+          changed: true,
+        }],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: true,
+          changed: true,
+          failureCategory: null,
+        },
+        installed: pluginJson,
+        foreign: foreignJson,
+      });
+    });
+  });
 });
 
 function recordNativeRoute(statePath: string, packageId: string): void {
