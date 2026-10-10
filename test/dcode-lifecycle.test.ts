@@ -343,10 +343,9 @@ describe('dcode lifecycle', () => {
       expect((await failed(() => dcodeWriter.remove('addy@personal'))).message).toContain('not wholly'); expect(existsSync(copy(root))).toBe(true);
     });
   });
-  test('metadata failure rollback retains the prior active copy', async () => {
+  test('metadata failure rollback retains the prior active copy when enablement is a directory', async () => {
     await isolated(async root => {
       const item = incoming('first\n'); await dcodeWriter.add(item.plugin, item.resolved); const before = readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8');
-      // A directory at the enablement file makes the second metadata commit fail.
       rmSync(join(root, '.state', 'plugin_state.json')); writeFiles(join(root, '.state', 'plugin_state.json'), { '.keep': '' });
       const changed = incoming('second\n'); changed.resolved.sourceUri = item.resolved.sourceUri;
       await failed(() => dcodeWriter.add(changed.plugin, changed.resolved)); expect(readFileSync(join(copy(root), 'skills/a/SKILL.md'), 'utf8')).toBe(before);

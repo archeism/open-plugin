@@ -1,4 +1,3 @@
-/** Transactional writer for dcode's recorded native plugin state. */
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -123,5 +122,4 @@ function sameTree(left: string, right: string): boolean { if (!existsSync(right)
 function assertNoSymlinks(dir: string): void { for (const entry of readdirSync(dir)) { const file = join(dir, entry), st = lstatSync(file); if (st.isSymbolicLink()) throw new Error(`dcode plugin contains symlink: ${file}`); if (st.isDirectory()) assertNoSymlinks(file); } }
 function assertIdentity(value: string, label: string): void { if (!/^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/.test(value)) throw new Error(`invalid dcode ${label}`); }
 function assertUnder(root: string, path: string): void { const absoluteRoot = resolve(root), absolutePath = resolve(path); if (absolutePath === absoluteRoot || !absolutePath.startsWith(`${absoluteRoot}/`)) throw new Error(`dcode path escapes managed cache: ${path}`); }
-/** Reject links in the native root or any component beneath it before a write. */
 function assertManagedPath(path: string): void { const root = resolve(dcodeRoot()), target = resolve(path); if (target !== root && !target.startsWith(`${root}/`)) throw new Error(`dcode path escapes native root: ${path}`); let current = root; if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error(`dcode native path contains symlink: ${current}`); const relative = target.slice(root.length).replace(/^\//, ''); for (const part of relative ? relative.split('/') : []) { current = join(current, part); if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error(`dcode native path contains symlink: ${current}`); } }

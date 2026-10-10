@@ -1,15 +1,3 @@
-/**
- * Read-only dcode (deepagents-code) plugin store reader.
- *
- * Evidence: deepagents-code 0.1.71 / upstream store.py at 59408ebe.  The
- * supported native state is `<DEEPAGENTS_HOME>/.state/{installed_plugins,
- * plugin_state}.json`; commands and invocation gating are deliberately not
- * inferred from the loader.
- *
- * `dcode0183ManagedProfile` is the only proven Managed release. A live
- * `dcode --version` probe selects it. Any other version stays unverified
- * until its own evidence profile exists.
- */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
