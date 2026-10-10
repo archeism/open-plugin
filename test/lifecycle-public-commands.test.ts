@@ -730,6 +730,126 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 5 native nonzero and readback mismatch; source drift is refused before a journal write; a pins failure removes the staged preparation and does not apply; a generation move before activation confirmation rolls the mutation back; cleanup failure after a confirmed activation keeps that activation and records pending cleanup; a changed state generation is refused and does not write', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const staleJson = '{"name":"stale","version":"1.0.0","description":"stale"}\n';
+      const freshJson = '{"name":"fresh","version":"1.0.0","description":"fresh"}\n';
+      const source = harness.source('scenario-5', {
+        'kept/plugin.json': keptJson,
+        'kept/skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+        'stale/plugin.json': staleJson,
+        'stale/skills/stale/SKILL.md': '---\nname: stale\ndescription: stale\n---\n\nStale.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const broken = harness.fakeNative('cursor-broken', versionSteps(8).map(() => ({
+        args: ['--version'],
+        stderr: 'probe failed\n',
+        exitCode: 1,
+      })));
+      const installed = harness.run(
+        ['sync', source, '--target', 'cursor', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      expect(installed.exitCode).toBe(0);
+      const cursorStore = harness.storePath('cursor');
+      const localTree = () => snapshotTree(join(cursorStore, 'plugins', 'local'));
+      const installedLocal = localTree();
+
+      const refused = harness.run(
+        ['sync', source, '--target', 'cursor', '--plugin', 'kept', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: broken.path } },
+      );
+      const refusedReport = parseLifecycleReport(JSON.parse(refused.stdout));
+      const refusedLocal = localTree();
+      expect({
+        exitCode: refused.exitCode,
+        stderr: refused.stderr,
+        action: refusedReport.outcomes.find((outcome) => outcome.package === 'kept')?.action ?? null,
+        category: refusedReport.outcomes.find((outcome) => outcome.package === 'kept')?.reason?.category ?? null,
+        mutationStarted: refusedReport.summary.mutationStarted,
+        changed: refusedReport.summary.changed,
+        retirements: refusedReport.plan.filter((operation) => operation.action === 'retire-orphan').map((operation) => operation.package),
+        kept: bytesToText(refusedLocal.files['kept/plugin.json'] ?? []),
+        stale: bytesToText(refusedLocal.files['stale/plugin.json'] ?? []),
+        local: refusedLocal,
+      }).toEqual({
+        exitCode: 1,
+        stderr: '',
+        action: 'retain-prior',
+        category: 'capability',
+        mutationStarted: false,
+        changed: false,
+        retirements: [],
+        kept: keptJson,
+        stale: staleJson,
+        local: installedLocal,
+      });
+
+      const fresh = harness.source('scenario-5-fresh', {
+        'plugin.json': freshJson,
+        'skills/fresh/SKILL.md': '---\nname: fresh\ndescription: fresh\n---\n\nFresh.\n',
+      });
+      const readback = harness.fakeNative('cursor-readback', versionSteps(24).map((step) => ({
+        ...step,
+        divergeStagedReadback: 'different bytes\n',
+      })));
+      const readbackArgs = ['sync', fresh, '--target', 'cursor', '--json'];
+      const readbackEnv = { OPEN_PLUGIN_CURSOR_BIN: readback.path };
+      const mismatched = harness.run(readbackArgs, { env: readbackEnv });
+      const mismatchedReport = parseLifecycleReport(JSON.parse(mismatched.stdout));
+      const freshOutcome = mismatchedReport.outcomes.find((outcome) => outcome.package === 'fresh');
+      const plannedRoute = mismatchedReport.plan.find((operation) => operation.package === 'fresh')?.route ?? null;
+      const afterMismatch = localTree();
+      expect({
+        exitCode: mismatched.exitCode,
+        stderr: mismatched.stderr,
+        action: freshOutcome?.action ?? null,
+        route: freshOutcome?.route ?? null,
+        plannedRoute,
+        result: freshOutcome?.result ?? null,
+        resourceState: freshOutcome?.resourceState ?? null,
+        code: freshOutcome?.reason?.code ?? null,
+        nativeRoutes: mismatchedReport.outcomes.filter((outcome) => outcome.route === 'native').map((outcome) => outcome.package),
+        retired: mismatchedReport.outcomes.filter((outcome) => outcome.action === 'retire-orphan' && outcome.result === 'succeeded').map((outcome) => outcome.package),
+        kept: bytesToText(afterMismatch.files['kept/plugin.json'] ?? []),
+        stale: bytesToText(afterMismatch.files['stale/plugin.json'] ?? []),
+        freshInstalled: afterMismatch.files['fresh/plugin.json'] ?? null,
+      }).toEqual({
+        exitCode: 1,
+        stderr: '',
+        action: 'install',
+        route: 'managed',
+        plannedRoute: 'managed',
+        result: 'pending',
+        resourceState: 'potentially-changed',
+        code: 'readback.mismatch',
+        nativeRoutes: [],
+        retired: [],
+        kept: keptJson,
+        stale: staleJson,
+        freshInstalled: null,
+      });
+
+      const repeated = harness.run(readbackArgs, { env: readbackEnv });
+      const afterRepeat = localTree();
+      expect({
+        exitCode: repeated.exitCode,
+        kept: bytesToText(afterRepeat.files['kept/plugin.json'] ?? []),
+        stale: bytesToText(afterRepeat.files['stale/plugin.json'] ?? []),
+        freshInstalled: afterRepeat.files['fresh/plugin.json'] ?? null,
+        store: repeated.stores.cursor.after,
+      }).toEqual({
+        exitCode: 1,
+        kept: keptJson,
+        stale: staleJson,
+        freshInstalled: null,
+        store: repeated.stores.cursor.before,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
