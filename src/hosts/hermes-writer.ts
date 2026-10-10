@@ -7,8 +7,8 @@ import { projectPluginForHermes } from '../conversion';
 import { fingerprintTree } from '../fingerprint';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } from '../host';
 import {
+  HERMES_PORTABLE_SURFACE,
   HERMES_PORTABLE_SURFACE_PROBE,
-  HERMES_PORTABLE_SURFACE_VERSION,
   decideHermesNativeUpdate,
   hermesCommandCompanionId,
   hermesNativeUpdateProof,
@@ -256,7 +256,7 @@ const HERMES_SUPPORTED = new Set<PackageSemantic>([
 
 const hermesManagedProfile = createCapabilityEvidenceProfile({
   host: 'hermes',
-  detectedVersion: HERMES_PORTABLE_SURFACE_VERSION,
+  detectedVersion: HERMES_PORTABLE_SURFACE,
   sourceTypes: ['local', 'git'],
   operations: ['install', 'update', 'disable', 'retire'],
   route: 'managed',
@@ -270,8 +270,17 @@ const hermesManagedProfile = createCapabilityEvidenceProfile({
 });
 
 type HermesStore = { readonly root: string; readonly configPath: string; readonly pluginsDir: string };
-type ConfigSnapshot = { readonly existed: boolean; readonly text: string; readonly mode: number | null };
 type Marker = Ownership & { sourceType?: 'local' | 'git'; sourceRevision?: string; sourceLocator?: string | null; scopeId?: string };
+type ConfigSlice = {
+  readonly packageName: string;
+  readonly companionId: string;
+  readonly packageEnabled: boolean;
+  readonly packageDisabled: boolean;
+  readonly companionEnabled: boolean;
+  readonly companionDisabled: boolean;
+  readonly entryPresent: boolean;
+  readonly entry: unknown;
+};
 
 function storeFor(target: LifecycleTargetIdentity): HermesStore {
   const identity = hermesInstanceIdentity({ kind: target.kind, instance: target.instance, ...(target.context === undefined ? {} : { context: { ...target.context } }) });
@@ -334,11 +343,36 @@ function readMarker(target: string): Marker | null {
   };
 }
 
-function assertLifecycleOwned(target: string, nativeId: string, source: string): void {
+type LifecycleOwner = { readonly pluginId: string; readonly scopeId: string; readonly sourceType: 'local' | 'git'; readonly locator: string | null };
+
+function ownerFromHandle(handle: { readonly nativeId: string; readonly scopeId: string; readonly sourceType: 'local' | 'git'; readonly sourceLocator: string | null }): LifecycleOwner {
+  return { pluginId: handle.nativeId, scopeId: handle.scopeId, sourceType: handle.sourceType, locator: handle.sourceLocator };
+}
+
+function installedOwner(marker: Marker): LifecycleOwner | null {
+  if (marker.scopeId === undefined || (marker.sourceType !== 'local' && marker.sourceType !== 'git')) return null;
+  if (marker.sourceType === 'git') {
+    if (typeof marker.sourceLocator !== 'string') return null;
+    return { pluginId: marker.pluginId, scopeId: marker.scopeId, sourceType: 'git', locator: marker.sourceLocator };
+  }
+  if (marker.sourceLocator !== undefined && marker.sourceLocator !== null) return null;
+  return { pluginId: marker.pluginId, scopeId: marker.scopeId, sourceType: 'local', locator: null };
+}
+
+function sameLifecycleOwner(marker: Marker, claim: LifecycleOwner): boolean {
+  const installed = installedOwner(marker);
+  return installed !== null
+    && installed.pluginId === claim.pluginId
+    && installed.scopeId === claim.scopeId
+    && installed.sourceType === claim.sourceType
+    && installed.locator === claim.locator;
+}
+
+function assertLifecycleOwned(target: string, claim: LifecycleOwner): void {
   if (!existsSync(target)) return;
   const marker = readMarker(target);
-  if (marker === null) throw new Error(`Hermes plugin ${nativeId} is unowned and differs from the staged representation; pass --adopt-existing to take ownership explicitly`);
-  if (marker.pluginId !== nativeId || marker.source !== source) throw new Error(`Hermes plugin ${nativeId} belongs to another source; refusing to replace it`);
+  if (marker === null) throw new Error(`Hermes plugin ${claim.pluginId} is unowned and differs from the staged representation; pass --adopt-existing to take ownership explicitly`);
+  if (!sameLifecycleOwner(marker, claim)) throw new Error(`Hermes plugin ${claim.pluginId} belongs to another source; refusing to replace it`);
 }
 
 function copyReplace(stage: string, target: string, root: string): Change {
@@ -424,40 +458,111 @@ function atomicFingerprint(packageDir: string, companionDir: string | undefined)
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }
 
-function readConfigSnapshot(configPath: string): ConfigSnapshot {
+function readConfigDocument(configPath: string): Record<string, unknown> | null {
   const actual = actualConfig(configPath);
-  if (!existsSync(actual)) return { existed: false, text: '', mode: null };
-  return { existed: true, text: readFileSync(actual, 'utf8'), mode: (statSync(actual) as unknown as { mode: number }).mode & 0o777 };
+  if (!existsSync(actual)) return null;
+  const text = readFileSync(actual, 'utf8');
+  if (text.trim() === '') return {};
+  const parsed: unknown = yamlParse(text);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`Hermes config is not a mapping: ${configPath}`);
+  return parsed as Record<string, unknown>;
 }
 
-function writeConfigSnapshot(configPath: string, snapshot: ConfigSnapshot): void {
+function pluginMapping(doc: Record<string, unknown>): Record<string, unknown> {
+  const plugins = doc['plugins'];
+  if (plugins === undefined || plugins === null) return {};
+  if (typeof plugins !== 'object' || Array.isArray(plugins)) throw new Error('Hermes plugins config is not a mapping');
+  return plugins as Record<string, unknown>;
+}
+
+function listed(plugins: Record<string, unknown>, key: 'enabled' | 'disabled'): string[] {
+  const value = plugins[key];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error(`Hermes plugins.${key} is not a string list`);
+  return value as string[];
+}
+
+function captureConfigSlice(configPath: string, packageName: string, companionId: string): ConfigSlice {
+  const plugins = pluginMapping(readConfigDocument(configPath) ?? {});
+  const enabled = new Set(listed(plugins, 'enabled'));
+  const disabled = new Set(listed(plugins, 'disabled'));
+  const entries = plugins['entries'];
+  const entryRecord = entries !== null && typeof entries === 'object' && !Array.isArray(entries) ? entries as Record<string, unknown> : undefined;
+  const entryPresent = entryRecord !== undefined && Object.hasOwn(entryRecord, packageName);
+  const entry = entryPresent ? entryRecord[packageName] : null;
+  return {
+    packageName,
+    companionId,
+    packageEnabled: enabled.has(packageName),
+    packageDisabled: disabled.has(packageName),
+    companionEnabled: enabled.has(companionId),
+    companionDisabled: disabled.has(companionId),
+    entryPresent,
+    entry,
+  };
+}
+
+function membership(list: unknown, id: string, present: boolean): string[] | undefined {
+  if (list !== undefined && list !== null && (!Array.isArray(list) || list.some(item => typeof item !== 'string'))) {
+    throw new Error('Hermes plugins list is not a string list');
+  }
+  const values = list === undefined || list === null ? [] : list as string[];
+  if (present) return values.includes(id) ? values : [...values, id];
+  if (!values.includes(id)) return list === undefined || list === null ? undefined : values;
+  return values.filter(item => item !== id);
+}
+
+function writeConfigDocument(configPath: string, doc: Record<string, unknown>): void {
   const actual = actualConfig(configPath);
-  if (!snapshot.existed) { if (existsSync(actual)) rmSync(actual); return; }
+  const exists = existsSync(actual);
+  const mode = exists ? (statSync(actual) as unknown as { mode: number }).mode & 0o777 : null;
   mkdirSync(dirname(actual), { recursive: true });
-  const temp = join(dirname(actual), `.plgnz-hermes-rollback-${Date.now()}.yaml`);
+  const temp = join(dirname(actual), `.plgnz-hermes-rollback-${Date.now()}-${Math.random().toString(16).slice(2)}.yaml`);
   try {
-    writeFileSync(temp, snapshot.text);
-    if (snapshot.mode !== null) chmodSync(temp, snapshot.mode);
+    writeFileSync(temp, yamlStringify(doc));
+    if (mode !== null) chmodSync(temp, mode);
     renameSync(temp, actual);
   } finally { rmSync(temp, { force: true }); }
 }
 
-function saveRollback(store: HermesStore, reference: string, packageDir: string, companionDir: string, prior: LifecycleReadbackData): void {
+function restoreConfigSlice(configPath: string, slice: ConfigSlice): void {
+  const doc = readConfigDocument(configPath) ?? {};
+  const plugins = pluginMapping(doc);
+  doc['plugins'] = plugins;
+  let enabled = membership(plugins['enabled'], slice.packageName, slice.packageEnabled);
+  enabled = membership(enabled, slice.companionId, slice.companionEnabled);
+  let disabled = membership(plugins['disabled'], slice.packageName, slice.packageDisabled);
+  disabled = membership(disabled, slice.companionId, slice.companionDisabled);
+  if (enabled === undefined) delete plugins['enabled'];
+  else plugins['enabled'] = enabled;
+  if (disabled === undefined) delete plugins['disabled'];
+  else plugins['disabled'] = disabled;
+  const raw = plugins['entries'];
+  if (raw !== undefined && raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) throw new Error(`Hermes plugins.entries is not a mapping: ${configPath}`);
+  const entries: Record<string, unknown> = raw === undefined || raw === null ? {} : { ...(raw as Record<string, unknown>) };
+  if (slice.entryPresent) entries[slice.packageName] = slice.entry;
+  else delete entries[slice.packageName];
+  if (Object.keys(entries).length === 0) delete plugins['entries'];
+  else plugins['entries'] = entries;
+  writeConfigDocument(configPath, doc);
+}
+
+function saveRollback(store: HermesStore, reference: string, packageName: string, packageDir: string, companionDir: string): void {
   rmSync(reference, { recursive: true, force: true });
   mkdirSync(reference, { recursive: true });
-  writeFileSync(join(reference, 'config.json'), JSON.stringify(readConfigSnapshot(store.configPath)));
-  writeFileSync(join(reference, 'prior.json'), JSON.stringify(prior));
+  const companionId = hermesCommandCompanionId(packageName);
+  writeFileSync(join(reference, 'config-slice.json'), JSON.stringify(captureConfigSlice(store.configPath, packageName, companionId)));
   if (existsSync(packageDir)) cpSync(packageDir, join(reference, 'package'), { recursive: true });
   if (existsSync(companionDir)) cpSync(companionDir, join(reference, 'commands'), { recursive: true });
 }
 
 function restoreRollback(store: HermesStore, reference: string, packageDir: string, companionDir: string): void {
-  const snapshot = JSON.parse(readFileSync(join(reference, 'config.json'), 'utf8')) as ConfigSnapshot;
+  const slice = JSON.parse(readFileSync(join(reference, 'config-slice.json'), 'utf8')) as ConfigSlice;
   rmSync(packageDir, { recursive: true, force: true });
   rmSync(companionDir, { recursive: true, force: true });
   if (existsSync(join(reference, 'package'))) cpSync(join(reference, 'package'), packageDir, { recursive: true });
   if (existsSync(join(reference, 'commands'))) cpSync(join(reference, 'commands'), companionDir, { recursive: true });
-  writeConfigSnapshot(store.configPath, snapshot);
+  restoreConfigSlice(store.configPath, slice);
 }
 
 function sourceIdentity(marker: Marker | null): { type: 'local' | 'git'; immutableRevision: string; locator: string | null } | null {
@@ -509,8 +614,15 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
   async probeVersion(target) {
     try {
       const store = storeFor(target);
-      if (!existsSync(actualConfig(store.configPath))) return { kind: 'unknown' };
-      return { kind: 'detected', version: HERMES_PORTABLE_SURFACE_VERSION, probeId: HERMES_PORTABLE_SURFACE_PROBE };
+      const actual = actualConfig(store.configPath);
+      if (!existsSync(actual) || !statSync(actual).isFile()) return { kind: 'unknown' };
+      const text = readFileSync(actual, 'utf8');
+      if (text.trim() !== '') {
+        let parsed: unknown;
+        try { parsed = yamlParse(text); } catch { return { kind: 'unparseable' }; }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'unparseable' };
+      }
+      return { kind: 'detected', version: HERMES_PORTABLE_SURFACE, probeId: HERMES_PORTABLE_SURFACE_PROBE };
     } catch { return { kind: 'unknown' }; }
   },
   async observeTarget(target) {
@@ -602,7 +714,7 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
     const contentRoots = [{ label: 'package', path: paths.packageDir, fingerprint: fingerprintTree(join(projection.stagingRoot, 'package')) }];
     if (hasCompanion) contentRoots.push({ label: 'commands', path: paths.companionDir, fingerprint: fingerprintTree(join(projection.stagingRoot, 'commands')) });
     const rollbackReference = join(workDir(store, projection.attemptId, projection.operationId), 'rollback');
-    saveRollback(store, rollbackReference, paths.packageDir, paths.companionDir, prior);
+    saveRollback(store, rollbackReference, projection.packageName, paths.packageDir, paths.companionDir);
     return {
       prior,
       expected: { ...prior, route: projection.route, presence: 'present', enablement: 'enabled', activation: 'active', transition: EFFECTIVE, installedFingerprint: projectedFingerprint, contentRoots, retention: prior.retention },
@@ -615,7 +727,7 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
     const paths = packagePaths(store, request.activation.packageName);
     const prior = withIdentity(inspect(store, request.activation.nativeId, request.activation.packageName, 'none'), request.activation.target, request.activation.scopeId, request.activation.packageName, request.activation.nativeId);
     const rollbackReference = join(workDir(store, request.attemptId, request.operationId), 'rollback');
-    saveRollback(store, rollbackReference, paths.packageDir, paths.companionDir, prior);
+    saveRollback(store, rollbackReference, request.activation.packageName, paths.packageDir, paths.companionDir);
     return { prior, rollbackReference, rollbackCoverageOperationIds: request.selection.affectedOperationIds, transition: EFFECTIVE };
   },
   async captureRetirementPreparation(request) {
@@ -623,7 +735,7 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
     const paths = packagePaths(store, request.activation.packageName);
     const prior = withIdentity(inspect(store, request.activation.nativeId, request.activation.packageName, 'none'), request.activation.target, request.activation.scopeId, request.activation.packageName, request.activation.nativeId);
     const rollbackReference = join(workDir(store, request.attemptId, request.operationId), 'rollback');
-    saveRollback(store, rollbackReference, paths.packageDir, paths.companionDir, prior);
+    saveRollback(store, rollbackReference, request.activation.packageName, paths.packageDir, paths.companionDir);
     return { prior, rollbackReference, rollbackCoverageOperationIds: request.selection.affectedOperationIds, transition: EFFECTIVE };
   },
   async apply(prepared) {
@@ -635,10 +747,10 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
     const stagedPackage = join(prepared.stagingRoot, 'package');
     const stagedCompanion = join(prepared.stagingRoot, 'commands');
     const hasCompanion = existsSync(stagedCompanion);
-    const source = prepared.handle.sourceLocator ?? prepared.handle.sourceRevision;
-    assertLifecycleOwned(paths.packageDir, prepared.handle.nativeId, source);
-    if (hasCompanion) assertLifecycleOwned(paths.companionDir, prepared.handle.nativeId, source);
-    else if (existsSync(paths.companionDir)) assertLifecycleOwned(paths.companionDir, prepared.handle.nativeId, source);
+    const owner = ownerFromHandle(prepared.handle);
+    assertLifecycleOwned(paths.packageDir, owner);
+    if (hasCompanion) assertLifecycleOwned(paths.companionDir, owner);
+    else if (existsSync(paths.companionDir)) assertLifecycleOwned(paths.companionDir, owner);
     mkdirSync(store.pluginsDir, { recursive: true });
     const unchanged = existsSync(paths.packageDir)
       && atomicFingerprint(paths.packageDir, hasCompanion ? paths.companionDir : undefined) === fingerprintTree(prepared.stagingRoot)
@@ -672,7 +784,7 @@ const hermesLifecycleDefinition: LifecycleHostDefinition = {
     const changes: Change[] = [];
     try {
       if (existsSync(paths.packageDir)) {
-        assertLifecycleOwned(paths.packageDir, prepared.handle.nativeId, source);
+        assertLifecycleOwned(paths.packageDir, ownerFromHandle(prepared.handle));
         changes.push(removeTarget(paths.packageDir, store.pluginsDir));
       }
       if (existsSync(paths.companionDir)) {

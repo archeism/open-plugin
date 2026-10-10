@@ -370,7 +370,7 @@ describe('Hermes managed lifecycle route', () => {
     expect(readFileSync(dataFile, 'utf8')).toBe('{"kept":true}\n');
     const config = readFileSync(join(root, 'config.yaml'), 'utf8');
     expect(config).toContain('value: keep');
-    expect(config).toContain('model: preserved');
+    expect(config).toContain('model: sibling');
     expect(readback.presence).toBe('absent');
     expect(readback.enablement).toBe('disabled');
     expect(readback.route).toBe('managed');
@@ -387,7 +387,7 @@ describe('Hermes managed lifecycle route', () => {
     expect(detected.kind).toBe('detected');
     expect(detected.kind === 'detected' ? detected.version : '').toBe('portable-surface');
     expect(detected.kind === 'detected' ? detected.probeId : '').toBe('hermes-portable-surface');
-    writeFileSync(join(root, 'config.yaml'), ':\n  :\n');
+    writeFileSync(join(root, 'config.yaml'), 'hello\n');
     const refused = await hermesLifecycle.probeVersion(target);
     expect(refused.kind).toBe('unparseable');
   });
