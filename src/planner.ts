@@ -152,7 +152,7 @@ export async function planLifecycle(input: PlanLifecycleInput): Promise<Lifecycl
     prepared.push(result);
   }
 
-  const attemptId = `attempt-v1-${digest([String(loaded.state.stateGeneration), ...prepared.flatMap((item) => item.identity)])}`;
+  const attemptId = lifecycleAttemptId(loaded.state.stateGeneration, prepared.map((item) => item.identity));
   const scopes: PlannedScope[] = [];
   const operations: FrozenOperation[] = [];
   for (const item of prepared) {
@@ -212,7 +212,7 @@ async function prepareSync(
       host,
       observation: null,
       scope,
-      identity: ['sync', scope.id, frozen.snapshot.fingerprint, ...selected.map((item) => item.plugin.name)],
+      identity: plannedAttemptIdentity(scope.id, frozen.snapshot.fingerprint, selected.map((item) => item.plugin.name)),
     };
   }
   let observation: TargetInventoryObservation;
@@ -252,7 +252,7 @@ async function prepareSync(
     host,
     observation,
     scope,
-    identity: ['sync', scope.id, frozen.snapshot.fingerprint, ...selected.map((item) => item.plugin.name)],
+    identity: plannedAttemptIdentity(scope.id, frozen.snapshot.fingerprint, selected.map((item) => item.plugin.name)),
   };
 }
 
@@ -299,7 +299,7 @@ async function prepareRetire(
     host,
     observation,
     scope: { id: recorded.id, source: recorded.source, target: { kind: recorded.target.kind, instance: recorded.target.instance } },
-    identity: ['retire-source', recorded.id],
+    identity: plannedAttemptIdentity(recorded.id),
   };
 }
 
@@ -1057,6 +1057,38 @@ function sourceSnapshotId(frozen: FrozenSource): string {
 
 function operationIdentity(coverage: string, scopeId: string, packageName: string, nativeId: string, fingerprint: string): string {
   return `operation-v1-${digest([coverage, scopeId, packageName, nativeId, fingerprint])}`;
+}
+
+function lifecycleAttemptId(stateGeneration: number, identities: readonly (readonly string[])[]): string {
+  return `attempt-v1-${digest([String(stateGeneration), ...identities.flat()])}`;
+}
+
+export function lifecycleAttemptIdForPlannedScopes(
+  stateGeneration: number,
+  scopes: readonly PlannedAttemptScope[],
+): string {
+  return lifecycleAttemptId(stateGeneration, scopes.map((planned) => plannedAttemptIdentity(
+    planned.scope.id,
+    planned.desired?.sourceFingerprint,
+    planned.desired?.packages.map((pkg) => pkg.packageId),
+    planned.selectorMode === 'retired' || planned.desired === null,
+  )));
+}
+
+type PlannedAttemptScope = {
+  readonly scope: { readonly id: string };
+  readonly selectorMode: 'all' | 'explicit' | 'retired';
+  readonly desired: { readonly sourceFingerprint: string; readonly packages: readonly { readonly packageId: string }[] } | null;
+};
+
+function plannedAttemptIdentity(
+  scopeId: string,
+  sourceFingerprint?: string,
+  packageIds?: readonly string[],
+  retired = false,
+): readonly string[] {
+  if (retired || sourceFingerprint === undefined || packageIds === undefined) return ['retire-source', scopeId];
+  return ['sync', scopeId, sourceFingerprint, ...packageIds];
 }
 
 function digest(parts: readonly string[]): string {
