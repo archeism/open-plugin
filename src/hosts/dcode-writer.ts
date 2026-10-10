@@ -5,7 +5,7 @@ import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome } 
 import type { PluginSource, ResolvedSource } from '../source';
 import { pinPluginMcpFiles } from '../mcp-write';
 import { CryptoHasher } from '../runtime';
-import { dcode, dcode0183ManagedProfile, dcodeCacheRoot, dcodeEnablementFile, dcodeMcpCandidates, dcodeRegistryFile, dcodeRoot, dcodeStateDir, dcodeVersionProfile, probeDcodeVersion } from './dcode';
+import { dcode, dcodeCacheRoot, dcodeEnablementFile, dcodeMcpCandidates, dcodeRegistryFile, dcodeRoot, dcodeStateDir, probeDcodeVersion } from './dcode';
 import { requirePackageSemantics } from '../capability-evidence';
 import { inventoryPackageSemantics } from '../semantic-inventory';
 
@@ -46,13 +46,13 @@ export const dcodeWriter: HostWriter = {
     const plugins = object(registry.plugins, 'registry plugins');
     const enabled = boolObject(enablement.enabledPlugins, 'enabledPlugins');
     const manifest = declaredManifest(plugin.dir, plugin.name);
-    const profile = dcodeVersionProfile(probeDcodeVersion());
+    const observation = probeDcodeVersion();
     requirePackageSemantics({
       host: 'dcode',
-      detectedVersion: profile.version ?? undefined,
+      detectedVersion: observation.kind === 'detected' ? observation.version : undefined,
       sourceType: resolved.isGit ? 'git' : 'local',
       operation: rowsFor(plugins[id]).length === 0 ? 'install' : 'update',
-      route: dcode0183ManagedProfile.route,
+      route: 'managed',
       inventory: inventoryPackageSemantics({ ...plugin, dir: plugin.dir, version: manifest.version }),
     });
     const prior = assessPrior(plugins[id], id, resolved.sourceUri, opts?.adoptExisting === true, plugin.name, manifest.version, plugin.dir);

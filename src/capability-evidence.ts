@@ -199,6 +199,10 @@ export function admitPackageSemanticsFromProfiles(
 
   if (profile === undefined) {
     const displayVersion = version ?? 'unknown/unparseable';
+    const proven = provenVersions(profiles, request);
+    const hint = version !== undefined && proven.length > 0 && !proven.includes(version)
+      ? `. ${request.host} needs to be ${proven.join(' or ')}`
+      : '';
     return {
       status: 'refused',
       profile: null,
@@ -206,7 +210,7 @@ export function admitPackageSemanticsFromProfiles(
       gaps: [createLifecycleReason(
         'capability',
         'capability.unverified',
-        `target '${request.host}' has no verified ${request.route} ${request.operation} profile for version '${displayVersion}' and ${request.sourceType} Sources`,
+        `target '${request.host}' has no verified ${request.route} ${request.operation} profile for version '${displayVersion}' and ${request.sourceType} Sources${hint}`,
         'profile',
         null,
       )],
@@ -251,6 +255,20 @@ export function admitPackageSemanticsFromProfiles(
     requirements,
     gaps,
   };
+}
+
+function provenVersions(
+  profiles: readonly CapabilityEvidenceProfile[],
+  request: PackageAdmissionRequest,
+): string[] {
+  const versions = profiles
+    .filter((candidate) =>
+      candidate.host === request.host
+      && candidate.sourceTypes.includes(request.sourceType)
+      && candidate.operations.includes(request.operation)
+      && candidate.route === request.route)
+    .map((candidate) => candidate.detectedVersion);
+  return [...new Set(versions)].sort();
 }
 
 export function requirePackageSemantics(request: PackageAdmissionRequest): PackageAdmission {

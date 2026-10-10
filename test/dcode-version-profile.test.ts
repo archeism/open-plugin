@@ -72,7 +72,7 @@ fi
 exit 91
 `;
 
-    for (const body of [undefined, versionScript('0.1.56'), '#!/bin/sh\nprintf \'%s\\n\' \'dcode 0.1.83\'\nexit 0\n']) {
+    for (const body of [undefined, '#!/bin/sh\nprintf \'%s\\n\' \'dcode 0.1.83\'\nexit 0\n']) {
       await withBinary(body, async (root) => {
         const item = incoming();
         const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
@@ -89,6 +89,22 @@ exit 91
         expect(existsSync(managedRoot(root))).toBe(false);
       });
     }
+
+    await withBinary(versionScript('0.1.56'), async (root) => {
+      const item = incoming();
+      const error = await failed(() => dcodeWriter.add(item.plugin, item.resolved));
+      expect(error instanceof PackageCapabilityError).toBe(true);
+      expect(error.message).toBe("target 'dcode' has no verified managed install profile for version '0.1.56' and local Sources. dcode needs to be 0.1.83");
+      expect((error as PackageCapabilityError).gaps.map(({ capabilityId, code, evidenceId }) => ({
+        capabilityId,
+        code,
+        evidenceId,
+      }))).toEqual([
+        { capabilityId: 'profile', code: 'capability.unverified', evidenceId: null },
+      ]);
+      expect(existsSync(registry(root))).toBe(false);
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
 
     await withBinary(MANAGED_BANNER, async (root) => {
       const ordinary = incoming();
