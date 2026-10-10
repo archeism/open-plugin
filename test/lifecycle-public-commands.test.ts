@@ -513,7 +513,7 @@ describe('public lifecycle commands', () => {
     });
   });
 
-  test('scenario 3 failures write nothing; two scope records load as corrupt state, and a failed version probe escapes as an uncaught protocol error', async () => {
+  test('scenario 3 failures write nothing, and two scope records load as corrupt state', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
       const source = harness.source('scenario-3', {
@@ -580,16 +580,23 @@ describe('public lifecycle commands', () => {
         ['sync', source, '--target', 'cursor', '--json'],
         { env: { ...env, OPEN_PLUGIN_CURSOR_BIN: broken.path } },
       );
+      const probeReport = parseLifecycleReport(JSON.parse(brokenProbe.stdout));
       expect({
         exitCode: brokenProbe.exitCode,
-        stdout: brokenProbe.stdout,
-        protocol: brokenProbe.stderr.includes('protocol.contradictory-outcome'),
+        stderr: brokenProbe.stderr,
+        action: probeReport.outcomes[0]?.action ?? null,
+        category: probeReport.outcomes[0]?.reason?.category ?? null,
+        mutationStarted: probeReport.summary.mutationStarted,
+        changed: probeReport.summary.changed,
         cursor: snapshotTree(cursorStore),
         state: readFileSync(statePath, 'utf8'),
       }).toEqual({
         exitCode: 1,
-        stdout: '',
-        protocol: true,
+        stderr: '',
+        action: 'retain-prior',
+        category: 'capability',
+        mutationStarted: false,
+        changed: false,
         cursor: cursorBefore,
         state: stateBefore,
       });
@@ -636,6 +643,90 @@ describe('public lifecycle commands', () => {
         garbage,
         'internal.corrupt-state',
       );
+    });
+  });
+
+  test('scenario 4 one cursor instance converges and the refused version leaves the other scope unpruned', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const staleJson = '{"name":"stale","version":"1.0.0","description":"stale"}\n';
+      const freshJson = '{"name":"fresh","version":"1.0.0","description":"fresh"}\n';
+      const installed = harness.source('scenario-4-installed', {
+        'kept/plugin.json': keptJson,
+        'kept/skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+        'stale/plugin.json': staleJson,
+        'stale/skills/stale/SKILL.md': '---\nname: stale\ndescription: stale\n---\n\nStale.\n',
+      });
+      const fresh = harness.source('scenario-4-fresh', {
+        'plugin.json': freshJson,
+        'skills/fresh/SKILL.md': '---\nname: fresh\ndescription: fresh\n---\n\nFresh.\n',
+      });
+      const accepted = harness.fakeNative('cursor-accepted', versionSteps(16));
+      const batch = harness.fakeNative('cursor-batch', [
+        { args: ['--version'], stdout: '2.4.0\n' },
+        { args: ['--version'], stdout: '1.2.3\n' },
+        { args: ['--version'], stdout: '2.4.0\n' },
+        { args: ['--version'], stdout: '2.4.0\n' },
+        { args: ['--version'], stdout: '2.4.0\n' },
+        { args: ['--version'], stdout: '2.4.0\n' },
+      ]);
+      const seeded = harness.run(
+        ['sync', installed, '--target', 'cursor', '--instance', 'two', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: accepted.path } },
+      );
+      expect(seeded.exitCode).toBe(0);
+      const instanceOne = join(harness.storePath('cursor'), 'instances', 'one');
+      const instanceTwo = join(harness.storePath('cursor'), 'instances', 'two');
+      const staleBefore = snapshotTree(instanceTwo).files['plugins/local/stale/plugin.json'];
+      expect(bytesToText(staleBefore ?? [])).toBe(staleJson);
+
+      const manifest = join(harness.source('scenario-4-manifest', {}), 'manifest.json');
+      writeFileSync(manifest, JSON.stringify({
+        schemaVersion: 1,
+        entries: [
+          {
+            operation: 'sync',
+            source: { kind: 'local', locator: fresh },
+            target: { kind: 'cursor', instance: 'one' },
+          },
+          {
+            operation: 'sync',
+            source: { kind: 'local', locator: installed },
+            target: { kind: 'cursor', instance: 'two' },
+            selectors: [{ package: 'kept', adoptExisting: false }],
+          },
+        ],
+      }));
+      const result = harness.run(
+        ['sync', '--manifest', manifest, '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: batch.path } },
+      );
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      const incomplete = report.plan.filter((operation) => operation.scope.target.instance === 'two');
+      const gap = report.outcomes.find((outcome) => outcome.scope.target.instance === 'two' && outcome.package === 'kept');
+      const converged = report.outcomes.find((outcome) => outcome.scope.target.instance === 'one' && outcome.package === 'fresh');
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        summary: report.summary.result,
+        failureCategory: report.summary.failureCategory,
+        converged: converged === undefined ? null : { result: converged.result, action: converged.action },
+        gap: gap === undefined ? null : { result: gap.result, action: gap.action, category: gap.reason?.category ?? null },
+        retirements: incomplete.filter((operation) => operation.action === 'retire-orphan').map((operation) => operation.package),
+        fresh: bytesToText(snapshotTree(instanceOne).files['plugins/local/fresh/plugin.json'] ?? []),
+        stale: snapshotTree(instanceTwo).files['plugins/local/stale/plugin.json'],
+      }).toEqual({
+        exitCode: 1,
+        stderr: '',
+        summary: 'incomplete',
+        failureCategory: 'capability',
+        converged: { result: 'succeeded', action: 'install' },
+        gap: { result: 'failed', action: 'retain-prior', category: 'capability' },
+        retirements: [],
+        fresh: freshJson,
+        stale: staleBefore,
+      });
     });
   });
 
