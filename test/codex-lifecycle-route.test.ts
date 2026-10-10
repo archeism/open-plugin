@@ -361,6 +361,37 @@ describe('codex native marketplace upgrade route', () => {
     });
   });
 
+  test('a pinned update does not take the native marketplace upgrade', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home);
+      const pins = createResolvedLifecyclePins([{ server: 'demo', executable: join(home, 'bin', 'codex') }]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('managed');
+      await codexLifecycle.apply(prepared);
+      expect(readFileSync(join(home, 'codex-invocations.log'), 'utf8').includes('marketplace upgrade')).toBe(false);
+    });
+  });
+
+  test('an unmanaged sibling stays unmanaged after a native upgrade', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home);
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId, otherId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      installPlugin(home, 'other-plugin', otherId, true);
+      writeFiles(home, { '.codex/upgrade-mode': 'drop-prior-sibling\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+      const sibling = join(home, '.codex/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json');
+      expect(existsSync(sibling)).toBe(false);
+      const observed = await codexLifecycle.observeTarget(target);
+      expect(observed.installations.find((installation) => installation.nativeId === otherId)?.ownership.kind).toBe('unmanaged');
+    });
+  });
+
   test('a native upgrade keeps a sibling ownership fingerprint from before the rewrite', async () => {
     await withCodexBinary(async (home) => {
       const snapshot = frozenSnapshot(home);
@@ -452,6 +483,16 @@ if [ "$mode" = "rewrite-new" ]; then
 fi
 if [ "$mode" = "strip-sibling" ]; then
   rm -f "$CODEX_HOME/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json"
+  printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
+  exit 0
+fi
+if [ "$mode" = "drop-prior-sibling" ]; then
+  rm -f "$CODEX_HOME/plugins/cache/demo-market/other-plugin/1.0.0/.plgnz-install.json"
+  find "$CODEX_HOME/.plgnz-rollback" -name '.plgnz-install.json' | while read -r marker; do
+    if grep -q 'other-plugin@demo-market' "$marker"; then
+      rm -f "$marker"
+    fi
+  done
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi
