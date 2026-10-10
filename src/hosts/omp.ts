@@ -154,3 +154,119 @@ export const omp: HostReader = {
     return entries;
   },
 };
+
+export type OmpUpgradeTarget = {
+  readonly marketplace: string;
+  readonly pluginId: string;
+};
+
+export type OmpFrozenCatalogBinding = {
+  readonly marketplace: string;
+  readonly pluginId: string;
+  readonly immutableRevision: string;
+};
+
+export type OmpSynchronousReadbackCapability = {
+  readonly synchronous: true;
+};
+
+export type OmpRollbackCapability = {
+  readonly restoresPriorActivation: true;
+};
+
+export type OmpRetirementSafety =
+  | { readonly kind: 'operation-specific'; readonly preserves: readonly ['disabled', 'features', 'settings'] }
+  | { readonly kind: 'marketplace-removal' };
+
+export type OmpNativeUpgradeCandidate =
+  | {
+      readonly kind: 'exact-package';
+      readonly target: OmpUpgradeTarget;
+      readonly catalog: OmpFrozenCatalogBinding | null;
+      readonly readback: OmpSynchronousReadbackCapability | null;
+      readonly rollback: OmpRollbackCapability | null;
+      readonly retirement: OmpRetirementSafety | null;
+    }
+  | { readonly kind: 'all-plugins' };
+
+export type OmpNativeUpgradeGap =
+  | 'all-plugin-upgrade'
+  | 'frozen-catalog-binding'
+  | 'synchronous-readback'
+  | 'rollback'
+  | 'operation-specific-retirement';
+
+export type OmpNativeUpgradeDecision =
+  | { readonly status: 'eligible'; readonly route: 'native'; readonly mode: 'exact-package' }
+  | {
+      readonly status: 'ineligible';
+      readonly route: 'managed';
+      readonly scope: 'unbounded' | 'unavailable';
+      readonly missing: readonly OmpNativeUpgradeGap[];
+    };
+
+export type OmpNativeUpgradeScope =
+  | { readonly kind: 'bounded'; readonly mode: 'exact-package'; readonly affectedNativeIds: readonly [string] }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'unbounded' };
+
+export type OmpNativeUpgradeProjection =
+  | { readonly kind: 'equivalent'; readonly proofId: 'omp-exact-package-upgrade' }
+  | { readonly kind: 'requires-managed'; readonly reasonId: string };
+
+const preservedRetirement = ['disabled', 'features', 'settings'] as const;
+
+export function selectOmpNativeUpgrade(candidate: OmpNativeUpgradeCandidate): OmpNativeUpgradeDecision {
+  switch (candidate.kind) {
+    case 'all-plugins':
+      return { status: 'ineligible', route: 'managed', scope: 'unbounded', missing: ['all-plugin-upgrade'] };
+    case 'exact-package':
+      return exactPackageDecision(candidate);
+    default: {
+      const unreachable: never = candidate;
+      throw new Error(`OMP native upgrade candidate kind is unknown: ${String((unreachable as { kind?: unknown }).kind)}`);
+    }
+  }
+}
+
+export function ompUpgradeMutationScope(candidate: OmpNativeUpgradeCandidate, nativeId: string): OmpNativeUpgradeScope {
+  const decision = selectOmpNativeUpgrade(candidate);
+  if (decision.status === 'eligible') return { kind: 'bounded', mode: 'exact-package', affectedNativeIds: [nativeId] };
+  if (decision.scope === 'unbounded') return { kind: 'unbounded' };
+  return { kind: 'unavailable' };
+}
+
+export function ompUpgradeProjection(candidate: OmpNativeUpgradeCandidate): OmpNativeUpgradeProjection {
+  const decision = selectOmpNativeUpgrade(candidate);
+  if (decision.status === 'eligible') return { kind: 'equivalent', proofId: 'omp-exact-package-upgrade' };
+  return { kind: 'requires-managed', reasonId: decision.missing.join('+') };
+}
+
+function exactPackageDecision(candidate: Extract<OmpNativeUpgradeCandidate, { kind: 'exact-package' }>): OmpNativeUpgradeDecision {
+  const missing: OmpNativeUpgradeGap[] = [];
+  if (!catalogBindsTarget(candidate.target, candidate.catalog)) missing.push('frozen-catalog-binding');
+  if (candidate.readback?.synchronous !== true) missing.push('synchronous-readback');
+  if (candidate.rollback?.restoresPriorActivation !== true) missing.push('rollback');
+  if (!isOperationSpecificRetirement(candidate.retirement)) missing.push('operation-specific-retirement');
+  if (missing.length > 0) return { status: 'ineligible', route: 'managed', scope: 'unavailable', missing };
+  return { status: 'eligible', route: 'native', mode: 'exact-package' };
+}
+
+function catalogBindsTarget(target: OmpUpgradeTarget, catalog: OmpFrozenCatalogBinding | null): boolean {
+  if (!isBareIdentity(target.marketplace) || !isBareIdentity(target.pluginId) || catalog === null) return false;
+  return catalog.marketplace === target.marketplace
+    && catalog.pluginId === target.pluginId
+    && isBareIdentity(catalog.marketplace)
+    && isBareIdentity(catalog.pluginId)
+    && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(catalog.immutableRevision);
+}
+
+function isOperationSpecificRetirement(retirement: OmpRetirementSafety | null): boolean {
+  return retirement?.kind === 'operation-specific'
+    && retirement.preserves.length === preservedRetirement.length
+    && preservedRetirement.every((field, index) => retirement.preserves[index] === field);
+}
+
+function isBareIdentity(value: string): boolean {
+  return value.trim() === value && value.length > 0 && !value.includes('@') && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
