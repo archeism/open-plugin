@@ -23,7 +23,7 @@ import { cursorRoot, homeRoot } from '../paths';
 import { CryptoHasher, spawnSync } from '../runtime';
 import type { SourceType } from '../semantic-inventory';
 import type { PluginSource, ResolvedSource } from '../source';
-import { cursor, localDir, mcpCandidates } from './cursor';
+import { cursor, cursorInstanceRoot, localDir, mcpCandidates } from './cursor';
 
 const OWNERSHIP = '.plgnz-install.json';
 const CURSOR_MANAGED_VERSION = '2.4.0';
@@ -398,7 +398,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
   },
   async stageActivation(request) {
     assertSafeIdentity(request.snapshot.nativeId);
-    const preparation = lifecycleDir('prepare', request.snapshot.attemptId, request.snapshot.operationId);
+    const preparation = lifecycleDir(request.snapshot.target.instance, 'prepare', request.snapshot.attemptId, request.snapshot.operationId);
     const stagingRoot = resolve(join(preparation, 'stage'));
     rmSync(stagingRoot, { recursive: true, force: true });
     mkdirSync(preparation, { recursive: true });
@@ -421,7 +421,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
       nativeId: projection.nativeId,
       routeWhenAbsent: 'none',
     });
-    const active = resolve(managedPluginDir(projection.nativeId));
+    const active = resolve(managedPluginDir(projection.target.instance, projection.nativeId));
     return {
       prior,
       expected: {
@@ -439,7 +439,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
         contentRoots: [{ label: 'local', path: active, fingerprint: projectedFingerprint }],
         retention: prior.retention,
       },
-      rollbackReference: captureRollback(projection.attemptId, projection.operationId, projection.nativeId, prior),
+      rollbackReference: captureRollback(projection.target.instance, projection.attemptId, projection.operationId, projection.nativeId, prior),
       rollbackCoverageOperationIds: projection.affectedOperationIds,
     };
   },
@@ -457,19 +457,19 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
     });
     return {
       prior,
-      rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId, prior),
+      rollbackReference: captureRollback(request.activation.target.instance, request.attemptId, request.operationId, request.activation.nativeId, prior),
       rollbackCoverageOperationIds: request.selection.affectedOperationIds,
       transition: RELOAD_REQUIRED,
     };
   },
   async apply(prepared) {
     const handle = prepared.handle;
-    const target = managedPluginDir(handle.nativeId);
+    const target = managedPluginDir(handle.target.instance, handle.nativeId);
     refuseForeignScope(target, handle.scopeId, handle.nativeId);
     if (existsSync(target) && fingerprintTree(target) === fingerprintTree(prepared.stagingRoot)) {
       return { receiptId: receipt('apply', handle), changed: false };
     }
-    const root = localDir();
+    const root = localDir(handle.target.instance);
     mkdirSync(root, { recursive: true });
     const scratch = join(root, `.plgnz-cursor-stage-${operationKey(handle.attemptId, handle.operationId)}`);
     rmSync(scratch, { recursive: true, force: true });
@@ -486,7 +486,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
   },
   async retire(prepared) {
     const handle = prepared.handle;
-    const target = managedPluginDir(handle.nativeId);
+    const target = managedPluginDir(handle.target.instance, handle.nativeId);
     if (!existsSync(target)) return { receiptId: receipt('retire', handle), changed: false };
     refuseForeignScope(target, handle.scopeId, handle.nativeId);
     rmSync(target, { recursive: true, force: true });
@@ -505,8 +505,8 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
   async rollback(handle) {
     const priorPath = join(handle.rollbackReference, 'prior.json');
     const prior = JSON.parse(readFileSync(priorPath, 'utf8')) as LifecycleReadbackData;
-    const root = localDir();
-    const target = managedPluginDir(handle.nativeId);
+    const root = localDir(handle.target.instance);
+    const target = managedPluginDir(handle.target.instance, handle.nativeId);
     const backup = join(handle.rollbackReference, 'active');
     const restore = prior.presence === 'present' && existsSync(backup);
     if (!restore) {
@@ -531,8 +531,8 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
     return { receiptId: receipt('rollback', handle), changed: true };
   },
   async cleanup(reference: CleanupReference, _disposition: CleanupDisposition) {
-    rmSync(lifecycleDir('prepare', reference.attemptId, reference.operationId), { recursive: true, force: true });
-    rmSync(lifecycleDir('rollback', reference.attemptId, reference.operationId), { recursive: true, force: true });
+    rmSync(lifecycleDir(reference.target.instance, 'prepare', reference.attemptId, reference.operationId), { recursive: true, force: true });
+    rmSync(lifecycleDir(reference.target.instance, 'rollback', reference.attemptId, reference.operationId), { recursive: true, force: true });
     return { cleanupId: `cleanup:${reference.attemptId}:${reference.operationId}`, completed: true };
   },
 };
@@ -599,7 +599,7 @@ function decodeStdout(bytes: Uint8Array): string {
 }
 
 function inventoryLocalStore(target: LifecycleTargetIdentity): TargetInventoryData {
-  const root = localDir();
+  const root = localDir(target.instance);
   if (!existsSync(root)) return { target, installations: [] };
   const installations: TargetInventoryData['installations'][number][] = [];
   for (const entry of readdirSync(root)) {
@@ -743,11 +743,12 @@ function projectReadback(identity: {
   nativeId: string;
   routeWhenAbsent: LifecycleReadbackData['route'];
 }): LifecycleReadbackData {
+  const instance = identity.target.instance;
   const retention = {
-    pluginData: retainedResource(identity.nativeId, 'data'),
-    inactiveMetadata: retainedResource(identity.nativeId, 'metadata'),
+    pluginData: retainedResource(instance, identity.nativeId, 'data'),
+    inactiveMetadata: retainedResource(instance, identity.nativeId, 'metadata'),
   };
-  const dir = join(localDir(), identity.nativeId);
+  const dir = join(localDir(instance), identity.nativeId);
   if (!existsSync(dir)) {
     return {
       adapterId: identity.adapterId,
@@ -783,34 +784,34 @@ function projectReadback(identity: {
   };
 }
 
-function retainedResource(nativeId: string, kind: 'data' | 'metadata'): LifecycleReadbackData['retention']['pluginData'] {
-  const dir = retentionDir(nativeId, kind);
+function retainedResource(instance: string, nativeId: string, kind: 'data' | 'metadata'): LifecycleReadbackData['retention']['pluginData'] {
+  const dir = retentionDir(instance, nativeId, kind);
   if (!existsSync(dir)) return { state: 'absent', fingerprint: null };
   const stat = lstatSync(dir);
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Cursor retained ${kind} is not a directory: ${dir}`);
   return { state: 'present', fingerprint: fingerprintTree(dir) };
 }
 
-function retentionDir(nativeId: string, kind: 'data' | 'metadata'): string {
+function retentionDir(instance: string, nativeId: string, kind: 'data' | 'metadata'): string {
   assertSafeIdentity(nativeId);
-  const dir = resolve(join(cursorRoot(), 'plugins', 'retained', nativeId, kind));
+  const dir = resolve(join(cursorInstanceRoot(instance), 'plugins', 'retained', nativeId, kind));
   const root = resolve(cursorRoot());
   if (dir !== root && !dir.startsWith(`${root}/`)) throw new Error(`Cursor retention path escapes its store: ${dir}`);
   return dir;
 }
 
-function captureRollback(attemptId: string, operationId: string, nativeId: string, prior: LifecycleReadbackData): string {
-  const reference = lifecycleDir('rollback', attemptId, operationId);
+function captureRollback(instance: string, attemptId: string, operationId: string, nativeId: string, prior: LifecycleReadbackData): string {
+  const reference = lifecycleDir(instance, 'rollback', attemptId, operationId);
   rmSync(reference, { recursive: true, force: true });
   mkdirSync(reference, { recursive: true });
-  const active = join(localDir(), nativeId);
+  const active = join(localDir(instance), nativeId);
   if (existsSync(active)) cpSync(active, join(reference, 'active'), { recursive: true });
   writeFileSync(join(reference, 'prior.json'), `${JSON.stringify(prior)}\n`);
   return reference;
 }
 
-function lifecycleDir(kind: 'prepare' | 'rollback', attemptId: string, operationId: string): string {
-  return resolve(join(cursorRoot(), 'plugins', '.plgnz-lifecycle', kind, operationKey(attemptId, operationId)));
+function lifecycleDir(instance: string, kind: 'prepare' | 'rollback', attemptId: string, operationId: string): string {
+  return resolve(join(cursorInstanceRoot(instance), 'plugins', '.plgnz-lifecycle', kind, operationKey(attemptId, operationId)));
 }
 
 function operationKey(attemptId: string, operationId: string): string {
@@ -846,9 +847,9 @@ function refuseForeignScope(target: string, scopeId: string, nativeId: string): 
   }
 }
 
-function managedPluginDir(nativeId: string): string {
+function managedPluginDir(instance: string, nativeId: string): string {
   assertSafeIdentity(nativeId);
-  const root = localDir();
+  const root = localDir(instance);
   const target = join(root, nativeId);
   assertManagedDirectory(root, target);
   return target;

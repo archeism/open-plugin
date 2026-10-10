@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
-import { bytesToText, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
+import { bytesToText, snapshotTree, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
 import { parseLifecycleReport } from '../src/lifecycle-report';
 
 describe('public lifecycle commands', () => {
@@ -289,30 +289,27 @@ describe('public lifecycle commands', () => {
       harness.writeHome({ '.cursor/.keep': '' });
       const alphaJson = '{"name":"alpha","version":"1.0.0","description":"A"}\n';
       const betaJson = '{"name":"beta","version":"1.0.0","description":"B"}\n';
-      const gammaJson = '{"name":"gamma","version":"1.0.0","description":"instance two"}\n';
       const source = harness.source('scenario-1', {
         'alpha/plugin.json': alphaJson,
         'alpha/skills/alpha/SKILL.md': '---\nname: alpha\ndescription: A\n---\n\nAlpha.\n',
         'beta/plugin.json': betaJson,
         'beta/skills/beta/SKILL.md': '---\nname: beta\ndescription: B\n---\n\nBeta.\n',
       });
-      const otherSource = harness.source('scenario-1-two', {
-        'plugin.json': gammaJson,
-        'skills/gamma/SKILL.md': '---\nname: gamma\ndescription: instance two\n---\n\nGamma.\n',
-      });
-      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const cursor = harness.fakeNative('cursor', versionSteps(48));
       const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const instanceOne = join(harness.storePath('cursor'), 'instances', 'one');
+      const instanceTwo = join(harness.storePath('cursor'), 'instances', 'two');
 
       const installed = harness.run(['sync', source, '--target', 'cursor', '--instance', 'one', '--json'], { env });
-      const other = harness.run(['sync', otherSource, '--target', 'cursor', '--instance', 'two', '--json'], { env });
+      const other = harness.run(['sync', source, '--target', 'cursor', '--instance', 'two', '--json'], { env });
       expect(installed.exitCode).toBe(0);
       expect(other.exitCode).toBe(0);
-      const alphaBefore = installed.stores.cursor.after.files['plugins/local/alpha/plugin.json'];
-      const betaBefore = installed.stores.cursor.after.files['plugins/local/beta/plugin.json'];
-      const gammaBefore = other.stores.cursor.after.files['plugins/local/gamma/plugin.json'];
-      expect(bytesToText(alphaBefore ?? [])).toBe(alphaJson);
-      expect(bytesToText(betaBefore ?? [])).toBe(betaJson);
-      expect(bytesToText(gammaBefore ?? [])).toBe(gammaJson);
+      const oneBefore = snapshotTree(instanceOne);
+      const twoBefore = snapshotTree(instanceTwo);
+      expect(bytesToText(oneBefore.files['plugins/local/alpha/plugin.json'] ?? [])).toBe(alphaJson);
+      expect(bytesToText(oneBefore.files['plugins/local/beta/plugin.json'] ?? [])).toBe(betaJson);
+      expect(bytesToText(twoBefore.files['plugins/local/alpha/plugin.json'] ?? [])).toBe(alphaJson);
+      expect(bytesToText(twoBefore.files['plugins/local/beta/plugin.json'] ?? [])).toBe(betaJson);
 
       const preview = harness.run(
         ['sync', source, '--target', 'cursor', '--instance', 'one', '--plugin', 'alpha', '--dry-run', '--json'],
@@ -354,6 +351,8 @@ describe('public lifecycle commands', () => {
         cursorUntouched: preview.stores.cursor.before,
         cursorAfter: preview.stores.cursor.before,
       });
+      expect(snapshotTree(instanceTwo)).toEqual(twoBefore);
+      expect(snapshotTree(instanceOne)).toEqual(oneBefore);
 
       const applied = harness.run(
         ['sync', source, '--target', 'cursor', '--instance', 'one', '--plugin', 'alpha', '--json'],
@@ -368,16 +367,16 @@ describe('public lifecycle commands', () => {
           result: outcome.result,
           resourceState: outcome.resourceState,
         })),
-        alpha: bytesToText(applied.stores.cursor.after.files['plugins/local/alpha/plugin.json'] ?? []),
-        betaGone: applied.stores.cursor.after.files['plugins/local/beta/plugin.json'] === undefined,
-        gamma: bytesToText(applied.stores.cursor.after.files['plugins/local/gamma/plugin.json'] ?? []),
+        alpha: bytesToText(snapshotTree(instanceOne).files['plugins/local/alpha/plugin.json'] ?? []),
+        betaGone: snapshotTree(instanceOne).files['plugins/local/beta/plugin.json'] === undefined,
+        instanceTwo: snapshotTree(instanceTwo),
       }).toEqual({
         exitCode: 0,
         stderr: '',
         retirements: [{ package: 'beta', result: 'succeeded', resourceState: 'absent' }],
         alpha: alphaJson,
         betaGone: true,
-        gamma: gammaJson,
+        instanceTwo: twoBefore,
       });
     });
   });

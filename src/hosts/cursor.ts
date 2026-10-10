@@ -46,8 +46,12 @@ function parseCursorTarget(value: unknown, label: string): PersistedTargetIdenti
   return { kind: 'cursor', instance: target.instance };
 }
 
-export function localDir(): string {
-  return join(cursorRoot(), 'plugins', 'local');
+export function cursorInstanceRoot(instance = 'default'): string {
+  return instance === 'default' ? cursorRoot() : join(cursorRoot(), 'instances', instance);
+}
+
+export function localDir(instance = 'default'): string {
+  return join(cursorInstanceRoot(instance), 'plugins', 'local');
 }
 
 /** Where a plugin copy may declare MCP servers, in cursor's priority order. */
