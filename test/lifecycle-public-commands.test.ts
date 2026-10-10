@@ -1353,6 +1353,24 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 18 doctor stays read-only; test/doctor-imports.test.ts', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const result = harness.run(['doctor']);
+      const after = Object.fromEntries(Object.entries(result.stores).map(([host, change]) => [host, change.after]));
+      const before = Object.fromEntries(Object.entries(result.stores).map(([host, change]) => [host, change.before]));
+      expect({
+        stderr: result.stderr,
+        stores: after,
+        state: result.state.after,
+      }).toEqual({
+        stderr: '',
+        stores: before,
+        state: result.state.before,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
