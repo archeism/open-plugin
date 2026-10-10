@@ -301,12 +301,33 @@ class Ledger {
     };
     this.state = {
       ...this.state,
-      scopes: plan.scopes.map((planned) => this.scope(planned, plan.attemptId)),
+      scopes: this.mergedScopes(plan, plan.attemptId),
       attempts: existing === undefined
         ? [...this.state.attempts, attempt]
         : this.state.attempts.map((row) => row.id === attempt.id ? attempt : row),
     };
     this.save();
+  }
+
+  private mergedScopes(plan: FrozenPlan, attemptId: string): DeploymentScopeRecord[] {
+    const replacements = new Map(plan.scopes.map((planned) => [planned.scope.id, this.scope(planned, attemptId)]));
+    const merged: DeploymentScopeRecord[] = [];
+    const replaced = new Set<string>();
+    for (const existing of this.state.scopes) {
+      const next = replacements.get(existing.id);
+      if (next === undefined) {
+        merged.push(existing);
+        continue;
+      }
+      merged.push(next);
+      replaced.add(existing.id);
+    }
+    for (const planned of plan.scopes) {
+      if (replaced.has(planned.scope.id)) continue;
+      const created = replacements.get(planned.scope.id);
+      if (created !== undefined) merged.push(created);
+    }
+    return merged;
   }
 
   private scope(planned: FrozenPlan['scopes'][number], attemptId: string): DeploymentScopeRecord {

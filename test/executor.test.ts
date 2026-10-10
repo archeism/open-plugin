@@ -3,13 +3,15 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCapabilityEvidenceProfile, type CapabilityStatus } from '../src/capability-evidence';
+import { createDeploymentScopeIdentity } from '../src/deployment-scope';
 import { executeLifecycle } from '../src/executor';
 import { exitCodeForLifecycleReport } from '../src/lifecycle-report';
 import { stateFile } from '../src/paths';
 import { planLifecycle, type LifecyclePlan, type PlannerHost } from '../src/planner';
 import { PACKAGE_SEMANTICS, type CapabilityOperation, type PackageSemantic } from '../src/semantic-inventory';
 import type { PluginSource } from '../src/source';
-import { readLifecycleState } from '../src/state';
+import { readLifecycleState, type DeploymentScopeRecord } from '../src/state';
+import { writeLifecycleState } from '../src/state-write';
 import { parseSyncManifest, type SyncManifest } from '../src/sync-manifest';
 import { FakeLifecycleHost } from './fake-lifecycle-adapter';
 
@@ -120,6 +122,55 @@ describe('lifecycle executor', () => {
       ]);
       expect(exitCodeForLifecycleReport(executed.report)).toBe(1);
       expect(stateFile().startsWith(home)).toBe(true);
+    });
+  });
+
+  test('an install journal keeps an unrelated scope already on disk', async () => {
+    const root = temp('unrelated-scope');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const unrelatedRoot = realpathSync(mkdirTemp(join(root, 'unrelated')));
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+    codex.fake.failPhase = 'stage';
+    const createdAt = '2020-01-01T00:00:00.000Z';
+    const source = { kind: 'local' as const, locator: unrelatedRoot };
+    const target = { kind: 'hermes', instance: 'default' };
+    const unrelated: DeploymentScopeRecord = {
+      id: createDeploymentScopeIdentity(source, target).id,
+      source,
+      target,
+      authority: 'legacy-import',
+      lifecycle: 'active',
+      selectorMode: 'legacy-unknown',
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    await withHome(home, async () => {
+      writeLifecycleState({
+        version: 2,
+        stateGeneration: 1,
+        scopes: [unrelated],
+        activations: [],
+        attempts: [],
+        tombstones: [],
+      }, { globalPreflight: 'succeeded' });
+      const plan = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+
+      await executeLifecycle({ plan, hosts: [codex.planner], now });
+
+      const loaded = readLifecycleState();
+      const kept = loaded.state.scopes.find((scope) => scope.id === unrelated.id);
+      expect(kept).toEqual(unrelated);
+      expect(kept?.createdAt).toBe(createdAt);
+      expect(kept?.authority).toBe('legacy-import');
+      expect(loaded.state.attempts.some((attempt) => attempt.id === plan.attemptId)).toBe(true);
     });
   });
 });
