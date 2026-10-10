@@ -16,6 +16,8 @@ import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { spawnSync, which } from '../runtime';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+declare const TextDecoder: any;
+
 export const dcodeTargetProfile = singleInstanceTargetProfile('dcode');
 
 export const dcode0183ManagedProfile = {
@@ -74,7 +76,7 @@ export function probeDcodeVersion(): DcodeVersionObservation {
       timeout: 10_000,
     });
     if (result.exitCode !== 0) return { kind: 'unparseable' };
-    stdout = decode(result.stdout);
+    stdout = new TextDecoder().decode(result.stdout);
   } catch {
     return { kind: 'unparseable' };
   }
@@ -82,12 +84,6 @@ export function probeDcodeVersion(): DcodeVersionObservation {
   const version = line === undefined ? undefined : DCODE_VERSION_LINE.exec(line)?.[1];
   if (version === undefined) return { kind: 'unparseable' };
   return { kind: 'detected', version, probeId: `dcode:${version}` };
-}
-
-function decode(bytes: Uint8Array): string {
-  let text = '';
-  for (const byte of bytes) text += String.fromCharCode(byte);
-  return text;
 }
 
 function dcodeBinary(): string | undefined {
