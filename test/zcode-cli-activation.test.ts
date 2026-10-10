@@ -292,6 +292,26 @@ describe('ZCode CLI native activation', () => {
     });
   });
 
+  test('rolling back a fresh install drops that marketplace registration', async () => {
+    await withHome(async (home, cliRoot) => {
+      writePackage(join(home, 'package'));
+      const installed = await activate(home, 'install', 'op-install-demo', 'attempt-install-demo');
+      await zcodeCliLifecycle.apply(installed.prepared);
+      const marketsPath = join(cliRoot, 'plugins', 'known_marketplaces.json');
+      const markets = JSON.parse(readFileSync(marketsPath, 'utf8')) as Record<string, string>;
+      expect(markets['plgnz-activation01']).toContain('plgnz-marketplaces');
+      markets['other-market'] = '/kept/other-market';
+      writeFileSync(marketsPath, JSON.stringify(markets));
+      await zcodeCliLifecycle.rollback(installed.prepared.handle);
+      zcodeCliLifecycle.verifyRollback(installed.prepared.handle, await zcodeCliLifecycle.readback(installed.prepared.handle));
+      const after = JSON.parse(readFileSync(marketsPath, 'utf8')) as Record<string, string>;
+      expect(Object.hasOwn(after, 'plgnz-activation01')).toBe(false);
+      expect(after['other-market']).toBe('/kept/other-market');
+      const registry = JSON.parse(readFileSync(join(cliRoot, 'plugins', 'installed_plugins.json'), 'utf8')) as { plugins: Array<{ id: string }> };
+      expect(registry.plugins.some((row) => row.id === NATIVE)).toBe(false);
+    });
+  });
+
   test('a failed update rolls back to the previous activation', async () => {
     await withHome(async (home) => {
       const packageRoot = join(home, 'package');
