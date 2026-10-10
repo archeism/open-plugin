@@ -1095,6 +1095,54 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 13 applied sync is managed and a second sync is unchanged; a readback mismatch rolls the mutation back; cleanup failure after a confirmed activation keeps that activation and records pending cleanup; a generation move before activation confirmation rolls the mutation back', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const pluginJson = '{"name":"alpha","version":"1.0.0","description":"alpha"}\n';
+      const source = harness.source('scenario-13', {
+        'plugin.json': pluginJson,
+        'skills/alpha/SKILL.md': '---\nname: alpha\ndescription: alpha\n---\n\nAlpha.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const installedPath = 'plugins/local/alpha/plugin.json';
+
+      const applied = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const appliedReport = parseLifecycleReport(JSON.parse(applied.stdout));
+      const appliedOutcome = appliedReport.outcomes[0];
+      expect({
+        exitCode: applied.exitCode,
+        stderr: applied.stderr,
+        route: appliedOutcome?.route ?? null,
+        installed: bytesToText(snapshotTree(cursorStore).files[installedPath] ?? []),
+        source: readFileSync(join(source, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        route: 'managed',
+        installed: pluginJson,
+        source: pluginJson,
+      });
+
+      const again = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const againReport = parseLifecycleReport(JSON.parse(again.stdout));
+      expect({
+        exitCode: again.exitCode,
+        stderr: again.stderr,
+        action: againReport.outcomes[0]?.action ?? null,
+        result: againReport.outcomes[0]?.result ?? null,
+        store: again.stores.cursor.after,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        action: 'unchanged',
+        result: 'succeeded',
+        store: again.stores.cursor.before,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
