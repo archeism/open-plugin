@@ -56,7 +56,7 @@ if (args[0] === 'plugins' && args[1] === 'marketplace' && args[2] === 'update') 
   if (typeof markets[args[3]] !== 'string') process.exit(92);
   process.exit(0);
 }
-if (args[0] === 'plugins' && (args[1] === 'install' || args[1] === 'update')) {
+  if (args[0] === 'plugins' && (args[1] === 'install' || args[1] === 'update')) {
   const id = args[2];
   const at = id.indexOf('@');
   const name = id.slice(0, at);
@@ -64,6 +64,10 @@ if (args[0] === 'plugins' && (args[1] === 'install' || args[1] === 'update')) {
   const markets = readJson(marketsPath, {});
   const marketPath = markets[market];
   if (typeof marketPath !== 'string') process.exit(93);
+  if (args[1] === 'install' && existsSync(join(marketPath, 'FAIL_INSTALL'))) {
+    console.error('plugin install failed');
+    process.exit(1);
+  }
   if (args[1] === 'update' && existsSync(join(marketPath, 'FAIL_UPDATE'))) {
     console.error('plugin update failed');
     process.exit(1);
@@ -309,6 +313,26 @@ describe('ZCode CLI native activation', () => {
       expect(after['other-market']).toBe('/kept/other-market');
       const registry = JSON.parse(readFileSync(join(cliRoot, 'plugins', 'installed_plugins.json'), 'utf8')) as { plugins: Array<{ id: string }> };
       expect(registry.plugins.some((row) => row.id === NATIVE)).toBe(false);
+    });
+  });
+
+  test('a failed fresh install drops the marketplace registration', async () => {
+    await withHome(async (home, cliRoot) => {
+      writePackage(join(home, 'package'));
+      const installed = await activate(home, 'install', 'op-install-fail', 'attempt-install-fail');
+      writeFileSync(join(installed.prepared.stagingRoot, '..', '..', 'FAIL_INSTALL'), '1\n');
+      let failure: Error | undefined;
+      try {
+        await zcodeCliLifecycle.apply(installed.prepared);
+      } catch (error) {
+        failure = error as Error;
+      }
+      expect(failure?.message ?? '').toContain('plugins install');
+      const log = readFileSync(join(cliRoot, 'cli-invocations.log'), 'utf8');
+      expect(log.includes('plugins marketplace add')).toBe(true);
+      const marketsPath = join(cliRoot, 'plugins', 'known_marketplaces.json');
+      const after = existsSync(marketsPath) ? JSON.parse(readFileSync(marketsPath, 'utf8')) as Record<string, unknown> : {};
+      expect(Object.hasOwn(after, 'plgnz-activation01')).toBe(false);
     });
   });
 

@@ -624,10 +624,59 @@ function recordTree(dir: string, name: string, path: string): void {
   if (existed) cpSync(path, join(dir, name), { recursive: true });
 }
 
+function knownMarketplacesFile(): string {
+  return join(zcodeCliRoot(), 'plugins', 'known_marketplaces.json');
+}
+
+function readKnownMarketplaces(): Record<string, unknown> {
+  const file = knownMarketplacesFile();
+  if (!existsSync(file)) return {};
+  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!isObject(value)) throw new Error(`Official ZCode marketplace registry is unsupported: ${file}`);
+  return value;
+}
+
+function writeKnownMarketplaces(markets: Record<string, unknown>): void {
+  const file = knownMarketplacesFile();
+  if (Object.keys(markets).length === 0) {
+    rmSync(file, { force: true });
+    return;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(markets, null, 2)}\n`);
+}
+
+function recordMarketplaceEntry(dir: string, market: string): void {
+  const flag = join(dir, 'marketplace-entry.txt');
+  if (existsSync(flag)) return;
+  const markets = readKnownMarketplaces();
+  const present = Object.hasOwn(markets, market);
+  writeFileSync(flag, present ? '1' : '0');
+  if (present) writeFileSync(join(dir, 'marketplace-entry.json'), JSON.stringify(markets[market]));
+}
+
+function restoreMarketplaceEntry(dir: string, market: string): void {
+  const flag = join(dir, 'marketplace-entry.txt');
+  if (!existsSync(flag)) return;
+  const markets = readKnownMarketplaces();
+  if (readFileSync(flag, 'utf8') !== '1') {
+    if (!Object.hasOwn(markets, market)) return;
+    delete markets[market];
+    writeKnownMarketplaces(markets);
+    return;
+  }
+  const savedFile = join(dir, 'marketplace-entry.json');
+  if (!existsSync(savedFile)) throw new Error('ZCode rollback marketplace entry is missing');
+  const saved: unknown = JSON.parse(readFileSync(savedFile, 'utf8'));
+  markets[market] = saved;
+  writeKnownMarketplaces(markets);
+}
+
 function activationSnapshot(attemptId: string, operationId: string, nativeId: string, marketplace: string, resources: string): string {
   const dir = retirementSnapshot(attemptId, operationId, nativeId);
   if (!existsSync(join(dir, 'marketplace-path.txt'))) recordTree(dir, 'marketplace', marketplace);
   if (!existsSync(join(dir, 'resources-path.txt'))) recordTree(dir, 'resources', resources);
+  recordMarketplaceEntry(dir, marketplaceName(nativeId));
   return dir;
 }
 
@@ -810,6 +859,7 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
       resourceBackup.rollback();
       if (prior !== undefined) restorePrior(nativeId, market, prior);
       else removeCandidate(nativeId, marker.logicalId, marker.source, marker.fingerprint);
+      restoreMarketplaceEntry(prepared.handle.rollbackReference, market);
       throw error;
     }
     marketBackup.commit();
@@ -852,6 +902,7 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
     }
     restoreRecordedTree(dir, 'marketplace', zcodeMarketplaceRoot());
     restoreRecordedTree(dir, 'resources', zcodeResourceRoot());
+    restoreMarketplaceEntry(dir, marketplaceName(handle.nativeId));
     return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
   },
   cleanup: async (reference: CleanupReference, _disposition: CleanupDisposition): Promise<CleanupResultData> => {
