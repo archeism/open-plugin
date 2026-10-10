@@ -1,6 +1,6 @@
 /** Cursor's native local-plugin lifecycle writer. */
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { accessSync, constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createCapabilityEvidenceProfile } from '../capability-evidence';
 import { discoverCommands } from '../conversion';
@@ -19,7 +19,7 @@ import type {
 } from '../lifecycle-host';
 import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
 import { pinPluginMcpFiles } from '../mcp-write';
-import { cursorRoot } from '../paths';
+import { cursorRoot, homeRoot } from '../paths';
 import { CryptoHasher, spawnSync } from '../runtime';
 import type { SourceType } from '../semantic-inventory';
 import type { PluginSource, ResolvedSource } from '../source';
@@ -28,7 +28,7 @@ import { cursor, localDir, mcpCandidates } from './cursor';
 const OWNERSHIP = '.plgnz-install.json';
 const CURSOR_MANAGED_VERSION = '2.4.0';
 const MARKETPLACE_REFRESH_UNVERIFIED = 'cursor-marketplace-refresh';
-const EFFECTIVE_FILES: LifecycleReadbackData['transition'] = { requirement: 'none', status: 'effective' };
+const RELOAD_REQUIRED: LifecycleReadbackData['transition'] = { requirement: 'reload', status: 'effective' };
 
 type Ownership = {
   source: string;
@@ -434,7 +434,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
         presence: 'present',
         enablement: 'enabled',
         activation: 'active',
-        transition: EFFECTIVE_FILES,
+        transition: RELOAD_REQUIRED,
         installedFingerprint: projectedFingerprint,
         contentRoots: [{ label: 'local', path: active, fingerprint: projectedFingerprint }],
         retention: prior.retention,
@@ -459,7 +459,7 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
       prior,
       rollbackReference: captureRollback(request.attemptId, request.operationId, request.activation.nativeId, prior),
       rollbackCoverageOperationIds: request.selection.affectedOperationIds,
-      transition: EFFECTIVE_FILES,
+      transition: RELOAD_REQUIRED,
     };
   },
   async apply(prepared) {
@@ -507,11 +507,26 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
     const prior = JSON.parse(readFileSync(priorPath, 'utf8')) as LifecycleReadbackData;
     const root = localDir();
     const target = managedPluginDir(handle.nativeId);
-    if (existsSync(target)) rmSync(target, { recursive: true, force: true });
     const backup = join(handle.rollbackReference, 'active');
-    if (prior.presence === 'present' && existsSync(backup)) {
-      mkdirSync(root, { recursive: true });
-      cpSync(backup, target, { recursive: true });
+    const restore = prior.presence === 'present' && existsSync(backup);
+    if (!restore) {
+      if (prior.presence === 'present' || !existsSync(target)) return { receiptId: receipt('rollback', handle), changed: false };
+      refuseForeignScope(target, handle.scopeId, handle.nativeId);
+      rmSync(target, { recursive: true, force: true });
+      return { receiptId: receipt('rollback', handle), changed: true };
+    }
+    if (existsSync(target)) {
+      refuseForeignScope(target, handle.scopeId, handle.nativeId);
+      if (fingerprintTree(target) === fingerprintTree(backup)) return { receiptId: receipt('rollback', handle), changed: false };
+    }
+    mkdirSync(root, { recursive: true });
+    const scratch = join(root, `.plgnz-cursor-stage-${operationKey(handle.attemptId, handle.operationId)}`);
+    rmSync(scratch, { recursive: true, force: true });
+    try {
+      cpSync(backup, scratch, { recursive: true });
+      activate(scratch, target, root).commit();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
     return { receiptId: receipt('rollback', handle), changed: true };
   },
@@ -529,14 +544,56 @@ function assertCursorTarget(target: LifecycleTargetIdentity): void {
 }
 
 function probeCursorVersion(): TargetVersionObservation {
-  const binary = process.env['OPEN_PLUGIN_CURSOR_BIN'];
-  if (binary === undefined || binary.length === 0 || !existsSync(binary)) return { kind: 'unknown' };
-  const result = spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-  const stdout = [...result.stdout].map((byte) => String.fromCharCode(byte)).join('').trim();
-  const match = /^Cursor (\d+\.\d+\.\d+)$/.exec(stdout);
-  const version = match?.[1];
+  const binary = cursorProbeBinary();
+  if (binary === undefined) return { kind: 'unknown' };
+  const result = spawnSync([binary, '--version'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: 10_000,
+    env: { ...process.env, HOME: homeRoot(), PATH: cursorProbePath() },
+  });
+  const version = cursorVersion(decodeStdout(result.stdout));
   if (result.exitCode !== 0 || version === undefined) return { kind: 'unparseable' };
   return { kind: 'detected', version, probeId: `cursor-${version}` };
+}
+
+function cursorProbeBinary(): string | undefined {
+  const override = process.env['OPEN_PLUGIN_CURSOR_BIN'];
+  if (override !== undefined && override.length > 0) return existsSync(override) ? override : undefined;
+  return whichOnPath(cursorProbePath(), 'cursor');
+}
+
+function cursorProbePath(): string {
+  const isolated = process.env['OPEN_PLUGIN_HOME'];
+  if (isolated !== undefined && isolated.length > 0) return join(homeRoot(), 'bin');
+  return process.env['PATH'] ?? '';
+}
+
+function whichOnPath(pathEnv: string, name: string): string | undefined {
+  for (const dir of pathEnv.split(delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function cursorVersion(stdout: string): string | undefined {
+  const line = stdout.split(/\r?\n/u).map((item) => item.trim()).find((item) => item.length > 0);
+  if (line === undefined) return undefined;
+  const branded = /^Cursor (\d+\.\d+\.\d+)$/u.exec(line);
+  if (branded?.[1] !== undefined) return branded[1];
+  const bare = /^(\d+\.\d+\.\d+)$/u.exec(line);
+  return bare?.[1];
+}
+
+function decodeStdout(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => String.fromCharCode(byte)).join('');
 }
 
 function inventoryLocalStore(target: LifecycleTargetIdentity): TargetInventoryData {
@@ -551,25 +608,69 @@ function inventoryLocalStore(target: LifecycleTargetIdentity): TargetInventoryDa
     } catch {
       continue;
     }
-    const manifestPath = join(dir, '.cursor-plugin', 'plugin.json');
-    if (!existsSync(manifestPath)) continue;
-    const manifest = parseManifest(manifestPath);
-    const marker = readOwnership(dir);
-    const digest = fingerprintTree(dir);
-    installations.push({
-      nativeId: entry,
-      packageName: manifest.name,
-      ownership: ownershipOf(entry, marker),
-      presence: 'present',
-      enablement: 'enabled',
-      activation: 'active',
-      installedFingerprint: digest,
-      installedVersion: manifest.version ?? null,
-      source: sourceOf(marker),
-      contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
-    });
+    const installation = readLocalInstallation(entry, dir);
+    if (installation !== undefined) installations.push(installation);
   }
   return { target, installations };
+}
+
+function readLocalInstallation(entry: string, dir: string): TargetInventoryData['installations'][number] | undefined {
+  const manifestPath = join(dir, '.cursor-plugin', 'plugin.json');
+  if (!existsSync(manifestPath)) return undefined;
+  let manifest: { name: string; version?: string } | undefined;
+  let marker: Ownership | null = null;
+  let unreadable = false;
+  try {
+    manifest = parseManifest(manifestPath);
+  } catch {
+    unreadable = true;
+  }
+  try {
+    marker = readOwnership(dir);
+  } catch {
+    unreadable = true;
+    marker = null;
+  }
+  let digest: string;
+  try {
+    digest = fingerprintTree(dir);
+  } catch {
+    unreadable = true;
+    digest = unreadableFingerprint(entry);
+  }
+  if (manifest === undefined || unreadable) {
+    return {
+      nativeId: entry,
+      packageName: manifest?.name ?? null,
+      ownership: { kind: 'ambiguous', proofIds: [`cursor-unreadable-${entry}`] },
+      presence: 'present',
+      enablement: 'unknown',
+      activation: 'unknown',
+      installedFingerprint: digest,
+      installedVersion: manifest?.version ?? null,
+      source: null,
+      contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
+    };
+  }
+  return {
+    nativeId: entry,
+    packageName: manifest.name,
+    ownership: ownershipOf(entry, marker),
+    presence: 'present',
+    enablement: 'enabled',
+    activation: 'active',
+    installedFingerprint: digest,
+    installedVersion: manifest.version ?? null,
+    source: sourceOf(marker),
+    contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
+  };
+}
+
+function unreadableFingerprint(nativeId: string): string {
+  const hash = new CryptoHasher('sha256');
+  hash.update('cursor-unreadable\0');
+  hash.update(nativeId);
+  return hash.digest('hex');
 }
 
 function ownershipOf(nativeId: string, marker: Ownership | null): TargetOwnershipObservation {
@@ -656,7 +757,7 @@ function projectReadback(identity: {
       presence: 'absent',
       enablement: 'disabled',
       activation: 'inactive',
-      transition: EFFECTIVE_FILES,
+      transition: RELOAD_REQUIRED,
       installedFingerprint: null,
       contentRoots: [],
       retention,
@@ -673,7 +774,7 @@ function projectReadback(identity: {
     presence: 'present',
     enablement: 'enabled',
     activation: 'active',
-    transition: EFFECTIVE_FILES,
+    transition: RELOAD_REQUIRED,
     installedFingerprint: digest,
     contentRoots: [{ label: 'local', path: resolve(dir), fingerprint: digest }],
     retention,
