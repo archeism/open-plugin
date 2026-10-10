@@ -12,7 +12,7 @@ import { omp } from '../src/hosts/omp';
 import { pi } from '../src/hosts/pi';
 import { piWriter } from '../src/hosts/pi-writer';
 import { hermes } from '../src/hosts/hermes';
-import { readState } from '../src/state';
+import { readLifecycleState, readState } from '../src/state';
 import { withKimiNative } from './kimi-fixture';
 import { cleanupWriters } from '../src/hosts/writers';
 import type { HostWriter } from '../src/host';
@@ -570,6 +570,45 @@ describe('remove', () => {
         resourceState: 'absent',
         activationState: 'inactive',
         state: [],
+      });
+    });
+  });
+
+  test('manual remove retires that activation and keeps the tombstone', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      writeFileSync(join(home, 'state.json'), JSON.stringify(scopedRemoveState([
+        { target: 'codex', source: '/codex-source' },
+      ])));
+      const writer: HostWriter = {
+        id: 'codex', gui: false, plannedNativeId,
+        detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        add: async () => {}, remove: async () => {},
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const original = [...cleanupWriters];
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, writer);
+      console.log = (value: string) => output.push(value);
+      let code = 1;
+      try {
+        code = await main(['remove', 'demo-plugin', '--target', 'codex', '--json']);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...original);
+        console.log = originalLog;
+      }
+      const loaded = readLifecycleState();
+      expect({
+        code,
+        activations: loaded.state.activations.map((row) => row.packageId),
+        tombstones: loaded.state.tombstones.map((row) => ({
+          packageId: row.packageId,
+          retentionState: row.retentionState,
+        })),
+      }).toEqual({
+        code: 0,
+        activations: [],
+        tombstones: [{ packageId: 'demo-plugin', retentionState: 'plugin-state-retained' }],
       });
     });
   });

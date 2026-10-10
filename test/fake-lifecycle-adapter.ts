@@ -50,6 +50,7 @@ export class FakeLifecycleHost {
   failPhase: string | null = null;
   failureValue: unknown = new Error('injected fake lifecycle failure');
   readbackFingerprintOverride: string | null = null;
+  omitObservedSource = false;
   transition: ActivationTransitionObservation = { requirement: 'none', status: 'effective' };
   expectedTransition: ActivationTransitionObservation = { requirement: 'none', status: 'effective' };
   activationExpectation: {
@@ -350,7 +351,7 @@ export class FakeLifecycleHost {
           activation: row.enabled ? 'active' as const : 'inactive' as const,
           installedFingerprint: digest,
           installedVersion: row.installedVersion,
-          source: {
+          source: this.omitObservedSource ? null : {
             type: row.sourceType,
             immutableRevision: row.sourceRevision,
             locator: row.sourceLocator,

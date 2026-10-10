@@ -735,6 +735,139 @@ describe('lifecycle executor', () => {
       expect(readLifecycleState().state.tombstones).toEqual([]);
     });
   });
+
+  test('offline retire-source retires that scope and drops the removed package from lastConverged', async () => {
+    const root = temp('retire-scope');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const alpha = writePlugin(join(root, 'sources'), 'alpha');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+
+    await withHome(home, async () => {
+      const installed = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(alpha, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+      expect(applied.exitCode).toBe(0);
+      const scopeId = readLifecycleState().state.scopes[0]?.id;
+      if (scopeId === undefined) throw new Error('expected a recorded scope');
+      rmSync(alpha, { recursive: true, force: true });
+
+      const retired = expectFrozen(await planLifecycle({
+        manifest: manifest([{ operation: 'retire-source', scopeId, target: { kind: 'codex', instance: 'default' } }]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const executed = await executeLifecycle({ plan: retired, hosts: [codex.planner], now });
+      const scope = readLifecycleState().state.scopes.find((row) => row.id === scopeId);
+      expect({
+        exitCode: executed.exitCode,
+        lifecycle: scope?.lifecycle,
+        converged: scope?.lastConverged?.packages.map((pkg) => pkg.packageId) ?? [],
+      }).toEqual({
+        exitCode: 0,
+        lifecycle: 'retired',
+        converged: [],
+      });
+    });
+  });
+
+  test('apply accepts a null host source when the plan scope binding already proved ownership', async () => {
+    const root = temp('null-source');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const collection = realpathSync(mkdirTemp(join(root, 'sources')));
+    writePlugin(collection, 'alpha');
+    writePlugin(collection, 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+
+    await withHome(home, async () => {
+      const installed = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(collection, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+      expect(applied.exitCode).toBe(0);
+
+      const narrowed = expectFrozen(await planLifecycle({
+        manifest: manifest([{
+          operation: 'sync',
+          source: { kind: 'local', locator: collection },
+          target: { kind: 'codex', instance: 'default' },
+          selectors: [{ package: 'alpha', adoptExisting: false }],
+        }]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      expect(narrowed.operations.filter((row) => row.operation.action === 'retire-orphan').map((row) => row.operation.package)).toEqual(['beta']);
+      codex.fake.omitObservedSource = true;
+      const executed = await executeLifecycle({ plan: narrowed, hosts: [codex.planner], now });
+      const loaded = readLifecycleState();
+      expect({
+        exitCode: executed.exitCode,
+        activations: loaded.state.activations.map((row) => row.packageId),
+        tombstones: loaded.state.tombstones.map((row) => row.packageId),
+      }).toEqual({
+        exitCode: 0,
+        activations: ['alpha'],
+        tombstones: ['beta'],
+      });
+    });
+  });
+
+  test('a fingerprint mismatch refuses retirement and leaves the install byte-identical', async () => {
+    const root = temp('fingerprint-drift');
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const collection = realpathSync(mkdirTemp(join(root, 'sources')));
+    writePlugin(collection, 'alpha');
+    writePlugin(collection, 'beta');
+    const codex = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+
+    await withHome(home, async () => {
+      const installed = expectFrozen(await planLifecycle({
+        manifest: manifest([syncEntry(collection, 'codex')]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+      expect(applied.exitCode).toBe(0);
+
+      const narrowed = expectFrozen(await planLifecycle({
+        manifest: manifest([{
+          operation: 'sync',
+          source: { kind: 'local', locator: collection },
+          target: { kind: 'codex', instance: 'default' },
+          selectors: [{ package: 'alpha', adoptExisting: false }],
+        }]),
+        dryRun: false,
+        validatedAt: now,
+        hosts: [codex.planner],
+      }));
+      const installedFile = join(codex.fake.root, 'host', 'active', encodeURIComponent('beta'), 'plugin.json');
+      const drifted = `${readFileSync(installedFile, 'utf8')}drift\n`;
+      writeFileSync(installedFile, drifted);
+      const hostBefore = codex.fake.hostMutationState();
+      const executed = await executeLifecycle({ plan: narrowed, hosts: [codex.planner], now });
+      expect({
+        exitCode: executed.exitCode,
+        bytes: readFileSync(installedFile, 'utf8'),
+        host: codex.fake.hostMutationState(),
+      }).toEqual({
+        exitCode: 1,
+        bytes: drifted,
+        host: hostBefore,
+      });
+    });
+  });
 });
 
 function temp(label: string): string {
