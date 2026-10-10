@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fingerprintTree } from '../src/fingerprint';
@@ -48,11 +48,22 @@ if (args[0] === '--version') {
   console.log('grok ' + version + ' (' + (process.env.GROK_FAKE_BUILD ?? 'fixturebuild') + ')');
   process.exit(0);
 }
-if (args[0] === 'plugin' && args[1] === 'validate') process.exit(0);
+if (args[0] === 'plugin' && args[1] === 'validate') {
+  const source = args[2];
+  const name = source.split('/').filter(Boolean).at(-1);
+  const value = registryValue();
+  const current = name === undefined ? undefined : value.repos[name];
+  const occupied = current && current.plugins && Object.keys(current.plugins).length > 0;
+  if (name && !occupied) {
+    value.repos[name] = { path: join(home, 'installed-plugins', 'cache', name), plugins: {}, kind: { type: 'Local', source_path: source } };
+    saveRegistry(value);
+  }
+  process.exit(0);
+}
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'list') { console.log(JSON.stringify(markets())); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add') { const root = args[3]; write(state, [...markets(), { name: root.split('/').at(-1), kind: 'local', source: { path: root } }]); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'remove') { const root = args[3]; write(state, markets().filter(row => row.source.path !== root)); const value = registryValue(); for (const [key, repo] of Object.entries(value.repos)) if (repo.marketplace?.source_url_or_path === root) delete value.repos[key]; saveRegistry(value); process.exit(0); }
-const install = name => { const row = markets().find(item => item.name === args[2].split('@local/')[1]); if (!row) process.exit(2); const source = join(row.source.path, 'plugins', name); if (!existsSync(source)) process.exit(3); const target = join(home, 'installed-plugins', name + '-native'); rmSync(target, { recursive: true, force: true }); cpSync(source, target, { recursive: true }); const value = registryValue(); value.repos[name] = { path: target, plugins: { [name]: {} }, kind: { type: 'Local', source_path: source }, marketplace: { source_url_or_path: row.source.path, source_display_name: row.name, plugin_subdir: 'plugins/' + name } }; saveRegistry(value); };
+const install = name => { const row = markets().find(item => item.name === args[2].split('@local/')[1]); if (!row) process.exit(2); const source = join(row.source.path, 'plugins', name); if (!existsSync(source)) process.exit(3); const value = registryValue(); const prior = value.repos[name]; const target = typeof prior?.path === 'string' ? prior.path : join(home, 'installed-plugins', 'cache', name); rmSync(target, { recursive: true, force: true }); cpSync(source, target, { recursive: true }); value.repos[name] = { path: target, plugins: { [name]: {} }, kind: { type: 'Local', source_path: source }, marketplace: { source_url_or_path: row.source.path, source_display_name: row.name, plugin_subdir: 'plugins/' + name } }; saveRegistry(value); };
 if (args[0] === 'plugin' && args[1] === 'install') { install(args[2].split('@')[0]); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'update') {
   const value = registryValue();
@@ -65,7 +76,12 @@ if (args[0] === 'plugin' && args[1] === 'update') {
   process.exit(0);
 }
 if (args[0] === 'plugin' && args[1] === 'enable') process.exit(0);
-if (args[0] === 'inspect' && args[1] === '--json') { const value = registryValue(); console.log(JSON.stringify({ plugins: Object.entries(value.repos).map(([name, repo]) => ({ name, path: repo.path, enabled: true })) })); process.exit(0); }
+if (args[0] === 'inspect' && args[1] === '--json') {
+  if (process.env.GROK_FAKE_FAIL_INSPECT === '1') { console.log(JSON.stringify({ plugins: [] })); process.exit(0); }
+  const value = registryValue();
+  console.log(JSON.stringify({ plugins: Object.entries(value.repos).filter(([, repo]) => repo.plugins && Object.keys(repo.plugins).length > 0).map(([name, repo]) => ({ name, path: repo.path, enabled: true })) }));
+  process.exit(0);
+}
 process.exit(9);
 `);
   writeFileSync(binary, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(program)} "$@"\n`);
@@ -83,6 +99,7 @@ function isolated<T>(run: (home: string, root: string) => Promise<T>): Promise<T
     GROK_FAKE_VERSION: process.env.GROK_FAKE_VERSION,
     GROK_FAKE_BUILD: process.env.GROK_FAKE_BUILD,
     GROK_FAKE_FAIL_AFTER_WRITE: process.env.GROK_FAKE_FAIL_AFTER_WRITE,
+    GROK_FAKE_FAIL_INSPECT: process.env.GROK_FAKE_FAIL_INSPECT,
   };
   process.env.OPEN_PLUGIN_HOME = home;
   process.env.OPEN_PLUGIN_GROK_ROOT = join(home, '.grok');
@@ -90,6 +107,7 @@ function isolated<T>(run: (home: string, root: string) => Promise<T>): Promise<T
   process.env.GROK_FAKE_VERSION = '1.0.41';
   process.env.GROK_FAKE_BUILD = 'fixturebuild';
   delete process.env.GROK_FAKE_FAIL_AFTER_WRITE;
+  delete process.env.GROK_FAKE_FAIL_INSPECT;
   return run(home, root).finally(() => {
     for (const [key, prior] of Object.entries(previous)) {
       if (prior === undefined) delete process.env[key];
@@ -200,6 +218,29 @@ async function prepare(
   return adapter.sealActivation(pinned);
 }
 
+function registryDocument(home: string): { repos: Record<string, { path?: string; note?: string; plugins?: Record<string, unknown> }> } {
+  return JSON.parse(readFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), 'utf8')) as { repos: Record<string, { path?: string; note?: string; plugins?: Record<string, unknown> }> };
+}
+
+function registryInstallPath(home: string, name: string): string {
+  const path = registryDocument(home).repos[name]?.path;
+  if (path === undefined) throw new Error(`missing registry path for ${name}`);
+  return path;
+}
+
+function marketplaceRoot(home: string): string {
+  const rows = JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8')) as Array<{ source: { path: string } }>;
+  const path = rows[0]?.source.path;
+  if (path === undefined) throw new Error('missing marketplace');
+  return path;
+}
+
+function stageNames(home: string): string[] {
+  const root = join(home, '.grok', 'plgnz-marketplaces');
+  if (!existsSync(root)) return [];
+  return readdirSync(root).filter((name) => name.startsWith('.plgnz-grok-stage-'));
+}
+
 async function failure(run: Promise<unknown>): Promise<unknown> {
   try {
     await run;
@@ -241,22 +282,33 @@ describe('Grok lifecycle SPI', () => {
       expect(installed.handle.route).toBe('native');
       expect(installed.handle.detectedVersion).toBe('1.0.41');
       await adapter.apply(installed);
-      const active = join(home, '.grok', 'installed-plugins', 'demo-native', 'resources', 'value.txt');
+      const registryPath = registryInstallPath(home, 'demo');
+      expect(registryPath.endsWith('/cache/demo')).toBe(true);
+      const active = join(registryPath, 'resources', 'value.txt');
       expect(readFileSync(active, 'utf8')).toBe('one\n');
       const installedReadback = await adapter.readback(installed.handle);
       adapter.verify(installed.handle, installedReadback);
+      expect(installedReadback.contentRoots[0]?.path).toBe(registryPath);
       expect(installedReadback.transition).toEqual({ requirement: 'reload', status: 'effective' });
+      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toContain('plugin_auto_update = false');
+      expect(existsSync(join(marketplaceRoot(home), '.plgnz-lifecycle.json'))).toBe(false);
+      expect(stageNames(home)).toEqual([]);
       const inspect = spawnSync(process.env.OPEN_PLUGIN_GROK_BIN ?? '', ['inspect', '--json'], {
         env: { ...process.env, HOME: home, GROK_HOME: join(home, '.grok') },
         encoding: 'utf8',
       });
       expect(inspect.status).toBe(0);
       expect(JSON.parse(inspect.stdout)).toEqual({
-        plugins: [{ name: 'demo', path: join(home, '.grok', 'installed-plugins', 'demo-native'), enabled: true }],
+        plugins: [{ name: 'demo', path: registryPath, enabled: true }],
       });
 
-      const marker = join(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))[0].source.path, '.plgnz-install.json');
+      const marker = join(marketplaceRoot(home), '.plgnz-install.json');
       const markerBefore = readFileSync(marker, 'utf8');
+      const sibling = join(home, '.grok', 'installed-plugins', 'other-native');
+      writeFiles(sibling, { 'keep.txt': 'sibling\n' });
+      const beforeUpdate = registryDocument(home);
+      beforeUpdate.repos.other = { path: sibling, note: 'before', plugins: { other: {} } };
+      writeFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), JSON.stringify({ version: 1, repos: beforeUpdate.repos }));
       const logBefore = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8');
       process.env.GROK_FAKE_FAIL_AFTER_WRITE = '1';
       const update = await prepare(adapter, snapshot(root, {
@@ -265,6 +317,9 @@ describe('Grok lifecycle SPI', () => {
         action: 'update',
         bytes: 'two\n',
       }));
+      const duringUpdate = registryDocument(home);
+      duringUpdate.repos.other = { ...duringUpdate.repos.other, note: 'after' };
+      writeFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), JSON.stringify({ version: 1, repos: duringUpdate.repos }));
       const error = await failure(adapter.apply(update));
       expect(error instanceof LifecycleHostPhaseError).toBe(true);
       if (!(error instanceof LifecycleHostPhaseError)) return;
@@ -279,7 +334,66 @@ describe('Grok lifecycle SPI', () => {
       const added = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').slice(logBefore.length);
       expect(added).toContain('plugin update demo');
       expect(added.includes('plugin install')).toBe(false);
-      expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['demo@catalog']);
+      expect(registryDocument(home).repos.other?.note).toBe('after');
+      expect(grok.listInstalled().map((plugin) => plugin.id).sort()).toEqual(['demo@catalog', 'other']);
+      expect(stageNames(home)).toEqual([]);
+    });
+  });
+
+  test('rolls a failed fresh install back to an absent plugin', async () => {
+    await isolated(async (home, root) => {
+      const sibling = join(home, '.grok', 'installed-plugins', 'other-native');
+      writeFiles(sibling, { 'keep.txt': 'sibling\n' });
+      writeFiles(join(home, '.grok'), {
+        'config.toml': '[plugins]\ndisabled = ["kept"]\n',
+        'installed-plugins/registry.json': JSON.stringify({
+          version: 1,
+          repos: { other: { path: sibling, note: 'before', plugins: { other: {} }, kind: { type: 'Local', source_path: sibling } } },
+        }),
+      });
+      const adapter = createGrokLifecycleAdapter();
+      const prepared = await prepare(adapter, snapshot(root, {
+        operationId: 'op-fresh',
+        attemptId: 'attempt-fresh',
+        action: 'install',
+        bytes: 'fresh\n',
+      }));
+      const during = registryDocument(home);
+      during.repos.other = { ...during.repos.other, note: 'after' };
+      writeFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), JSON.stringify({ version: 1, repos: during.repos }));
+      const logBefore = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8');
+      process.env.GROK_FAKE_FAIL_INSPECT = '1';
+      const error = await failure(adapter.apply(prepared));
+      expect(error instanceof LifecycleHostPhaseError).toBe(true);
+      if (!(error instanceof LifecycleHostPhaseError)) return;
+      expect(error.phase).toBe('apply');
+      expect(error.mutationStarted).toBe(true);
+      const cache = registryInstallPath(home, 'demo');
+      expect(readFileSync(join(cache, 'resources', 'value.txt'), 'utf8')).toBe('fresh\n');
+      expect(existsSync(join(home, '.grok', 'plugins', 'demo'))).toBe(true);
+      expect(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))).toHaveLength(1);
+      delete process.env.GROK_FAKE_FAIL_INSPECT;
+      await adapter.rollback(prepared.handle);
+      adapter.verifyRollback(prepared.handle, await adapter.readback(prepared.handle));
+      expect(existsSync(cache)).toBe(false);
+      expect(existsSync(join(home, '.grok', 'plugins', 'demo'))).toBe(false);
+      expect(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))).toEqual([]);
+      expect(registryDocument(home).repos.demo).toBeUndefined();
+      expect(registryDocument(home).repos.other?.note).toBe('after');
+      expect(grok.listInstalled().map((plugin) => plugin.id)).toEqual(['other']);
+      const inspect = spawnSync(process.env.OPEN_PLUGIN_GROK_BIN ?? '', ['inspect', '--json'], {
+        env: { ...process.env, HOME: home, GROK_HOME: join(home, '.grok') },
+        encoding: 'utf8',
+      });
+      expect(JSON.parse(inspect.stdout)).toEqual({ plugins: [{ name: 'other', path: sibling, enabled: true }] });
+      const added = readFileSync(join(home, '.grok', 'command-log.txt'), 'utf8').slice(logBefore.length);
+      expect(added).toContain('plugin marketplace remove');
+      expect(added.includes('plugin update')).toBe(false);
+      expect(added.includes('plugin install')).toBe(true);
+      expect(stageNames(home)).toEqual([]);
+      const config = readFileSync(join(home, '.grok', 'config.toml'), 'utf8');
+      expect(config).toContain('plugin_auto_update = false');
+      expect(config).toContain('disabled = ["kept"]');
     });
   });
 

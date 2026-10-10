@@ -27,7 +27,7 @@ import type { PluginSource, ResolvedSource } from '../source';
 import { fingerprintTree } from '../fingerprint';
 import { pinPluginMcpFiles } from '../mcp-write';
 import { homeRoot, grokRoot } from '../paths';
-import { grok, MARKER, canonical, localSourceOf, marketplacesRoot, namesOf, ownership, parseGrokVersionOutput, provenanceOf, registryFile, registryIsReadable, repos, type GrokOwnership } from './grok';
+import { grok, MARKER, canonical, configFile, localSourceOf, marketplacesRoot, namesOf, ownership, parseGrokVersionOutput, provenanceOf, readJson, registryFile, registryIsReadable, repos, type GrokOwnership } from './grok';
 
 import { yamlParse, yamlStringify } from '../yaml';
 import { CryptoHasher } from '../runtime';
@@ -357,8 +357,25 @@ function lifecycleMarketplace(scopeId: string, nativeId: string): string {
   return resolve(join(marketplacesRoot(), `plgnz-${digest(`${scopeId}\0${nativeId}`)}`));
 }
 
-function predictedNativePath(packageName: string): string {
-  return resolve(join(grokRoot(), 'installed-plugins', `${packageName}-native`));
+function marketplacePluginPath(scopeId: string, nativeId: string, packageName: string): string {
+  return resolve(join(lifecycleMarketplace(scopeId, nativeId), 'plugins', packageName));
+}
+
+function samePath(left: string, right: string): boolean {
+  return (canonical(left) ?? resolve(left)) === (canonical(right) ?? resolve(right));
+}
+
+function registryNativePath(nativeId: string, packageName: string, stagedSource: string): string | undefined {
+  const installed = grok.listInstalled().find((plugin) => plugin.id === nativeId && plugin.path !== undefined);
+  if (installed?.path !== undefined) return resolve(installed.path);
+  const staged = canonical(stagedSource) ?? resolve(stagedSource);
+  for (const [, repo] of repos()) {
+    if (typeof repo.path !== 'string') continue;
+    const source = localSourceOf(repo);
+    if (source === undefined || (canonical(source) ?? resolve(source)) !== staged) continue;
+    if (namesOf(repo).includes(packageName) || namesOf(repo).length === 0) return resolve(repo.path);
+  }
+  return undefined;
 }
 
 function declaredVersion(dir: string): string | null {
@@ -488,21 +505,41 @@ function writeStagedMarker(marketplace: string, snapshot: { scopeId: string; nat
   writeFileSync(join(marketplace, MARKER), markerDocument({ ...snapshot, nativeFingerprint }));
 }
 
+function stageRecord(attemptId: string, operationId: string): string {
+  return join(grokRoot(), 'plgnz-stages', `${attemptId}-${operationId}.txt`);
+}
+
+function discardStage(attemptId: string, operationId: string): void {
+  const record = stageRecord(attemptId, operationId);
+  if (!existsSync(record)) return;
+  const stage = readFileSync(record, 'utf8').trim();
+  if (stage !== '') rmSync(stage, { recursive: true, force: true });
+  rmSync(record, { force: true });
+}
+
 function stageMarketplace(snapshot: { scopeId: string; nativeId: string; packageName: string; packageRoot: string; packageFingerprint: string; sourceType: string; immutableRevision: string; attemptId: string; operationId: string }): { stagingId: string; stagingRoot: string } {
   const finalPath = lifecycleMarketplace(snapshot.scopeId, snapshot.nativeId);
   mkdirSync(dirname(finalPath), { recursive: true });
   const stage = mkdtempSync(join(dirname(finalPath), '.plgnz-grok-stage-'));
-  const stagedRoot = join(stage, basename(finalPath));
-  const stagedPlugin = join(stagedRoot, 'plugins', snapshot.packageName);
-  mkdirSync(dirname(stagedPlugin), { recursive: true });
-  cpSync(snapshot.packageRoot, stagedPlugin, { recursive: true });
-  projectGrokSource(stagedPlugin);
-  const catalog = join(stagedRoot, '.grok-plugin', 'marketplace.json');
-  mkdirSync(dirname(catalog), { recursive: true });
-  writeFileSync(catalog, JSON.stringify({ name: basename(finalPath), plugins: [{ name: snapshot.packageName, source: `./plugins/${snapshot.packageName}` }] }));
-  writeStagedMarker(stagedRoot, snapshot, fingerprintTree(stagedPlugin));
-  run(['plugin', 'validate', stagedPlugin]);
-  return { stagingId: `stage:${snapshot.attemptId}:${snapshot.operationId}`, stagingRoot: resolve(stagedPlugin) };
+  const record = stageRecord(snapshot.attemptId, snapshot.operationId);
+  mkdirSync(dirname(record), { recursive: true });
+  writeFileSync(record, stage);
+  try {
+    const stagedRoot = join(stage, basename(finalPath));
+    const stagedPlugin = join(stagedRoot, 'plugins', snapshot.packageName);
+    mkdirSync(dirname(stagedPlugin), { recursive: true });
+    cpSync(snapshot.packageRoot, stagedPlugin, { recursive: true });
+    projectGrokSource(stagedPlugin);
+    const catalog = join(stagedRoot, '.grok-plugin', 'marketplace.json');
+    mkdirSync(dirname(catalog), { recursive: true });
+    writeFileSync(catalog, JSON.stringify({ name: basename(finalPath), plugins: [{ name: snapshot.packageName, source: `./plugins/${snapshot.packageName}` }] }));
+    writeStagedMarker(stagedRoot, snapshot, fingerprintTree(stagedPlugin));
+    run(['plugin', 'validate', stagedPlugin]);
+    return { stagingId: `stage:${snapshot.attemptId}:${snapshot.operationId}`, stagingRoot: resolve(stagedPlugin) };
+  } catch (error) {
+    discardStage(snapshot.attemptId, snapshot.operationId);
+    throw error;
+  }
 }
 
 function applyRecordedPins(pluginDir: string, pins: readonly ResolvedLifecyclePin[]): readonly string[] {
@@ -525,6 +562,85 @@ function rollbackDirectory(attemptId: string, operationId: string): string {
   return resolve(join(grokRoot(), 'plgnz-rollback', `${attemptId}-${operationId}`));
 }
 
+function pluginNamesOf(repo: Record<string, unknown>): string[] {
+  const plugins = repo['plugins'];
+  return plugins !== null && typeof plugins === 'object' && !Array.isArray(plugins) ? Object.keys(plugins as Record<string, unknown>) : [];
+}
+
+function marketplacePathOf(repo: Record<string, unknown>): string | undefined {
+  const marketplace = repo['marketplace'];
+  if (marketplace === null || typeof marketplace !== 'object' || Array.isArray(marketplace)) return undefined;
+  const source = (marketplace as Record<string, unknown>)['source_url_or_path'];
+  return typeof source === 'string' ? source : undefined;
+}
+
+function savedRegistryRepo(directory: string): { key: string | null; repo: Record<string, unknown> | null } {
+  const file = join(directory, 'registry-repo.json');
+  if (!existsSync(file)) return { key: null, repo: null };
+  const value = JSON.parse(readFileSync(file, 'utf8')) as { key?: unknown; repo?: unknown };
+  const key = typeof value.key === 'string' ? value.key : null;
+  const repo = value.repo !== null && typeof value.repo === 'object' && !Array.isArray(value.repo) ? value.repo as Record<string, unknown> : null;
+  return { key, repo };
+}
+
+function matchingRegistryRepo(nativeId: string, packageName: string): [string, Record<string, unknown>] | undefined {
+  const installed = grok.listInstalled().find((plugin) => plugin.id === nativeId);
+  const entries = repos();
+  if (installed?.path !== undefined) {
+    const found = entries.find(([, repo]) => repo.path === installed.path);
+    if (found !== undefined) return [found[0], found[1] as Record<string, unknown>];
+  }
+  const named = entries.find(([, repo]) => namesOf(repo).includes(packageName));
+  if (named !== undefined) return [named[0], named[1] as Record<string, unknown>];
+  const planned = entries.find(([, repo]) => namesOf(repo).length === 0 && (localSourceOf(repo)?.endsWith(`/plugins/${packageName}`) ?? false));
+  return planned === undefined ? undefined : [planned[0], planned[1] as Record<string, unknown>];
+}
+
+function registryDocument(): { version: 1; repos: Record<string, unknown> } {
+  const value = readJson(registryFile());
+  if (value === null || value['version'] !== 1 || value['repos'] === null || typeof value['repos'] !== 'object' || Array.isArray(value['repos'])) {
+    return { version: 1, repos: {} };
+  }
+  return { version: 1, repos: { ...(value['repos'] as Record<string, unknown>) } };
+}
+
+function writeRegistryDocument(document: { version: 1; repos: Record<string, unknown> }): void {
+  mkdirSync(dirname(registryFile()), { recursive: true });
+  writeFileSync(registryFile(), JSON.stringify(document));
+}
+
+function repoBelongsToInstall(key: string, repo: Record<string, unknown>, savedKey: string | null, marketplacePath: string, packageName: string): boolean {
+  if (savedKey !== null && key === savedKey) return true;
+  const source = marketplacePathOf(repo);
+  if (source !== undefined && samePath(source, marketplacePath)) return true;
+  const kind = repo['kind'];
+  const localSource = kind !== null && typeof kind === 'object' && !Array.isArray(kind) && (kind as Record<string, unknown>)['type'] === 'Local'
+    ? (kind as Record<string, unknown>)['source_path']
+    : undefined;
+  return pluginNamesOf(repo).length === 0 && typeof localSource === 'string' && localSource.endsWith(`/plugins/${packageName}`);
+}
+
+function restoreRegistryKey(directory: string, marketplacePath: string, packageName: string): void {
+  const saved = savedRegistryRepo(directory);
+  const priorInstalled = saved.key !== null && saved.repo !== null && pluginNamesOf(saved.repo).length > 0;
+  const document = registryDocument();
+  for (const [key, repo] of Object.entries(document.repos)) {
+    if (repo === null || typeof repo !== 'object' || Array.isArray(repo)) continue;
+    if (!repoBelongsToInstall(key, repo as Record<string, unknown>, saved.key, marketplacePath, packageName)) continue;
+    if (priorInstalled && key === saved.key) continue;
+    delete document.repos[key];
+  }
+  if (priorInstalled && saved.key !== null && saved.repo !== null) document.repos[saved.key] = saved.repo;
+  writeRegistryDocument(document);
+}
+
+function removeMarketplaceRow(root: string): void {
+  const rows = marketplaceSources().filter((row) => typeof row.source?.path === 'string' && samePath(row.source.path, root));
+  const stored = rows[0]?.source?.path;
+  if (typeof stored !== 'string') return;
+  run(['plugin', 'marketplace', 'remove', stored]);
+}
+
 function captureHostSnapshot(directory: string, nativeId: string, packageName: string): void {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
@@ -540,39 +656,81 @@ function captureHostSnapshot(directory: string, nativeId: string, packageName: s
     const root = repo === undefined ? undefined : canonical(provenanceOf(repo)?.root ?? '');
     if (root !== undefined) cpSync(root, join(directory, 'marketplace'), { recursive: true });
   }
-  if (existsSync(registryFile())) cpSync(registryFile(), join(directory, 'registry.json'));
+  const matched = matchingRegistryRepo(nativeId, packageName);
+  writeFileSync(join(directory, 'registry-repo.json'), JSON.stringify(matched === undefined ? { key: null } : { key: matched[0], repo: matched[1] }));
   const link = join(grokRoot(), 'plugins', packageName);
   if (lstatExists(link) && lstatSync(link).isSymbolicLink()) writeFileSync(join(directory, 'link.txt'), readlinkSync(link));
+}
+
+function freshNativePaths(directory: string, marketplacePath: string): string[] {
+  const paths = new Set<string>();
+  const saved = savedRegistryRepo(directory);
+  if (saved.repo !== null && typeof saved.repo['path'] === 'string' && pluginNamesOf(saved.repo).length === 0) paths.add(resolve(saved.repo['path']));
+  for (const [, repo] of repos()) {
+    if (typeof repo.path !== 'string') continue;
+    const provenance = provenanceOf(repo);
+    if (provenance !== null && samePath(provenance.root, marketplacePath)) paths.add(resolve(repo.path));
+  }
+  return [...paths];
+}
+
+function restoreActivationLink(directory: string, packageName: string): void {
+  const link = join(grokRoot(), 'plugins', packageName);
+  if (existsSync(join(directory, 'link.txt'))) {
+    if (lstatExists(link)) rmSync(link);
+    symlinkSync(readFileSync(join(directory, 'link.txt'), 'utf8'), link);
+    return;
+  }
+  if (lstatExists(link) && lstatSync(link).isSymbolicLink()) rmSync(link);
 }
 
 function restoreHostSnapshot(directory: string, scopeId: string, nativeId: string, packageName: string): void {
   const finalPath = lifecycleMarketplace(scopeId, nativeId);
   const backupPath = join(directory, 'backup-path.txt');
-  if (existsSync(join(directory, 'marketplace'))) {
+  const nativePathFile = join(directory, 'native-path.txt');
+  const hadNative = existsSync(nativePathFile);
+  const hadMarketplace = existsSync(join(directory, 'marketplace'));
+  if (!hadNative) for (const native of freshNativePaths(directory, finalPath)) rmSync(native, { recursive: true, force: true });
+  if (hadMarketplace) {
     rmSync(finalPath, { recursive: true, force: true });
     mkdirSync(dirname(finalPath), { recursive: true });
     cpSync(join(directory, 'marketplace'), finalPath, { recursive: true });
-  } else rmSync(finalPath, { recursive: true, force: true });
-  const nativePathFile = join(directory, 'native-path.txt');
-  if (existsSync(nativePathFile)) {
+  } else {
+    removeMarketplaceRow(finalPath);
+    rmSync(finalPath, { recursive: true, force: true });
+  }
+  if (hadNative) {
     const native = readFileSync(nativePathFile, 'utf8');
     rmSync(native, { recursive: true, force: true });
     cpSync(join(directory, 'native'), native, { recursive: true });
   }
-  if (existsSync(join(directory, 'registry.json'))) {
-    mkdirSync(dirname(registryFile()), { recursive: true });
-    cpSync(join(directory, 'registry.json'), registryFile());
-  }
-  const link = join(grokRoot(), 'plugins', packageName);
-  if (existsSync(join(directory, 'link.txt'))) {
-    if (lstatExists(link)) rmSync(link);
-    symlinkSync(readFileSync(join(directory, 'link.txt'), 'utf8'), link);
-  }
+  restoreRegistryKey(directory, finalPath, packageName);
+  restoreActivationLink(directory, packageName);
   if (existsSync(backupPath)) rmSync(readFileSync(backupPath, 'utf8'), { recursive: true, force: true });
-  if (existsSync(nativePathFile)) {
+  if (hadNative) {
     run(['plugin', 'update', packageName]);
     run(['plugin', 'enable', packageName]);
   }
+}
+
+function pinPluginAutoUpdate(): string {
+  const file = configFile();
+  mkdirSync(dirname(file), { recursive: true });
+  const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
+  const pattern = /^[ \t]*plugin(?:_auto_update|AutoUpdate)[ \t]*=.*(?:\r?\n|$)/gm;
+  const line = 'plugin_auto_update = false\n';
+  const matched = pattern.test(current);
+  pattern.lastIndex = 0;
+  let seen = false;
+  const next = matched
+    ? current.replace(pattern, () => {
+      if (seen) return '';
+      seen = true;
+      return line;
+    })
+    : current.length === 0 ? line : `${current.endsWith('\n') ? current : `${current}\n`}${line}`;
+  if (next !== current) writeFileSync(file, next);
+  return 'grok.config.plugin_auto_update=false';
 }
 
 function refreshStagedFingerprint(stagingRoot: string, nativeFingerprint: string): void {
@@ -615,9 +773,8 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
   async stageActivation(request) {
     return stageMarketplace(request.snapshot);
   },
-  async applyLifecycleDirectives(projection) {
-    writeFileSync(join(dirname(dirname(projection.stagingRoot)), '.plgnz-lifecycle.json'), '{"autoUpdate":false}\n');
-    return ['grok.marketplace.auto-update=false'];
+  async applyLifecycleDirectives() {
+    return [pinPluginAutoUpdate()];
   },
   async applyPins(projection) {
     return applyRecordedPins(projection.stagingRoot, projection.pins);
@@ -626,7 +783,9 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
     const directory = rollbackDirectory(projection.attemptId, projection.operationId);
     captureHostSnapshot(directory, projection.nativeId, projection.packageName);
     const prior = liveReadback(projection);
-    const nativePath = prior.contentRoots[0]?.path ?? predictedNativePath(projection.packageName);
+    const nativePath = registryNativePath(projection.nativeId, projection.packageName, projection.stagingRoot)
+      ?? prior.contentRoots[0]?.path
+      ?? marketplacePluginPath(projection.scopeId, projection.nativeId, projection.packageName);
     return {
       prior,
       expected: {
@@ -655,35 +814,39 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
     throw new Error('Grok retirement is unverified on this native route');
   },
   async apply(prepared) {
-    refuseUnprovenSameName(prepared.handle.packageName, prepared.handle.nativeId);
-    if (!registryIsReadable()) throw new Error('Grok native registry is unreadable or unsupported; refusing mutation');
-    const nativeFingerprint = prepared.handle.projectedFingerprint;
-    if (nativeFingerprint === null || fingerprintTree(prepared.stagingRoot) !== nativeFingerprint) {
-      throw new Error('Grok staged plugin does not match the sealed projection');
+    try {
+      refuseUnprovenSameName(prepared.handle.packageName, prepared.handle.nativeId);
+      if (!registryIsReadable()) throw new Error('Grok native registry is unreadable or unsupported; refusing mutation');
+      const nativeFingerprint = prepared.handle.projectedFingerprint;
+      if (nativeFingerprint === null || fingerprintTree(prepared.stagingRoot) !== nativeFingerprint) {
+        throw new Error('Grok staged plugin does not match the sealed projection');
+      }
+      refreshStagedFingerprint(prepared.stagingRoot, nativeFingerprint);
+      const finalPath = lifecycleMarketplace(prepared.handle.scopeId, prepared.handle.nativeId);
+      const stagedRoot = dirname(dirname(prepared.stagingRoot));
+      const backup = existsSync(finalPath) ? `${finalPath}.plgnz-backup-${prepared.handle.attemptId}` : undefined;
+      if (backup !== undefined) renameSync(finalPath, backup);
+      renameSync(stagedRoot, finalPath);
+      if (backup !== undefined) writeFileSync(join(prepared.handle.rollbackReference, 'backup-path.txt'), backup);
+      ensureMarketplace(finalPath);
+      const installed = grok.listInstalled().find((candidate) => candidate.id === prepared.handle.nativeId);
+      if (installed === undefined) run(['plugin', 'install', `${prepared.handle.packageName}@local/${basename(finalPath)}`, '--trust']);
+      else run(['plugin', 'update', prepared.handle.packageName]);
+      run(['plugin', 'enable', prepared.handle.packageName]);
+      const native = grok.listInstalled().find((candidate) => candidate.id === prepared.handle.nativeId)?.path;
+      const activation = join(grokRoot(), 'plugins', prepared.handle.packageName);
+      assertActivationLink(activation, native);
+      if (native !== undefined && !lstatExists(activation)) {
+        mkdirSync(dirname(activation), { recursive: true });
+        symlinkSync(native, activation);
+      }
+      if (native === undefined || fingerprintTree(native) !== nativeFingerprint || !inspectCurrent(prepared.handle.packageName, native)) {
+        throw new Error(`Grok ${prepared.handle.nativeId}: native readback does not match staged content`);
+      }
+      return { receiptId: `apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: true };
+    } finally {
+      discardStage(prepared.handle.attemptId, prepared.handle.operationId);
     }
-    refreshStagedFingerprint(prepared.stagingRoot, nativeFingerprint);
-    const finalPath = lifecycleMarketplace(prepared.handle.scopeId, prepared.handle.nativeId);
-    const stagedRoot = dirname(dirname(prepared.stagingRoot));
-    const backup = existsSync(finalPath) ? `${finalPath}.plgnz-backup-${prepared.handle.attemptId}` : undefined;
-    if (backup !== undefined) renameSync(finalPath, backup);
-    renameSync(stagedRoot, finalPath);
-    if (backup !== undefined) writeFileSync(join(prepared.handle.rollbackReference, 'backup-path.txt'), backup);
-    ensureMarketplace(finalPath);
-    const installed = grok.listInstalled().find((candidate) => candidate.id === prepared.handle.nativeId);
-    if (installed === undefined) run(['plugin', 'install', `${prepared.handle.packageName}@local/${basename(finalPath)}`, '--trust']);
-    else run(['plugin', 'update', prepared.handle.packageName]);
-    run(['plugin', 'enable', prepared.handle.packageName]);
-    const native = grok.listInstalled().find((candidate) => candidate.id === prepared.handle.nativeId)?.path;
-    const activation = join(grokRoot(), 'plugins', prepared.handle.packageName);
-    assertActivationLink(activation, native);
-    if (native !== undefined && !lstatExists(activation)) {
-      mkdirSync(dirname(activation), { recursive: true });
-      symlinkSync(native, activation);
-    }
-    if (native === undefined || fingerprintTree(native) !== nativeFingerprint || !inspectCurrent(prepared.handle.packageName, native)) {
-      throw new Error(`Grok ${prepared.handle.nativeId}: native readback does not match staged content`);
-    }
-    return { receiptId: `apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: true };
   },
   async disable(): Promise<never> {
     throw new Error('Grok reversible disable is unverified');
@@ -703,6 +866,7 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
       case 'verified-commit':
       case 'verified-rollback':
       case 'aborted-preparation':
+        discardStage(reference.attemptId, reference.operationId);
         rmSync(join(grokRoot(), 'plgnz-rollback', `${reference.attemptId}-${reference.operationId}`), { recursive: true, force: true });
         break;
       default: {
