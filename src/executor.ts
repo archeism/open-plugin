@@ -66,6 +66,13 @@ async function executeFrozen(
       outcomes.push(notAttempted(row.operation, stopped));
       continue;
     }
+    if (row.operation.action === 'retain-prior' || row.operation.action === 'not-attempted') {
+      const planned = plan.report.outcomes.find((outcome) => outcome.operationId === row.operation.operationId);
+      if (planned !== undefined) {
+        outcomes.push(planned);
+        continue;
+      }
+    }
     const result = await runOperation(plan, row.operation, hosts, ledger);
     outcomes.push(result.outcome);
     if (result.stop && result.reason !== null) stopped = result.reason;

@@ -75,6 +75,8 @@ export interface FakeNativeStep {
   exitCode?: number;
   /** Absolute fixture paths to write before the process exits. */
   writes?: Record<string, string>;
+  /** Write this text into every prepared lifecycle stage so readback bytes differ. */
+  divergeStagedReadback?: string;
 }
 
 export interface FakeNativeInvocation {
@@ -316,8 +318,8 @@ function readJsonArray(path: string): unknown[] {
 }
 
 function fakeNativeProgram(scenario: string, log: string): string {
-  return String.raw`import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+  return String.raw`import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 const scenarioPath = ${JSON.stringify(scenario)};
 const logPath = ${JSON.stringify(log)};
 const read = (path, fallback) => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : fallback;
@@ -340,6 +342,17 @@ if (JSON.stringify(step.args) !== JSON.stringify(args)) {
 for (const [path, content] of Object.entries(step.writes ?? {})) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content);
+}
+if (typeof step.divergeStagedReadback === 'string') {
+  const root = process.env.OPEN_PLUGIN_CURSOR_ROOT;
+  const prepare = root === undefined ? '' : join(root, 'plugins', '.plgnz-lifecycle', 'prepare');
+  if (prepare !== '' && existsSync(prepare)) {
+    for (const key of readdirSync(prepare)) {
+      const stage = join(prepare, key, 'stage');
+      if (!existsSync(stage)) continue;
+      writeFileSync(join(stage, 'readback-extra.txt'), step.divergeStagedReadback);
+    }
+  }
 }
 if (step.stdout) process.stdout.write(step.stdout);
 if (step.stderr) process.stderr.write(step.stderr);
