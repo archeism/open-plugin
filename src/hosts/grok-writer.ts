@@ -13,12 +13,14 @@ import type {
   DurableLifecycleOperation,
   LifecycleHostAdapter,
   LifecycleHostDefinition,
+  LifecycleMutationAction,
   LifecycleReadbackData,
   LifecycleTargetIdentity,
   NativeMutationScopeData,
   NativeProjectionData,
   NativeProjectionRequest,
   ResolvedLifecyclePin,
+  SelectedLifecycleRoute,
   TargetInventoryData,
   TargetVersionObservation,
 } from '../lifecycle-host';
@@ -365,17 +367,9 @@ function samePath(left: string, right: string): boolean {
   return (canonical(left) ?? resolve(left)) === (canonical(right) ?? resolve(right));
 }
 
-function registryNativePath(nativeId: string, packageName: string, stagedSource: string): string | undefined {
+function registryNativePath(nativeId: string): string | undefined {
   const installed = grok.listInstalled().find((plugin) => plugin.id === nativeId && plugin.path !== undefined);
-  if (installed?.path !== undefined) return resolve(installed.path);
-  const staged = canonical(stagedSource) ?? resolve(stagedSource);
-  for (const [, repo] of repos()) {
-    if (typeof repo.path !== 'string') continue;
-    const source = localSourceOf(repo);
-    if (source === undefined || (canonical(source) ?? resolve(source)) !== staged) continue;
-    if (namesOf(repo).includes(packageName) || namesOf(repo).length === 0) return resolve(repo.path);
-  }
-  return undefined;
+  return installed?.path === undefined ? undefined : resolve(installed.path);
 }
 
 function declaredVersion(dir: string): string | null {
@@ -509,12 +503,18 @@ function stageRecord(attemptId: string, operationId: string): string {
   return join(grokRoot(), 'plgnz-stages', `${attemptId}-${operationId}.txt`);
 }
 
+function configPriorRecord(attemptId: string, operationId: string): string {
+  return join(grokRoot(), 'plgnz-stages', `${attemptId}-${operationId}.config-prior`);
+}
+
 function discardStage(attemptId: string, operationId: string): void {
   const record = stageRecord(attemptId, operationId);
-  if (!existsSync(record)) return;
-  const stage = readFileSync(record, 'utf8').trim();
-  if (stage !== '') rmSync(stage, { recursive: true, force: true });
-  rmSync(record, { force: true });
+  if (existsSync(record)) {
+    const stage = readFileSync(record, 'utf8').trim();
+    if (stage !== '') rmSync(stage, { recursive: true, force: true });
+    rmSync(record, { force: true });
+  }
+  rmSync(configPriorRecord(attemptId, operationId), { force: true });
 }
 
 function stageMarketplace(snapshot: { scopeId: string; nativeId: string; packageName: string; packageRoot: string; packageFingerprint: string; sourceType: string; immutableRevision: string; attemptId: string; operationId: string }): { stagingId: string; stagingRoot: string } {
@@ -641,9 +641,11 @@ function removeMarketplaceRow(root: string): void {
   run(['plugin', 'marketplace', 'remove', stored]);
 }
 
-function captureHostSnapshot(directory: string, nativeId: string, packageName: string): void {
+function captureHostSnapshot(directory: string, nativeId: string, packageName: string, attemptId: string, operationId: string): void {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
+  const priorConfig = configPriorRecord(attemptId, operationId);
+  if (existsSync(priorConfig)) cpSync(priorConfig, join(directory, 'config-prior.json'));
   const plugin = grok.listInstalled().find((candidate) => candidate.id === nativeId);
   if (plugin?.path !== undefined) {
     const native = resolve(plugin.path);
@@ -684,6 +686,19 @@ function restoreActivationLink(directory: string, packageName: string): void {
   if (lstatExists(link) && lstatSync(link).isSymbolicLink()) rmSync(link);
 }
 
+function restoreRecordedConfig(directory: string): void {
+  const record = join(directory, 'config-prior.json');
+  if (!existsSync(record)) return;
+  const value = JSON.parse(readFileSync(record, 'utf8')) as { present: boolean; text: string };
+  const file = configFile();
+  if (value.present) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, value.text);
+    return;
+  }
+  rmSync(file, { force: true });
+}
+
 function restoreHostSnapshot(directory: string, scopeId: string, nativeId: string, packageName: string): void {
   const finalPath = lifecycleMarketplace(scopeId, nativeId);
   const backupPath = join(directory, 'backup-path.txt');
@@ -706,6 +721,7 @@ function restoreHostSnapshot(directory: string, scopeId: string, nativeId: strin
   }
   restoreRegistryKey(directory, finalPath, packageName);
   restoreActivationLink(directory, packageName);
+  restoreRecordedConfig(directory);
   if (existsSync(backupPath)) rmSync(readFileSync(backupPath, 'utf8'), { recursive: true, force: true });
   if (hadNative) {
     run(['plugin', 'update', packageName]);
@@ -713,23 +729,29 @@ function restoreHostSnapshot(directory: string, scopeId: string, nativeId: strin
   }
 }
 
-function pinPluginAutoUpdate(): string {
-  const file = configFile();
-  mkdirSync(dirname(file), { recursive: true });
-  const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
-  const pattern = /^[ \t]*plugin(?:_auto_update|AutoUpdate)[ \t]*=.*(?:\r?\n|$)/gm;
+function withPluginAutoUpdate(text: string): string {
+  const stripped = text.replace(/^[ \t]*plugin(?:_auto_update|AutoUpdate)[ \t]*=.*(?:\r?\n|$)/gm, '');
   const line = 'plugin_auto_update = false\n';
-  const matched = pattern.test(current);
-  pattern.lastIndex = 0;
-  let seen = false;
-  const next = matched
-    ? current.replace(pattern, () => {
-      if (seen) return '';
-      seen = true;
-      return line;
-    })
-    : current.length === 0 ? line : `${current.endsWith('\n') ? current : `${current}\n`}${line}`;
-  if (next !== current) writeFileSync(file, next);
+  const header = /^[ \t]*\[[^\]]+\]/m.exec(stripped);
+  if (header === null) return stripped.length === 0 ? line : `${stripped.endsWith('\n') ? stripped : `${stripped}\n`}${line}`;
+  const head = stripped.slice(0, header.index);
+  const tail = stripped.slice(header.index);
+  const prefix = head.length === 0 || head.endsWith('\n') ? `${head}${line}` : `${head}\n${line}`;
+  return tail.startsWith('\n') ? `${prefix}${tail}` : `${prefix}\n${tail}`;
+}
+
+function pinPluginAutoUpdate(attemptId: string, operationId: string): string {
+  const file = configFile();
+  const present = existsSync(file);
+  const current = present ? readFileSync(file, 'utf8') : '';
+  const record = configPriorRecord(attemptId, operationId);
+  mkdirSync(dirname(record), { recursive: true });
+  writeFileSync(record, JSON.stringify({ present, text: current }));
+  const next = withPluginAutoUpdate(current);
+  if (next !== current) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, next);
+  }
   return 'grok.config.plugin_auto_update=false';
 }
 
@@ -773,17 +795,17 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
   async stageActivation(request) {
     return stageMarketplace(request.snapshot);
   },
-  async applyLifecycleDirectives() {
-    return [pinPluginAutoUpdate()];
+  async applyLifecycleDirectives(projection) {
+    return [pinPluginAutoUpdate(projection.attemptId, projection.operationId)];
   },
   async applyPins(projection) {
     return applyRecordedPins(projection.stagingRoot, projection.pins);
   },
   async captureActivationPreparation(projection, projectedFingerprint): Promise<ActivationPreparationCapture> {
     const directory = rollbackDirectory(projection.attemptId, projection.operationId);
-    captureHostSnapshot(directory, projection.nativeId, projection.packageName);
+    captureHostSnapshot(directory, projection.nativeId, projection.packageName, projection.attemptId, projection.operationId);
     const prior = liveReadback(projection);
-    const nativePath = registryNativePath(projection.nativeId, projection.packageName, projection.stagingRoot)
+    const nativePath = registryNativePath(projection.nativeId)
       ?? prior.contentRoots[0]?.path
       ?? marketplacePluginPath(projection.scopeId, projection.nativeId, projection.packageName);
     return {
@@ -878,6 +900,26 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
   },
 };
 
+function withRecordedInstallPath<Route extends SelectedLifecycleRoute, Action extends LifecycleMutationAction>(handle: DurableLifecycleOperation<Route, Action>, observedPath: string | undefined): DurableLifecycleOperation<Route, Action> {
+  if (handle.action !== 'install' || handle.prior.presence !== 'absent') return handle;
+  const recorded = registryNativePath(handle.nativeId);
+  if (recorded === undefined || observedPath === undefined || resolve(observedPath) !== recorded) return handle;
+  return {
+    ...handle,
+    expected: {
+      ...handle.expected,
+      contentRoots: handle.expected.contentRoots.map((root) => root.label === 'native' ? { ...root, path: recorded } : root),
+    },
+  };
+}
+
 export function createGrokLifecycleAdapter(): LifecycleHostAdapter {
-  return createLifecycleHostAdapter(grokLifecycleDefinition);
+  const adapter = createLifecycleHostAdapter(grokLifecycleDefinition);
+  return {
+    ...adapter,
+    verify(handle, observation) {
+      const observedPath = observation.contentRoots.find((root) => root.label === 'native')?.path;
+      return adapter.verify(withRecordedInstallPath(handle, observedPath), observation);
+    },
+  };
 }
