@@ -23,12 +23,47 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
+import { which } from '../exec';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { codexHome } from '../paths';
 import { collectPluginServers, type PluginMcpCandidate, type RawServerDef } from '../mcp';
+import { spawnSync } from '../runtime';
 import { singleInstanceTargetProfile } from '../target-profile';
 
 export const codexTargetProfile = singleInstanceTargetProfile('codex');
+
+/** Live `codex --version` evidence. Static consumer-profile metadata is not a probe. */
+export type CodexVersionProbe =
+  | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'unparseable' };
+
+export function resolveCodexBinary(env: Record<string, string | undefined> = process.env): string | null {
+  const explicit = env['OPEN_PLUGIN_CODEX_BIN'];
+  const binary = explicit !== undefined && explicit.length > 0 ? explicit : which('codex');
+  if (binary === null || !existsSync(binary)) return null;
+  return binary;
+}
+
+export function probeCodexVersion(env: Record<string, string | undefined> = process.env): CodexVersionProbe {
+  const binary = resolveCodexBinary(env);
+  if (binary === null) return { kind: 'unknown' };
+  let stdout = '';
+  let exitCode = -1;
+  try {
+    const result = spawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+    exitCode = result.exitCode;
+    stdout = [...result.stdout].map((byte) => String.fromCharCode(byte)).join('').trim();
+  } catch {
+    return { kind: 'unknown' };
+  }
+  if (exitCode !== 0) return { kind: 'unknown' };
+  const match = /^codex-cli (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/u.exec(stdout);
+  if (match === null) return { kind: 'unparseable' };
+  const version = match[1];
+  if (version === undefined) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `codex-cli:${version}` };
+}
 
 export function configFile(): string {
   return join(codexHome(), 'config.toml');
