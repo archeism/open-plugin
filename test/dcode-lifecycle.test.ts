@@ -489,9 +489,42 @@ describe('dcode lifecycle', () => {
         '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
       });
       writeFileSync(join(root, 'plugins/cache/personal-a1b2/addy-c3d4/.plgnz-dcode-retire-0-1-0-e5f6'), 'blocked\n');
-      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true }))).message).toContain('cleanup could not retire');
+      const reported: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { reported.push(args.map((arg) => String(arg)).join(' ')); };
+      let result: void | 'unchanged';
+      try {
+        result = await dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true });
+      } finally {
+        console.error = original;
+      }
+      expect(result).toBe(undefined);
+      expect(reported.join('\n')).toContain(`[dcode] retained former cache: ${hashed(root)}`);
       expect(dcode.listInstalled()[0]?.path?.startsWith(`${managedRoot(root)}/`)).toBe(true);
       expect(readFileSync(join(hashed(root), 'skills/a/SKILL.md'), 'utf8')).toContain('ordinary skill');
+    });
+  });
+  test('a matching slot whose registry path differs is not unchanged and retires the former cache', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      item.resolved.sha = 'local';
+      await dcodeWriter.add(item.plugin, item.resolved);
+      const slot = active(root);
+      writeFiles(hashed(root), {
+        'plugin.json': readFileSync(join(item.plugin.dir, 'plugin.json'), 'utf8'),
+        'skills/a/SKILL.md': readFileSync(join(item.plugin.dir, 'skills/a/SKILL.md'), 'utf8'),
+      });
+      writeFiles(root, {
+        '.state/installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'addy@personal': [{ installPath: hashed(root), version: '0.1.0' }] } }),
+        '.state/plugin_state.json': JSON.stringify({ version: 1, enabledPlugins: { 'addy@personal': true } }),
+      });
+      expect(await dcodeWriter.add(item.plugin, item.resolved, { dryRun: true, adoptExisting: true })).toBe(undefined);
+      expect(active(root)).toBe(hashed(root));
+      expect(existsSync(slot)).toBe(true);
+      expect(await dcodeWriter.add(item.plugin, item.resolved, { adoptExisting: true })).toBe(undefined);
+      expect(active(root)).toBe(slot);
+      expect(existsSync(hashed(root))).toBe(false);
+      expect(readFileSync(join(slot, 'skills/a/SKILL.md'), 'utf8')).toContain('ordinary skill');
     });
   });
   test('pins and autoUpdate false apply only to the staged projection', async () => {
@@ -512,47 +545,37 @@ describe('dcode lifecycle', () => {
       expect(readFileSync(join(installed, '.mcp.json'), 'utf8')).toContain('/true');
     });
   });
-  test('a faithful updater cannot move a managed activation whose projection opts out', async () => {
+  test('a manifest without a version is refused', async () => {
     await isolated(async root => {
       const item = incoming();
+      writeFiles(item.plugin.dir, { 'plugin.json': '{"name":"addy"}\n' });
+      expect((await failed(() => dcodeWriter.add(item.plugin, item.resolved))).message).toContain('no declared version');
+      expect(existsSync(registry(root))).toBe(false);
+      expect(existsSync(managedRoot(root))).toBe(false);
+    });
+  });
+  test('pin rewrites an owned slot and leaves a foreign cache untouched', async () => {
+    await isolated(async root => {
+      const item = incoming();
+      writeFiles(item.plugin.dir, { '.mcp.json': '{"mcpServers":{"fixture":{"command":"true"}}}\n' });
       await dcodeWriter.add(item.plugin, item.resolved);
-      const before = active(root);
-      const updater = join(root, 'updater.mjs');
-      writeFileSync(updater, `import { readFileSync, writeFileSync } from 'node:fs';
-const registry = process.argv[2];
-const remote = process.argv[3];
-const doc = JSON.parse(readFileSync(registry, 'utf8'));
-const moved = [];
-for (const [pluginId, rows] of Object.entries(doc.plugins)) {
-  const row = rows[0];
-  const manifest = JSON.parse(readFileSync(row.installPath + '/plugin.json', 'utf8'));
-  const extension = manifest.extensions?.['com.langchain.deepagents.code'] ?? {};
-  if (extension.autoUpdate === true && row.version !== remote) {
-    row.installPath = remote;
-    row.version = remote;
-    moved.push(pluginId);
-  }
-}
-writeFileSync(registry, JSON.stringify(doc));
-console.log(moved.join(','));
-`);
-      const run = spawnSync(process.execPath, [updater, registry(root), '9.9.9'], { encoding: 'utf8' });
-      expect(run.status).toBe(0);
-      expect(run.stdout.trim()).toBe('');
-      expect(active(root)).toBe(before);
-      const control = join(root, 'control.json');
-      writeFileSync(control, JSON.stringify({
-        plugins: { 'opt-in@personal': [{ installPath: before, version: '0.1.0' }] },
-      }));
-      const manifestPath = join(before, 'plugin.json');
-      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { extensions: { 'com.langchain.deepagents.code': { autoUpdate: boolean } } };
-      manifest.extensions['com.langchain.deepagents.code'].autoUpdate = true;
-      writeFileSync(manifestPath, JSON.stringify(manifest));
-      const moved = spawnSync(process.execPath, [updater, control, '9.9.9'], { encoding: 'utf8' });
-      expect(moved.status).toBe(0);
-      expect(moved.stdout.trim()).toBe('opt-in@personal');
-      expect(JSON.parse(readFileSync(control, 'utf8')).plugins['opt-in@personal'][0].version).toBe('9.9.9');
-      expect(active(root)).toBe(before);
+      const owned = active(root);
+      const bare = '{"mcpServers":{"fixture":{"command":"true"}}}\n';
+      writeFileSync(join(owned, '.mcp.json'), bare);
+      const installed = dcode.listInstalled().find((plugin) => plugin.id === 'addy@personal');
+      const pinned = await dcodeWriter.pin(installed!);
+      expect(pinned.changes.length).toBe(1);
+      expect(readFileSync(join(owned, '.mcp.json'), 'utf8')).toContain('/true');
+      writeFileSync(join(owned, '.mcp.json'), bare);
+      const wrongId = await dcodeWriter.pin({ id: 'other@personal', name: 'other', path: owned });
+      expect(wrongId.changes).toEqual([]);
+      expect(wrongId.refusals).toEqual([]);
+      expect(readFileSync(join(owned, '.mcp.json'), 'utf8')).toBe(bare);
+      writeFiles(hashed(root), { '.mcp.json': bare, 'plugin.json': '{"name":"addy","version":"0.1.0"}\n' });
+      const foreign = await dcodeWriter.pin({ id: 'addy@personal', name: 'addy', path: hashed(root) });
+      expect(foreign.changes).toEqual([]);
+      expect(foreign.refusals).toEqual([]);
+      expect(readFileSync(join(hashed(root), '.mcp.json'), 'utf8')).toBe(bare);
     });
   });
   test('metadata failure rollback retains the prior active copy when enablement is a directory', async () => {

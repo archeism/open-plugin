@@ -81,7 +81,9 @@ export const dcodeWriter: HostWriter = {
       const slot = ownership(target);
       if (slot !== null && (slot.source !== resolved.sourceUri || slot.pluginId !== id)) throw new Error(`dcode plugin ${id} belongs to another source; refusing to replace it`);
       if (existsSync(target) && slot === null) throw new Error(`dcode cache target is unowned; refusing to replace it: ${target}`);
-      const unchanged = slot?.kind === 'current'
+      const former = prior.kind === 'none' ? undefined : prior.path;
+      const unchanged = (former === undefined || resolve(former) === resolve(target))
+        && slot?.kind === 'current'
         && slot.fingerprint === sourceFingerprint
         && slot.projectedFingerprint === projected
         && slot.sourceRevision === resolved.sha
@@ -119,8 +121,10 @@ export const dcodeWriter: HostWriter = {
         throw error;
       }
       activation.commit();
-      const former = prior.kind === 'none' ? undefined : prior.path;
-      if (former !== undefined && resolve(former) !== resolve(target)) retireFormer(former);
+      if (former !== undefined && resolve(former) !== resolve(target)) {
+        const retained = retireFormer(former);
+        if (retained !== undefined) console.error(`[dcode] retained former cache: ${retained}`);
+      }
     } finally {
       rmSync(stage, { recursive: true, force: true });
       if (opts?.dryRun !== true && existsSync(managedRoot) && readdirSync(managedRoot).every((name) => name.startsWith('.plgnz-dcode-'))) {
@@ -131,6 +135,7 @@ export const dcodeWriter: HostWriter = {
   async pin(plugin: InstalledPlugin, opts?: PinOptions): Promise<PinOutcome> {
     if (plugin.path === undefined || !existsSync(plugin.path)) return { changes: [], refusals: [] };
     assertCachePath(plugin.path);
+    if (ownership(plugin.path)?.pluginId !== plugin.id) return { changes: [], refusals: [] };
     return pinPluginMcpFiles(plugin.path, dcodeMcpCandidates(), opts);
   },
   async remove(id: string): Promise<void> {
@@ -271,7 +276,7 @@ function assertReadback(id: string, registryFile: string, enablementFile: string
   if (projectionDigest(target) !== projected) throw new Error(`dcode readback content mismatch for ${id}`);
 }
 
-function retireFormer(path: string): void {
+function retireFormer(path: string): string | undefined {
   try {
     assertCachePath(path);
     const stat = lstatSync(path);
@@ -284,8 +289,9 @@ function retireFormer(path: string): void {
     renameSync(path, backup);
     rmSync(backup, { recursive: true, force: true });
     if (existsSync(path)) throw new Error('former cache remains');
-  } catch (error) {
-    throw new Error(`dcode cleanup could not retire former cache: ${path} (${(error as Error).message})`);
+    return undefined;
+  } catch {
+    return path;
   }
 }
 
