@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { bytesToText, snapshotTree, textToBytes, withLifecycleCliHarness } from './lifecycle-cli-harness';
+import { createDeploymentScopeIdentity } from '../src/deployment-scope';
 import { parseLifecycleReport } from '../src/lifecycle-report';
 
 describe('public lifecycle commands', () => {
@@ -946,6 +947,87 @@ describe('public lifecycle commands', () => {
         directory: false,
         present: false,
         claimsCursorLoadedInstance: false,
+      });
+    });
+  });
+
+  test('scenario 7 exact identity prevents a same-name marketplace rebinding', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const alphaA = '{"name":"alpha","version":"1.0.0","description":"from A"}\n';
+      const alphaB = '{"name":"alpha","version":"1.0.0","description":"from B"}\n';
+      const sourceA = harness.source('scenario-7-a', {
+        'plugin.json': alphaA,
+        'skills/alpha/SKILL.md': '---\nname: alpha\ndescription: from A\n---\n\nFrom A.\n',
+      });
+      const sourceB = harness.source('scenario-7-b', {
+        'plugin.json': alphaB,
+        'skills/alpha/SKILL.md': '---\nname: alpha\ndescription: from B\n---\n\nFrom B.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const statePath = join(harness.home, 'state.json');
+      const installedPath = 'plugins/local/alpha/plugin.json';
+      const scopeA = createDeploymentScopeIdentity(
+        { kind: 'local', locator: sourceA },
+        { kind: 'cursor', instance: 'default' },
+      ).id;
+      const scopeB = createDeploymentScopeIdentity(
+        { kind: 'local', locator: sourceB },
+        { kind: 'cursor', instance: 'default' },
+      ).id;
+
+      const first = harness.run(['sync', sourceA, '--target', 'cursor', '--json'], { env });
+      const firstReport = parseLifecycleReport(JSON.parse(first.stdout));
+      expect({
+        exitCode: first.exitCode,
+        stderr: first.stderr,
+        scopeId: firstReport.outcomes[0]?.scope.id ?? null,
+        bytes: bytesToText(snapshotTree(cursorStore).files[installedPath] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        scopeId: scopeA,
+        bytes: alphaA,
+      });
+
+      const rebound = harness.run(['sync', sourceB, '--target', 'cursor', '--json'], { env });
+      const reboundReport = parseLifecycleReport(JSON.parse(rebound.stdout));
+      const stateAfterB = JSON.parse(readFileSync(statePath, 'utf8')) as {
+        scopes?: Array<{ id: string }>;
+      };
+      expect({
+        exitCode: rebound.exitCode,
+        stderr: rebound.stderr,
+        differentScope: scopeA !== scopeB,
+        reportedScope: reboundReport.outcomes[0]?.scope.id ?? null,
+        reason: reboundReport.summary.reason?.code ?? null,
+        retired: reboundReport.plan.filter((operation) => operation.action === 'retire-orphan').map((operation) => operation.package),
+        bytes: bytesToText(snapshotTree(cursorStore).files[installedPath] ?? []),
+        scopes: stateAfterB.scopes?.map((scope) => scope.id) ?? [],
+      }).toEqual({
+        exitCode: 1,
+        stderr: '',
+        differentScope: true,
+        reportedScope: null,
+        reason: 'internal.ambiguous-ownership',
+        retired: [],
+        bytes: alphaA,
+        scopes: [scopeA],
+      });
+
+      const retired = harness.run(['retire-source', scopeA, '--target', 'cursor', '--json'], { env });
+      expect({
+        exitCode: retired.exitCode,
+        stderr: retired.stderr,
+        installed: snapshotTree(cursorStore).files[installedPath] ?? null,
+        sourceB: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        installed: null,
+        sourceB: alphaB,
       });
     });
   });
