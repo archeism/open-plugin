@@ -10,7 +10,7 @@ import { pinPluginMcpFiles } from '../mcp-write';
 
 import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile, type CapabilityStatus } from '../capability-evidence';
 import { fingerprintTree } from '../fingerprint';
-import { createLifecycleHostAdapter, createTargetInventoryObservation } from '../lifecycle-runtime';
+import { createLifecycleHostAdapter, createTargetInventoryObservation, selectLifecycleRoute } from '../lifecycle-runtime';
 import type {
   DurableLifecycleOperation,
   LifecycleHostAdapter,
@@ -665,7 +665,25 @@ export const claudeProvenNativeRemoteUpdates: readonly ClaudeNativeRemoteUpdateC
 export function createClaudeCodeLifecycleHost(input?: {
   contracts?: readonly ClaudeNativeRemoteUpdateContract[];
 }): LifecycleHostAdapter {
-  return createLifecycleHostAdapter(claudeCodeLifecycleDefinition(input?.contracts ?? claudeProvenNativeRemoteUpdates));
+  const definition = claudeCodeLifecycleDefinition(input?.contracts ?? claudeProvenNativeRemoteUpdates);
+  const adapter = createLifecycleHostAdapter(definition);
+  return {
+    ...adapter,
+    decideRoute(request) {
+      const decision = adapter.decideRoute(request);
+      if (decision.kind !== 'selected') return decision;
+      if (request.operation !== 'install' && request.operation !== 'update') return decision;
+      if (marketplaceName(request.nativeId) === undefined || soleMarketplaceInstall(request.nativeId)) return decision;
+      return selectLifecycleRoute(definition.id, profilesWithoutAutoUpdate(definition.evidenceProfiles), request);
+    },
+  };
+}
+
+function profilesWithoutAutoUpdate(profiles: readonly CapabilityEvidenceProfile[]): readonly CapabilityEvidenceProfile[] {
+  return profiles.map((profile) => ({
+    ...profile,
+    semantics: { ...profile.semantics, 'auto-update-control': 'unsupported' },
+  }));
 }
 
 export function claudeRouteEvidence(
@@ -1135,27 +1153,15 @@ function captureRollback(attemptId: string, operationId: string, nativeId: strin
   const extra = readSettings(join(pluginsDir(), '..', 'settings.json'))['extraKnownMarketplaces'];
   const entry = marketplace !== undefined && isRecord(extra) ? extra[marketplace] ?? null : null;
   writeFileSync(join(reference, 'marketplace-setting.json'), JSON.stringify({ marketplace: marketplace ?? null, entry }));
-  saveOptional(join(pluginsDir(), 'known_marketplaces.json'), join(reference, 'marketplaces.json'));
+  const known = readMarketplaces(join(pluginsDir(), 'known_marketplaces.json'));
+  const knownEntry = marketplace !== undefined && Object.hasOwn(known, marketplace) ? known[marketplace] ?? null : null;
+  writeFileSync(join(reference, 'known-marketplace.json'), JSON.stringify({ marketplace: marketplace ?? null, entry: knownEntry }));
   const installPath = recordedInstallPath(nativeId);
   if (installPath !== undefined && existsSync(installPath)) {
     cpSync(installPath, join(reference, 'install'), { recursive: true });
     writeFileSync(join(reference, 'install-path.txt'), installPath);
   }
   return reference;
-}
-
-function saveOptional(file: string, dest: string): void {
-  writeFileSync(dest, existsSync(file) ? readFileSync(file, 'utf8') : '');
-}
-
-function restoreOptional(file: string, dest: string): void {
-  const bytes = readFileSync(dest, 'utf8');
-  if (bytes.length === 0) {
-    rmSync(file, { force: true });
-    return;
-  }
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, bytes);
 }
 
 function mutateInstall(handle: DurableLifecycleOperation, stagingRoot: string): { receiptId: string; changed: boolean } {
@@ -1280,7 +1286,26 @@ function restorePluginSlice(nativeId: string, reference: string): void {
       writeSettings(settingsFile, { ...current, extraKnownMarketplaces: extra });
     }
   }
-  restoreOptional(join(pluginsDir(), 'known_marketplaces.json'), join(reference, 'marketplaces.json'));
+  restoreKnownMarketplace(reference);
+}
+
+function restoreKnownMarketplace(reference: string): void {
+  const saved = JSON.parse(readFileSync(join(reference, 'known-marketplace.json'), 'utf8')) as {
+    marketplace?: unknown;
+    entry?: unknown;
+  };
+  if (typeof saved.marketplace !== 'string') return;
+  const file = join(pluginsDir(), 'known_marketplaces.json');
+  const hadFile = existsSync(file);
+  const current = hadFile ? readMarketplaces(file) : {};
+  if (saved.entry === null) {
+    if (!hadFile || !Object.hasOwn(current, saved.marketplace)) return;
+    const next = { ...current };
+    delete next[saved.marketplace];
+    writeMarketplaces(file, next);
+    return;
+  }
+  writeMarketplaces(file, { ...current, [saved.marketplace]: saved.entry });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
