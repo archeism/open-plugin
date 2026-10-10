@@ -540,7 +540,9 @@ const cursorLifecycleDefinition: LifecycleHostDefinition = {
 export const cursorManagedLifecycle = createLifecycleHostAdapter(cursorLifecycleDefinition);
 
 function assertCursorTarget(target: LifecycleTargetIdentity): void {
-  if (target.kind !== 'cursor' || target.instance !== 'default') throw new Error('Cursor lifecycle target must be cursor/default');
+  if (target.kind !== 'cursor' || !/^[a-z0-9][a-z0-9._-]*$/iu.test(target.instance)) {
+    throw new Error('Cursor lifecycle target must name a cursor instance');
+  }
 }
 
 function probeCursorVersion(): TargetVersionObservation {

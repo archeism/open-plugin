@@ -22,9 +22,29 @@ import { join } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { cursorRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
-import { singleInstanceTargetProfile } from '../target-profile';
+import { parsePersistedTargetIdentity, type PersistedTargetIdentity } from '../target-identity';
+import { invalidTargetArgument, invalidTargetSelection, type TargetProfile } from '../target-profile';
 
-export const cursorTargetProfile = singleInstanceTargetProfile('cursor');
+export const cursorTargetProfile: TargetProfile<'cursor'> = {
+  kind: 'cursor',
+  parseSyncTarget(value, label) {
+    return parseCursorTarget(value, label);
+  },
+  parseRetirementTarget(value, label) {
+    const target = parseCursorTarget(value, label);
+    return { kind: 'cursor', instance: target.instance };
+  },
+  canonicalContext: () => undefined,
+  physicalKey: (target) => JSON.stringify([target.kind, target.instance]),
+  overlaps: (left, right) => left.kind === right.kind && left.instance === right.instance,
+};
+
+function parseCursorTarget(value: unknown, label: string): PersistedTargetIdentity {
+  const target = parsePersistedTargetIdentity(value, label);
+  if (target.kind !== 'cursor') invalidTargetSelection(`${label} kind must be 'cursor'`);
+  if (target.context !== undefined) invalidTargetArgument(`${label} cursor does not accept target context`);
+  return { kind: 'cursor', instance: target.instance };
+}
 
 export function localDir(): string {
   return join(cursorRoot(), 'plugins', 'local');

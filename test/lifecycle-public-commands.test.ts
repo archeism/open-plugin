@@ -284,6 +284,104 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 1 dry-run retires only B and apply leaves A and instance two untouched', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const alphaJson = '{"name":"alpha","version":"1.0.0","description":"A"}\n';
+      const betaJson = '{"name":"beta","version":"1.0.0","description":"B"}\n';
+      const gammaJson = '{"name":"gamma","version":"1.0.0","description":"instance two"}\n';
+      const source = harness.source('scenario-1', {
+        'alpha/plugin.json': alphaJson,
+        'alpha/skills/alpha/SKILL.md': '---\nname: alpha\ndescription: A\n---\n\nAlpha.\n',
+        'beta/plugin.json': betaJson,
+        'beta/skills/beta/SKILL.md': '---\nname: beta\ndescription: B\n---\n\nBeta.\n',
+      });
+      const otherSource = harness.source('scenario-1-two', {
+        'plugin.json': gammaJson,
+        'skills/gamma/SKILL.md': '---\nname: gamma\ndescription: instance two\n---\n\nGamma.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--instance', 'one', '--json'], { env });
+      const other = harness.run(['sync', otherSource, '--target', 'cursor', '--instance', 'two', '--json'], { env });
+      expect(installed.exitCode).toBe(0);
+      expect(other.exitCode).toBe(0);
+      const alphaBefore = installed.stores.cursor.after.files['plugins/local/alpha/plugin.json'];
+      const betaBefore = installed.stores.cursor.after.files['plugins/local/beta/plugin.json'];
+      const gammaBefore = other.stores.cursor.after.files['plugins/local/gamma/plugin.json'];
+      expect(bytesToText(alphaBefore ?? [])).toBe(alphaJson);
+      expect(bytesToText(betaBefore ?? [])).toBe(betaJson);
+      expect(bytesToText(gammaBefore ?? [])).toBe(gammaJson);
+
+      const preview = harness.run(
+        ['sync', source, '--target', 'cursor', '--instance', 'one', '--plugin', 'alpha', '--dry-run', '--json'],
+        { env },
+      );
+      const previewReport = parseLifecycleReport(JSON.parse(preview.stdout));
+      expect({
+        exitCode: preview.exitCode,
+        stderr: preview.stderr,
+        dryRun: previewReport.command.dryRun,
+        retirements: previewReport.plan.filter((operation) => operation.action === 'retire-orphan').map((operation) => operation.package),
+        actions: previewReport.outcomes.map((outcome) => ({ package: outcome.package, action: outcome.action, result: outcome.result })),
+        summary: previewReport.summary,
+        stateUntouched: preview.state.before === undefined && preview.state.after === undefined
+          ? true
+          : bytesToText(preview.state.before ?? []) === bytesToText(preview.state.after ?? []),
+        cursorUntouched: preview.stores.cursor.before,
+        cursorAfter: preview.stores.cursor.after,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        dryRun: true,
+        retirements: ['beta'],
+        actions: [
+          { package: 'alpha', action: 'unchanged', result: 'succeeded' },
+          { package: 'beta', action: 'retire-orphan', result: 'succeeded' },
+        ],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: false,
+          changed: false,
+          failureCategory: null,
+          reason: null,
+          recoveryId: null,
+          readbackId: null,
+        },
+        stateUntouched: true,
+        cursorUntouched: preview.stores.cursor.before,
+        cursorAfter: preview.stores.cursor.before,
+      });
+
+      const applied = harness.run(
+        ['sync', source, '--target', 'cursor', '--instance', 'one', '--plugin', 'alpha', '--json'],
+        { env },
+      );
+      const appliedReport = parseLifecycleReport(JSON.parse(applied.stdout));
+      expect({
+        exitCode: applied.exitCode,
+        stderr: applied.stderr,
+        retirements: appliedReport.outcomes.filter((outcome) => outcome.action === 'retire-orphan').map((outcome) => ({
+          package: outcome.package,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+        })),
+        alpha: bytesToText(applied.stores.cursor.after.files['plugins/local/alpha/plugin.json'] ?? []),
+        betaGone: applied.stores.cursor.after.files['plugins/local/beta/plugin.json'] === undefined,
+        gamma: bytesToText(applied.stores.cursor.after.files['plugins/local/gamma/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        retirements: [{ package: 'beta', result: 'succeeded', resourceState: 'absent' }],
+        alpha: alphaJson,
+        betaGone: true,
+        gamma: gammaJson,
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
