@@ -2,8 +2,22 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createCapabilityEvidenceProfile, type CapabilityEvidenceProfile } from '../capability-evidence';
+import { fingerprintTree } from '../fingerprint';
 import type { AddOptions, HostWriter, InstalledPlugin, PinOptions, PinOutcome, RemoveOptions } from '../host';
+import type {
+  ActivationTransitionObservation,
+  LifecycleHostDefinition,
+  LifecycleReadbackData,
+  NativeMutationScopeData,
+  NativeProjectionData,
+  TargetInstallationData,
+  TargetVersionObservation,
+} from '../lifecycle-host';
+import { createTargetInventoryObservation } from '../lifecycle-runtime';
+import { homeRoot } from '../paths';
 import type { PluginSource, ResolvedSource } from '../source';
+import type { CapabilityOperation, PackageSemantic } from '../semantic-inventory';
 import { normalizeCommandSources } from '../conversion';
 import { kimi, mcpCandidates, pluginsDir } from './kimi';
 import { pinPluginMcpFiles } from '../mcp-write';
@@ -132,10 +146,27 @@ function readRegistry(path: string): Registry {
   return raw as Registry;
 }
 function restore(path: string, value: string | undefined): void { if (value === undefined) rmSync(path, { force: true }); else writeFileSync(path, value); }
+function restoreRegistryRow(registryFile: string, id: string, reference: string): void {
+  const rowFile = join(reference, 'registry.row.json');
+  const priorRow = existsSync(rowFile) ? parseJson(rowFile, 'Kimi registry row') : undefined;
+  if (priorRow !== undefined && priorRow.id !== id) throw new Error(`Kimi rollback row is not ${id}`);
+  const live = existsSync(registryFile) ? readRegistry(registryFile) : { version: 1 as const, plugins: [] };
+  const plugins = live.plugins.filter((row) => row.id !== id);
+  if (priorRow !== undefined) plugins.push(priorRow);
+  if (plugins.length === 0 && existsSync(join(reference, 'registry.absent'))) {
+    rmSync(registryFile, { force: true });
+    return;
+  }
+  if (!existsSync(registryFile) && plugins.length === 0) return;
+  writeFileSync(registryFile, JSON.stringify({ version: 1, plugins }));
+}
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
 function stagePlugin(source: string, stage: string, expectedName: string): void {
   assertNoSymlinks(source); cpSync(source, stage, { recursive: true });
+  projectStagedKimi(stage, expectedName);
+}
+function projectStagedKimi(stage: string, expectedName: string): void {
   normalizeCommandSources(stage);
   const manifest = readSourceManifest(stage);
   if (manifest.name !== expectedName) throw new Error(`Kimi manifest identity does not match ${expectedName}`);
@@ -227,14 +258,28 @@ function lstatIfPresent(path: string) { try { return lstatSync(path); } catch (e
 function assertManagedPath(root: string, target: string): void { const base = resolve(root); const selected = resolve(target); if (selected !== base && !selected.startsWith(`${base}/`)) throw new Error(`Kimi managed path escapes its home: ${target}`); let current = base; for (const part of selected.slice(base.length).split('/').filter(Boolean)) { if (lstatIfPresent(current) === undefined) break; const stat = lstatSync(current); if (stat.isSymbolicLink()) throw new Error(`Kimi managed path component is a symlink: ${current}`); if (!stat.isDirectory()) throw new Error(`Kimi managed path component is not a directory: ${current}`); current = join(current, part); } const stat = lstatIfPresent(current); if (stat !== undefined) { if (stat.isSymbolicLink()) throw new Error(`Kimi managed path component is a symlink: ${current}`); if (current !== selected && !stat.isDirectory()) throw new Error(`Kimi managed path component is not a directory: ${current}`); } }
 function assertFilePath(root: string, path: string): void { assertManagedPath(root, dirname(path)); const stat = lstatIfPresent(path); if (stat === undefined) return; if (stat.isSymbolicLink()) throw new Error(`Kimi managed metadata is a symlink: ${path}`); if (!stat.isFile()) throw new Error(`Kimi managed metadata is not a file: ${path}`); }
 
-function resolveKimiBinary(): string {
-  const explicit = process.env['OPEN_PLUGIN_KIMI_BIN'];
-  const binary = explicit ?? join(process.env['HOME'] ?? '.', '.local', 'share', 'kimi-code', 'bin', 'kimi');
-  if (!existsSync(binary)) throw new Error(`current Kimi Code binary not found: ${binary}`);
+const KIMI_VERSION = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+
+function kimiBinaryPath(): string {
+  return process.env['OPEN_PLUGIN_KIMI_BIN'] ?? join(homeRoot(), '.local', 'share', 'kimi-code', 'bin', 'kimi');
+}
+
+function readKimiBinaryVersion(binary: string): { exitCode: number | null; version: string } {
   const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
-  const version = new TextDecoder().decode(result.stdout).trim();
-  const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);
-  if (result.exitCode !== 0 || match === null || Number(match[1]) === 0) throw new Error(`current Kimi Code binary required; legacy or unsupported binary: ${binary}`);
+  return { exitCode: result.exitCode, version: new TextDecoder().decode(result.stdout).trim() };
+}
+
+function currentKimiVersion(exitCode: number | null, version: string): string | undefined {
+  const match = KIMI_VERSION.exec(version);
+  if (exitCode !== 0 || match === null || Number(match[1]) === 0) return undefined;
+  return version;
+}
+
+function resolveKimiBinary(): string {
+  const binary = kimiBinaryPath();
+  if (!existsSync(binary)) throw new Error(`current Kimi Code binary not found: ${binary}`);
+  const probed = readKimiBinaryVersion(binary);
+  if (currentKimiVersion(probed.exitCode, probed.version) === undefined) throw new Error(`current Kimi Code binary required; legacy or unsupported binary: ${binary}`);
   return binary;
 }
 async function reservePort(): Promise<number> { return runtimeReservePort(); }
@@ -263,3 +308,382 @@ async function withKimiServer(home: string, binary: string, operation: (request:
   }
 }
 function curlJson(url: string, method = 'GET', token?: string, body?: unknown): Record<string, unknown> { const args = ['--noproxy', '*', '--silent', '--show-error', '--max-time', '2', '--request', method, ...(token === undefined ? [] : ['--header', `Authorization: Bearer ${token}`]), ...(body === undefined ? [] : ['--header', 'Content-Type: application/json', '--data', JSON.stringify(body)]), url]; const result = bunShapedSpawnSync(['curl', ...args], { stdout: 'pipe', stderr: 'pipe' }); const text = new TextDecoder().decode(result.stdout); if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr).trim() || `curl exit ${result.exitCode}`); try { const value: unknown = JSON.parse(text); if (!isObject(value)) throw new Error('must be an object'); return value; } catch (error) { throw new Error(`Kimi returned invalid JSON: ${(error as Error).message}`); } }
+
+const KIMI_GATED_VERSION = '2.0.1';
+const KIMI_SCOPE = 'kimi:default';
+const KIMI_UPDATE_MECHANISM = { kind: 'interactive-marketplace-updater' } as const;
+const KIMI_RETIRE_MECHANISM = { kind: 'native-remove' } as const;
+const KIMI_RETIRE_SEMANTICS = new Set<PackageSemantic>(['retirement', 'retention-safety', 'readback', 'rollback', 'activation-reload']);
+const KIMI_INSTALL_SEMANTICS = new Set<PackageSemantic>([
+  'ordinary-skills',
+  'mcp',
+  'commands',
+  'readback',
+  'rollback',
+  'activation-reload',
+  'auto-update-control',
+]);
+const KIMI_NEW_SESSION: ActivationTransitionObservation = { requirement: 'restart', status: 'effective' };
+const KIMI_NO_SESSION: ActivationTransitionObservation = { requirement: 'none', status: 'effective' };
+const KIMI_RETENTION: LifecycleReadbackData['retention'] = {
+  pluginData: { state: 'absent', fingerprint: null },
+  inactiveMetadata: { state: 'absent', fingerprint: null },
+};
+
+const kimiUpdateProfile = {
+  host: 'kimi',
+  detectedVersion: KIMI_GATED_VERSION,
+  sourceTypes: ['local', 'git'],
+  operations: ['update'],
+  operationStatus: 'unsupported',
+  semantics: kimiSemantics(new Set<PackageSemantic>()),
+  evidence: ['docs/hosts/kimi.md'],
+} as const;
+
+export const kimiLifecycle: LifecycleHostDefinition = {
+  id: 'kimi',
+  evidenceProfiles: [
+    createCapabilityEvidenceProfile({ ...kimiUpdateProfile, route: 'native' }),
+    createCapabilityEvidenceProfile({ ...kimiUpdateProfile, route: 'managed' }),
+    createCapabilityEvidenceProfile({
+      host: 'kimi',
+      detectedVersion: KIMI_GATED_VERSION,
+      sourceTypes: ['local', 'git'],
+      operations: ['install'],
+      route: 'native',
+      operationStatus: 'supported',
+      semantics: kimiSemantics(KIMI_INSTALL_SEMANTICS),
+      evidence: [
+        'docs/evidence/kimi-native-loader-20260922.json',
+        'docs/evidence/kimi-public-lifecycle-20260922.json',
+        'docs/hosts/kimi.md',
+      ],
+    }),
+    createCapabilityEvidenceProfile({
+      host: 'kimi',
+      detectedVersion: KIMI_GATED_VERSION,
+      sourceTypes: ['local', 'git'],
+      operations: ['retire'],
+      route: 'native',
+      operationStatus: 'unverified',
+      semantics: kimiSemantics(KIMI_RETIRE_SEMANTICS),
+      evidence: ['docs/evidence/kimi-public-lifecycle-20260922.json'],
+    }),
+  ],
+  probeVersion: async () => probeKimiBinary(),
+  observeTarget: async (target) => ({
+    target,
+    installations: target.kind === 'kimi' && target.instance === 'default' ? readKimiInstallations() : [],
+  }),
+  observeNativeMutationScope: async (request) => kimiMutationScope(request.operation, request.nativeId),
+  observeNativeProjection: async (request) => kimiProjection(request.operation),
+  revalidateTargetPrecondition: async (handle) => {
+    const version = probeKimiBinary();
+    const observation = createTargetInventoryObservation(kimiLifecycle.id, {
+      target: handle.target,
+      installations: handle.target.kind === 'kimi' && handle.target.instance === 'default' ? readKimiInstallations() : [],
+    });
+    return { version, targetObservationId: observation.observationId };
+  },
+  stageActivation: async (request) => {
+    assertId(request.snapshot.packageName);
+    const dir = preparationDir(request.snapshot.attemptId, request.snapshot.operationId);
+    rmSync(dir, { recursive: true, force: true });
+    const stagingRoot = join(dir, 'stage', request.snapshot.packageName);
+    mkdirSync(join(dir, 'stage'), { recursive: true });
+    cpSync(request.snapshot.packageRoot, stagingRoot, { recursive: true });
+    return { stagingId: `${request.snapshot.attemptId}:${request.snapshot.operationId}`, stagingRoot };
+  },
+  applyLifecycleDirectives: async (projection) => {
+    projectStagedKimi(projection.stagingRoot, projection.packageName);
+    writeFileSync(join(projection.stagingRoot, MARKER), JSON.stringify({
+      source: projection.sourceLocator ?? `local:${projection.sourceRevision}`,
+      pluginId: projection.nativeId,
+      fingerprint: projection.sourceRevision,
+    } satisfies Ownership));
+    return ['kimi.staged-exact'];
+  },
+  applyPins: async (projection) => {
+    if (projection.pins.length === 0) return [];
+    const file = join(projection.stagingRoot, 'kimi.plugin.json');
+    const manifest = parseJson(file, 'Kimi native manifest');
+    const servers = manifest.mcpServers;
+    if (!isObject(servers)) throw new Error('Kimi staged manifest has no mcpServers to pin');
+    for (const pin of projection.pins) {
+      const server = servers[pin.server];
+      if (!isObject(server)) throw new Error(`Kimi pin ${pin.server} has no staged server`);
+      server.command = pin.executable;
+    }
+    writeFileSync(file, JSON.stringify(manifest, null, 2));
+    return projection.pins.map(({ server }) => server);
+  },
+  captureActivationPreparation: async (projection, projectedFingerprint) => {
+    const prior = kimiReadback({
+      adapterId: projection.adapterId,
+      target: projection.target,
+      scopeId: projection.scopeId,
+      packageName: projection.packageName,
+      nativeId: projection.nativeId,
+    });
+    const rollbackReference = join(preparationDir(projection.attemptId, projection.operationId), 'rollback');
+    mkdirSync(rollbackReference, { recursive: true });
+    const managed = managedPluginPath(projection.packageName);
+    const registryFile = join(pluginsDir(), 'installed.json');
+    assertKimiManaged(projection.packageName, managed, registryFile);
+    if (existsSync(managed)) cpSync(managed, join(rollbackReference, 'managed'), { recursive: true });
+    const priorRow = existsSync(registryFile) ? readRegistry(registryFile).plugins.find((row) => row.id === projection.packageName) : undefined;
+    if (priorRow === undefined) {
+      if (!existsSync(registryFile)) writeFileSync(join(rollbackReference, 'registry.absent'), '');
+    } else writeFileSync(join(rollbackReference, 'registry.row.json'), JSON.stringify(priorRow));
+    return {
+      prior,
+      expected: {
+        ...prior,
+        route: projection.route,
+        presence: 'present',
+        enablement: 'enabled',
+        activation: 'active',
+        transition: KIMI_NEW_SESSION,
+        installedFingerprint: projectedFingerprint,
+        contentRoots: [{ label: 'managed', path: managed, fingerprint: projectedFingerprint }],
+        retention: KIMI_RETENTION,
+      },
+      rollbackReference,
+      rollbackCoverageOperationIds: projection.affectedOperationIds,
+    };
+  },
+  captureDisablePreparation: async () => unexposed('disable-capture'),
+  captureRetirementPreparation: async () => unexposed('retirement-capture'),
+  apply: async (prepared) => {
+    const id = prepared.handle.packageName;
+    const managed = managedPluginPath(id);
+    const registryFile = join(pluginsDir(), 'installed.json');
+    assertKimiManaged(id, managed, registryFile);
+    const priorRow = existsSync(registryFile) ? readRegistry(registryFile).plugins.find((row) => row.id === id) : undefined;
+    if (existsSync(managed) && priorRow?.enabled === true && sameRoot(priorRow.root, managed) && sameTree(prepared.stagingRoot, managed)) {
+      return { receiptId: `kimi-apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: false };
+    }
+    const registryBefore = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : undefined;
+    const backup = moveAside(managed, dirname(managed));
+    try {
+      await nativeInstall(prepared.stagingRoot, kimiRootPath(), resolveKimiBinary());
+      const row = readRegistry(registryFile).plugins.find((candidate) => candidate.id === id);
+      if (row === undefined || row.enabled !== true || !sameRoot(row.root, managed) || !existsSync(managed) || !sameTree(prepared.stagingRoot, managed)) {
+        throw new Error(`Kimi native install did not produce enabled managed plugin ${id}`);
+      }
+      backup.commit();
+      return { receiptId: `kimi-apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: true };
+    } catch (error) {
+      rmSync(managed, { recursive: true, force: true });
+      backup.rollback();
+      restore(registryFile, registryBefore);
+      throw error;
+    }
+  },
+  disable: async () => unexposed('disable'),
+  retire: async () => unexposed('retire'),
+  readback: async (handle) => kimiReadback(handle),
+  rollback: async (handle) => {
+    const id = handle.packageName;
+    const managed = managedPluginPath(id);
+    const registryFile = join(pluginsDir(), 'installed.json');
+    assertKimiManaged(id, managed, registryFile);
+    const reference = handle.rollbackReference;
+    rmSync(managed, { recursive: true, force: true });
+    const backup = join(reference, 'managed');
+    if (existsSync(backup)) cpSync(backup, managed, { recursive: true });
+    restoreRegistryRow(registryFile, id, reference);
+    return { receiptId: `kimi-rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
+  },
+  cleanup: async (reference) => {
+    const root = join(pluginsDir(), '.plgnz-kimi-lifecycle');
+    rmSync(join(root, safeSegment(reference.attemptId)), { recursive: true, force: true });
+    if (existsSync(root) && readdirSync(root).length === 0) rmSync(root, { recursive: true, force: true });
+    return { cleanupId: `kimi-cleanup:${reference.attemptId}:${reference.operationId}`, completed: true as const };
+  },
+};
+
+function safeSegment(value: string): string {
+  return value.replace(/[^a-z0-9._-]/giu, '_');
+}
+
+function preparationDir(attemptId: string, operationId: string): string {
+  return join(pluginsDir(), '.plgnz-kimi-lifecycle', safeSegment(attemptId), safeSegment(operationId));
+}
+
+function managedPluginPath(packageName: string): string {
+  return join(pluginsDir(), 'managed', packageName);
+}
+
+function assertKimiManaged(packageName: string, managed: string, registryFile: string): void {
+  assertId(packageName);
+  assertManagedPath(kimiRootPath(), pluginsDir());
+  assertManagedPath(kimiRootPath(), dirname(managed));
+  assertManagedPath(kimiRootPath(), managed);
+  assertFilePath(kimiRootPath(), registryFile);
+}
+
+function kimiReadback(handle: {
+  adapterId: string;
+  target: LifecycleReadbackData['target'];
+  scopeId: string;
+  packageName: string;
+  nativeId: string;
+}): LifecycleReadbackData {
+  const managed = managedPluginPath(handle.packageName);
+  const registryFile = join(pluginsDir(), 'installed.json');
+  const row = existsSync(registryFile) ? readRegistry(registryFile).plugins.find((candidate) => candidate.id === handle.packageName) : undefined;
+  const present = row !== undefined && existsSync(managed) && sameRoot(row.root, managed);
+  const enabled = present && row?.enabled === true;
+  const digest = present ? fingerprintTree(managed) : null;
+  return {
+    adapterId: handle.adapterId,
+    target: handle.target,
+    scopeId: handle.scopeId,
+    packageName: handle.packageName,
+    nativeId: handle.nativeId,
+    route: present ? 'native' : 'none',
+    presence: present ? 'present' : 'absent',
+    enablement: enabled ? 'enabled' : 'disabled',
+    activation: enabled ? 'active' : 'inactive',
+    transition: enabled ? KIMI_NEW_SESSION : KIMI_NO_SESSION,
+    installedFingerprint: digest,
+    contentRoots: present && digest !== null ? [{ label: 'managed', path: managed, fingerprint: digest }] : [],
+    retention: KIMI_RETENTION,
+  };
+}
+
+function probeKimiBinary(): TargetVersionObservation {
+  const binary = kimiBinaryPath();
+  if (!existsSync(binary)) return { kind: 'unknown' };
+  const probed = readKimiBinaryVersion(binary);
+  const version = currentKimiVersion(probed.exitCode, probed.version);
+  if (version === undefined) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `kimi-bin:${version}` };
+}
+
+function readKimiInstallations(): TargetInstallationData[] {
+  return kimi.listInstalled().map((plugin): TargetInstallationData => {
+    if (plugin.path === undefined) {
+      return {
+        nativeId: plugin.id,
+        packageName: plugin.name,
+        ownership: { kind: 'unmanaged' },
+        presence: 'absent',
+        enablement: 'unknown',
+        activation: 'unknown',
+        installedFingerprint: null,
+        installedVersion: null,
+        source: null,
+        contentRoots: [],
+      };
+    }
+    const marker = readOwnership(plugin.path);
+    const digest = fingerprintTree(plugin.path);
+    const owned = marker !== null && marker.pluginId === plugin.id;
+    const enabled = plugin.enabled !== false;
+    return {
+      nativeId: plugin.id,
+      packageName: plugin.name,
+      ownership: owned
+        ? { kind: 'owned', proof: 'created', scopeId: KIMI_SCOPE, proofId: `marker:${marker.pluginId}` }
+        : { kind: 'unmanaged' },
+      presence: 'present',
+      enablement: enabled ? 'enabled' : 'disabled',
+      activation: enabled ? 'active' : 'inactive',
+      installedFingerprint: digest,
+      installedVersion: null,
+      source: owned ? { type: 'local', immutableRevision: marker.fingerprint, locator: null } : null,
+      contentRoots: [{ label: 'managed', path: plugin.path, fingerprint: digest }],
+    };
+  });
+}
+
+function kimiMutationScope(operation: CapabilityOperation, nativeId: string): NativeMutationScopeData {
+  switch (operation) {
+    case 'update':
+      return updateScope();
+    case 'retire':
+      return retireScope(nativeId);
+    case 'install':
+      return { kind: 'bounded', mode: 'exact-package', affectedNativeIds: [nativeId] };
+    case 'disable':
+      return { kind: 'unavailable' };
+    default: {
+      const unreachable: never = operation;
+      return unreachable;
+    }
+  }
+}
+
+function updateScope(): NativeMutationScopeData {
+  switch (KIMI_UPDATE_MECHANISM.kind) {
+    case 'interactive-marketplace-updater':
+      return { kind: 'unavailable' };
+    default: {
+      const unreachable: never = KIMI_UPDATE_MECHANISM.kind;
+      return unreachable;
+    }
+  }
+}
+
+function retireScope(nativeId: string): NativeMutationScopeData {
+  switch (KIMI_RETIRE_MECHANISM.kind) {
+    case 'native-remove': {
+      const owned = readKimiInstallations().some((row) => row.nativeId === nativeId && row.ownership.kind === 'owned');
+      return owned
+        ? { kind: 'bounded', mode: 'exact-package', affectedNativeIds: [nativeId] }
+        : { kind: 'unavailable' };
+    }
+    default: {
+      const unreachable: never = KIMI_RETIRE_MECHANISM.kind;
+      return unreachable;
+    }
+  }
+}
+
+function kimiProjection(operation: CapabilityOperation): NativeProjectionData {
+  switch (operation) {
+    case 'update':
+      return { kind: 'unverified', reasonId: KIMI_UPDATE_MECHANISM.kind };
+    case 'retire':
+      return { kind: 'equivalent', proofId: 'kimi-native-remove' };
+    case 'install':
+      return { kind: 'equivalent', proofId: 'kimi-staged-exact' };
+    case 'disable':
+      return { kind: 'unverified', reasonId: 'kimi-operation-ungated' };
+    default: {
+      const unreachable: never = operation;
+      return unreachable;
+    }
+  }
+}
+
+function kimiSemantics(supported: ReadonlySet<PackageSemantic>): CapabilityEvidenceProfile['semantics'] {
+  return {
+    'ordinary-skills': statusFor('ordinary-skills', supported),
+    mcp: statusFor('mcp', supported),
+    hooks: statusFor('hooks', supported),
+    commands: statusFor('commands', supported),
+    agents: statusFor('agents', supported),
+    'model-invocation-control': statusFor('model-invocation-control', supported),
+    'user-invocation-control': statusFor('user-invocation-control', supported),
+    'auto-update-control': statusFor('auto-update-control', supported),
+    resources: statusFor('resources', supported),
+    'permissions-preprocessing': statusFor('permissions-preprocessing', supported),
+    retirement: statusFor('retirement', supported),
+    'retention-safety': statusFor('retention-safety', supported),
+    readback: statusFor('readback', supported),
+    rollback: statusFor('rollback', supported),
+    'activation-reload': statusFor('activation-reload', supported),
+    'reversible-disable': statusFor('reversible-disable', supported),
+  };
+}
+
+function statusFor(semantic: PackageSemantic, supported: ReadonlySet<PackageSemantic>): 'supported' | 'unsupported' {
+  return supported.has(semantic) ? 'supported' : 'unsupported';
+}
+
+function unexposed(phase: string): never {
+  throw new Error(`Kimi lifecycle ${phase} is not exposed through the automation route yet`);
+}
