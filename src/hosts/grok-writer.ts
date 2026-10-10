@@ -686,8 +686,7 @@ function restoreActivationLink(directory: string, packageName: string): void {
   if (lstatExists(link) && lstatSync(link).isSymbolicLink()) rmSync(link);
 }
 
-function restoreRecordedConfig(directory: string): void {
-  const record = join(directory, 'config-prior.json');
+function restoreConfigFile(record: string): void {
   if (!existsSync(record)) return;
   const value = JSON.parse(readFileSync(record, 'utf8')) as { present: boolean; text: string };
   const file = configFile();
@@ -697,6 +696,10 @@ function restoreRecordedConfig(directory: string): void {
     return;
   }
   rmSync(file, { force: true });
+}
+
+function restoreRecordedConfig(directory: string): void {
+  restoreConfigFile(join(directory, 'config-prior.json'));
 }
 
 function restoreHostSnapshot(directory: string, scopeId: string, nativeId: string, packageName: string): void {
@@ -885,9 +888,13 @@ const grokLifecycleDefinition: LifecycleHostDefinition = {
   },
   async cleanup(reference: CleanupReference, disposition: CleanupDisposition) {
     switch (disposition) {
+      case 'aborted-preparation':
+        restoreConfigFile(configPriorRecord(reference.attemptId, reference.operationId));
+        discardStage(reference.attemptId, reference.operationId);
+        rmSync(join(grokRoot(), 'plgnz-rollback', `${reference.attemptId}-${reference.operationId}`), { recursive: true, force: true });
+        break;
       case 'verified-commit':
       case 'verified-rollback':
-      case 'aborted-preparation':
         discardStage(reference.attemptId, reference.operationId);
         rmSync(join(grokRoot(), 'plgnz-rollback', `${reference.attemptId}-${reference.operationId}`), { recursive: true, force: true });
         break;
