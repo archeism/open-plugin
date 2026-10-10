@@ -93,7 +93,7 @@ export const zcodeCliWriter: HostWriter = {
     assertZcodeNativeRegistryReadable();
     const native = nativeForLogical(id);
     if (native === undefined) throw new Error(`Official ZCode plugin ${id} is not a proven plgnz-owned install`);
-    runOfficialZcode(['plugins', 'uninstall', native.id, '--force']);
+    retireOwned(native.id);
     if (nativeById(native.id) !== undefined) throw new Error(`Official ZCode did not remove ${id}`);
   },
   async pin(_plugin: InstalledPlugin, _opts?: PinOptions): Promise<PinOutcome> { return { changes: [], refusals: [] }; },
@@ -251,7 +251,8 @@ function assertReplaceableOwnedRoots(market: string, resources: string, name: st
 function provePrior(prior: ReturnType<typeof nativeById>, logical: string, native: string, source: string): void { if (prior === undefined) return; const root = zcodeSafeInstallRoot(prior.installPath); const marker = root === undefined ? null : readZcodeOwnership(root); if (prior.scope !== 'user' || marker?.logicalId !== logical || marker.nativeId !== native || marker.source !== source) throw new Error(`Official ZCode ${native} is not a proven user-scoped plgnz-owned install`); }
 function proveActive(native: string, logical: string, source: string, fingerprint: string, version: string, expectedPackage: string, expectedResources: string, expectedResourceFingerprint: string): void { const row = nativeById(native); const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath); const marker = root === undefined ? null : readZcodeOwnership(root); if (row === undefined || root === undefined || row.version !== version || readZcodeEnabledPluginIds().get(native) !== true || marker?.logicalId !== logical || marker.nativeId !== native || marker.source !== source || marker.fingerprint !== fingerprint || marker.resourcePath !== expectedResources || fingerprintTree(root) !== fingerprintTree(expectedPackage) || fingerprintTree(expectedResources) !== expectedResourceFingerprint) throw new Error(`Official ZCode native readback did not activate ${native}`); }
 function restorePrior(native: string, market: string, prior: NonNullable<ReturnType<typeof nativeById>>): void { runOfficialZcode(['plugins', 'marketplace', 'update', market]); runOfficialZcode(['plugins', 'update', native]); const restored = nativeById(native); if (restored?.version !== prior.version || readZcodeEnabledPluginIds().get(native) !== true) throw new Error(`Official ZCode could not restore prior ${native}`); }
-function removeCandidate(native: string, logical: string, source: string, fingerprint: string): void { const row = nativeById(native); const marker = row === undefined ? null : readZcodeOwnership(row.installPath); if (row !== undefined && marker?.logicalId === logical && marker.source === source && marker.fingerprint === fingerprint) runOfficialZcode(['plugins', 'uninstall', native, '--force']); }
+function removeCandidate(native: string, logical: string, source: string, fingerprint: string): void { const row = nativeById(native); const marker = row === undefined ? null : readZcodeOwnership(row.installPath); if (row !== undefined && marker?.logicalId === logical && marker.source === source && marker.fingerprint === fingerprint) retireOwned(native); }
+function retireOwned(nativeId: string): boolean { const row = nativeById(nativeId); const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath); if (root !== undefined) rmSync(root, { recursive: true, force: true }); const removed = removeRegistryPlugin(nativeId); removeEnabledFlag(nativeId); return removed || root !== undefined; }
 function versionFor(plugin: PluginSource, fingerprint: string): string { const canonical = plugin.version ?? '0.0.0'; if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(canonical)) throw new Error(`ZCode needs canonical semver before plgnz metadata: ${canonical}`); return `${canonical}+plgnz.${fingerprint.slice(0, 16).toLowerCase()}`; }
 function ownedMarketplace(logical: string): string { const h = new CryptoHasher('sha256'); h.update(logical); return `plgnz-${h.digest('hex').slice(0, 16)}`; }
 function requireFingerprint(plugin: PluginSource): string { const fp = plugin.contentFingerprint ?? fingerprintTree(plugin.dir); if (!/^[0-9a-f]{16,}$/iu.test(fp)) throw new Error('ZCode requires a content fingerprint'); return fp.toLowerCase(); }
@@ -301,10 +302,34 @@ function zcodeRetireProfile(
   });
 }
 
+function zcodeInstallProfile(): CapabilityEvidenceProfile {
+  return createCapabilityEvidenceProfile({
+    host: 'zcode-cli',
+    detectedVersion: ZCODE_PROVEN_VERSION,
+    sourceTypes: ['local', 'git'],
+    operations: ['install', 'update'],
+    route: 'native',
+    operationStatus: 'supported',
+    semantics: zcodeSemantics({
+      'ordinary-skills': 'supported',
+      commands: 'supported',
+      'model-invocation-control': 'supported',
+      'auto-update-control': 'supported',
+      resources: 'supported',
+      'retention-safety': 'supported',
+      readback: 'supported',
+      rollback: 'supported',
+      'activation-reload': 'supported',
+    }),
+    evidence: [...ZCODE_EVIDENCE],
+  });
+}
+
 /** Native uninstall deletes plugin data and options. Managed retirement is the retention-safe route. */
 export const zcodeCliEvidenceProfiles: readonly CapabilityEvidenceProfile[] = Object.freeze([
   zcodeRetireProfile('native', 'unsupported', 'unsupported', 'unsupported'),
   zcodeRetireProfile('managed', 'supported', 'supported', 'supported'),
+  zcodeInstallProfile(),
 ]);
 
 function assertZcodeTarget(target: LifecycleTargetIdentity): void {
@@ -442,9 +467,20 @@ function readbackFor(
     activation: enabled ? 'active' : 'inactive',
     transition: ZCODE_ACTIVATION,
     installedFingerprint: digest,
-    contentRoots: [{ label: 'native', path: root, fingerprint: digest }],
+    contentRoots: contentRootsFor(root, digest),
     retention,
   };
+}
+
+function contentRootsFor(root: string, digest: string): LifecycleReadbackData['contentRoots'] {
+  const roots: Array<{ label: string; path: string; fingerprint: string }> = [{ label: 'native', path: root, fingerprint: digest }];
+  const resourcePath = readZcodeOwnership(root)?.resourcePath;
+  if (resourcePath === undefined) return roots;
+  const resource = realpathSync(resourcePath);
+  const owned = realpathSync(zcodeResourceRoot());
+  if (!resource.startsWith(`${owned}/`) || !statSync(resource).isDirectory()) return roots;
+  roots.push({ label: 'resources', path: resource, fingerprint: fingerprintTree(resource) });
+  return roots;
 }
 
 function retirementSnapshot(attemptId: string, operationId: string, nativeId: string): string {
@@ -563,7 +599,70 @@ function readConfigObjectFrom(file: string): Record<string, unknown> | null {
 }
 
 function notInSlice(): Promise<never> {
-  return Promise.reject(new Error('ZCode CLI lifecycle slice routes retirement only'));
+  return Promise.reject(new Error('ZCode CLI lifecycle slice does not expose this operation'));
+}
+
+function marketplaceName(nativeId: string): string {
+  const at = nativeId.indexOf('@');
+  if (at < 1 || at === nativeId.length - 1) throw new Error(`ZCode native id needs a marketplace: ${nativeId}`);
+  return nativeId.slice(at + 1);
+}
+
+function predictedCachePath(nativeId: string, packageName: string, nativeVersion: string): string {
+  return join(realpathSync(zcodeCliRoot()), 'plugins', 'cache', marketplaceName(nativeId), packageName, nativeVersion.replace(/\+/gu, '-'));
+}
+
+function stageLayout(stagingRoot: string): { marketStage: string; resourcesStage: string } {
+  const marketStage = dirname(dirname(stagingRoot));
+  return { marketStage, resourcesStage: join(dirname(marketStage), 'resources') };
+}
+
+function recordTree(dir: string, name: string, path: string): void {
+  const existed = existsSync(path);
+  writeFileSync(join(dir, `${name}-path.txt`), path);
+  writeFileSync(join(dir, `${name}-existed.txt`), existed ? '1' : '0');
+  if (existed) cpSync(path, join(dir, name), { recursive: true });
+}
+
+function activationSnapshot(attemptId: string, operationId: string, nativeId: string, marketplace: string, resources: string): string {
+  const dir = retirementSnapshot(attemptId, operationId, nativeId);
+  if (!existsSync(join(dir, 'marketplace-path.txt'))) recordTree(dir, 'marketplace', marketplace);
+  if (!existsSync(join(dir, 'resources-path.txt'))) recordTree(dir, 'resources', resources);
+  return dir;
+}
+
+function restoreRecordedTree(dir: string, name: string, ownedRoot: string): void {
+  const pathFile = join(dir, `${name}-path.txt`);
+  const existedFile = join(dir, `${name}-existed.txt`);
+  if (!existsSync(pathFile) || !existsSync(existedFile)) return;
+  const path = readFileSync(pathFile, 'utf8');
+  const existed = readFileSync(existedFile, 'utf8') === '1';
+  if (path.length === 0) throw new Error(`ZCode rollback ${name} path is empty`);
+  const owned = canonicalExistingPath(ownedRoot);
+  const target = canonicalExistingPath(path);
+  if (!target.startsWith(`${owned}/`)) throw new Error(`ZCode rollback ${name} path is outside its root`);
+  const copy = join(dir, name);
+  if (existed && !existsSync(copy)) throw new Error(`ZCode rollback ${name} copy is missing`);
+  if (!existed && existsSync(copy)) throw new Error(`ZCode rollback ${name} copy has no path`);
+  rmSync(target, { recursive: true, force: true });
+  if (!existed) return;
+  mkdirSync(dirname(target), { recursive: true });
+  cpSync(copy, target, { recursive: true });
+}
+
+const ZCODE_INSTALL_SEMANTICS = new Set<PackageSemantic>([
+  'ordinary-skills',
+  'commands',
+  'model-invocation-control',
+  'resources',
+]);
+
+function installProjection(request: NativeProjectionRequest): NativeProjectionData | undefined {
+  if (request.operation !== 'install' && request.operation !== 'update') return undefined;
+  if (!('snapshot' in request) || request.pins.length > 0) return { kind: 'unverified', reasonId: 'zcode-native-projection-unverified' };
+  const unsupported = request.snapshot.inventory.requiredSemantics.find((semantic) => !ZCODE_INSTALL_SEMANTICS.has(semantic));
+  if (unsupported !== undefined) return { kind: 'unverified', reasonId: `zcode-semantic-unverified:${unsupported}` };
+  return { kind: 'equivalent', proofId: 'zcode-marketplace-projection' };
 }
 
 const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
@@ -577,13 +676,12 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
     affectedNativeIds: [request.nativeId],
   }),
   observeNativeProjection: async (request: NativeProjectionRequest): Promise<NativeProjectionData> => {
-    if (request.operation === 'retire') {
-      const version = await probeZcodeVersion(request.targetObservation.target);
-      if (version.kind === 'detected' && version.version === ZCODE_PROVEN_VERSION) {
-        return { kind: 'requires-managed', reasonId: 'native-uninstall-drops-retained-state' };
-      }
+    const version = await probeZcodeVersion(request.targetObservation.target);
+    if (version.kind !== 'detected' || version.version !== ZCODE_PROVEN_VERSION) {
+      return { kind: 'unverified', reasonId: 'zcode-native-projection-unverified' };
     }
-    return { kind: 'unverified', reasonId: 'zcode-native-projection-unverified' };
+    if (request.operation === 'retire') return { kind: 'requires-managed', reasonId: 'native-uninstall-drops-retained-state' };
+    return installProjection(request) ?? { kind: 'unverified', reasonId: 'zcode-native-projection-unverified' };
   },
   revalidateTargetPrecondition: async (handle) => {
     const version = await probeZcodeVersion(handle.target);
@@ -592,10 +690,70 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
       targetObservationId: createTargetInventoryObservation(handle.adapterId, inventoryFor(handle.target)).observationId,
     };
   },
-  stageActivation: notInSlice,
-  applyLifecycleDirectives: notInSlice,
-  applyPins: notInSlice,
-  captureActivationPreparation: notInSlice,
+  stageActivation: async (request) => {
+    const snapshot = request.snapshot;
+    assertName(snapshot.packageName, 'plugin name');
+    const market = marketplaceName(snapshot.nativeId);
+    assertName(market, 'marketplace name');
+    mkdirSync(zcodeCliRoot(), { recursive: true });
+    const nativeVersion = versionFor({
+      name: snapshot.packageName,
+      dir: snapshot.packageRoot,
+      version: snapshot.inventory.package.version ?? undefined,
+      contentFingerprint: snapshot.packageFingerprint,
+    }, snapshot.packageFingerprint);
+    const resourceRoot = join(realpathSync(zcodeCliRoot()), 'plgnz-resources', market, snapshot.packageFingerprint);
+    const stageParent = join(zcodeCliRoot(), '.plgnz-zcode-stage');
+    mkdirSync(stageParent, { recursive: true });
+    const stage = mkdtempSync(join(stageParent, 'activation-'));
+    const marketStage = join(stage, 'marketplace');
+    const resourcesStage = join(stage, 'resources');
+    const pluginStage = join(marketStage, 'plugins', snapshot.packageName);
+    mkdirSync(dirname(pluginStage), { recursive: true });
+    mkdirSync(resourcesStage, { recursive: true });
+    projectZcodePlugin(snapshot.packageRoot, pluginStage, resourcesStage, resourceRoot, snapshot.nativeId, snapshot.nativeId, nativeVersion, snapshot.packageFingerprint, snapshot.immutableRevision);
+    writeFileSync(join(marketStage, 'marketplace.json'), `${JSON.stringify({ name: market, plugins: [{ name: snapshot.packageName, source: `./plugins/${snapshot.packageName}` }] }, null, 2)}\n`);
+    rejectCommandCollisions(marketStage, snapshot.nativeId, nativeById(snapshot.nativeId)?.installPath);
+    return { stagingId: `stage:${request.selection.attemptId}:${request.selection.operationId}`, stagingRoot: pluginStage };
+  },
+  applyLifecycleDirectives: async () => [],
+  applyPins: async (projection) => {
+    if (projection.pins.length > 0) throw new Error('ZCode cannot represent MCP pins in a native marketplace install');
+    return [];
+  },
+  captureActivationPreparation: async (projection, projectedFingerprint) => {
+    const versionFile = readJson(join(projection.stagingRoot, '.zcode-plugin', 'plugin.json'));
+    const nativeVersion = versionFile?.['version'];
+    if (typeof nativeVersion !== 'string') throw new Error('staged ZCode plugin has no native version');
+    const marker = readZcodeOwnership(projection.stagingRoot);
+    if (marker?.resourcePath === undefined) throw new Error('staged ZCode plugin has no resource path');
+    const prior = readbackFor({
+      adapterId: 'zcode-cli',
+      target: projection.target,
+      scopeId: projection.scopeId,
+      packageName: projection.packageName,
+      nativeId: projection.nativeId,
+    }, 'none');
+    const resourcesStage = stageLayout(projection.stagingRoot).resourcesStage;
+    return {
+      prior,
+      expected: {
+        ...prior,
+        route: projection.route,
+        presence: 'present',
+        enablement: 'enabled',
+        activation: 'active',
+        transition: ZCODE_ACTIVATION,
+        installedFingerprint: projectedFingerprint,
+        contentRoots: [
+          { label: 'native', path: predictedCachePath(projection.nativeId, projection.packageName, nativeVersion), fingerprint: projectedFingerprint },
+          { label: 'resources', path: marker.resourcePath, fingerprint: fingerprintTree(resourcesStage) },
+        ],
+      },
+      rollbackReference: activationSnapshot(projection.attemptId, projection.operationId, projection.nativeId, join(realpathSync(zcodeCliRoot()), 'plgnz-marketplaces', marketplaceName(projection.nativeId)), marker.resourcePath),
+      rollbackCoverageOperationIds: projection.affectedOperationIds,
+    };
+  },
   captureDisablePreparation: notInSlice,
   captureRetirementPreparation: async (request) => ({
     prior: readbackFor({
@@ -609,19 +767,61 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
     rollbackCoverageOperationIds: request.selection.affectedOperationIds,
     transition: ZCODE_ACTIVATION,
   }),
-  apply: notInSlice,
+  apply: async (prepared) => {
+    const nativeId = prepared.handle.nativeId;
+    const { marketStage, resourcesStage } = stageLayout(prepared.stagingRoot);
+    const marker = readZcodeOwnership(prepared.stagingRoot);
+    const nativeVersion = readJson(join(prepared.stagingRoot, '.zcode-plugin', 'plugin.json'))?.['version'];
+    if (marker === null || marker.nativeId !== nativeId || marker.resourcePath === undefined || typeof nativeVersion !== 'string') {
+      throw new Error(`staged ZCode plugin is not a proven projection: ${nativeId}`);
+    }
+    const market = marketplaceName(nativeId);
+    const marketRoot = join(zcodeMarketplaceRoot(), market);
+    const resourceRoot = marker.resourcePath;
+    const prior = nativeById(nativeId);
+    const priorRoot = prior === undefined ? undefined : zcodeSafeInstallRoot(prior.installPath);
+    const unchanged = prior !== undefined
+      && priorRoot !== undefined
+      && prior.version === nativeVersion
+      && readZcodeEnabledPluginIds().get(nativeId) === true
+      && fingerprintTree(priorRoot) === fingerprintTree(prepared.stagingRoot)
+      && existsSync(resourceRoot)
+      && fingerprintTree(resourceRoot) === fingerprintTree(resourcesStage);
+    if (unchanged) return { receiptId: `apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: false };
+    const marketBackup = moveAside(marketRoot);
+    const resourceBackup = moveAside(resourceRoot);
+    try {
+      mkdirSync(dirname(marketRoot), { recursive: true });
+      mkdirSync(dirname(resourceRoot), { recursive: true });
+      cpSync(marketStage, marketRoot, { recursive: true });
+      cpSync(resourcesStage, resourceRoot, { recursive: true });
+      if (prior === undefined) {
+        runOfficialZcode(['plugins', 'marketplace', 'add', marketRoot]);
+        runOfficialZcode(['plugins', 'install', nativeId]);
+      } else {
+        runOfficialZcode(['plugins', 'marketplace', 'update', market]);
+        runOfficialZcode(['plugins', 'update', nativeId]);
+      }
+      proveActive(nativeId, marker.logicalId, marker.source, marker.fingerprint, nativeVersion, prepared.stagingRoot, resourceRoot, fingerprintTree(resourcesStage));
+    } catch (error) {
+      rmSync(marketRoot, { recursive: true, force: true });
+      marketBackup.rollback();
+      rmSync(resourceRoot, { recursive: true, force: true });
+      resourceBackup.rollback();
+      if (prior !== undefined) restorePrior(nativeId, market, prior);
+      else removeCandidate(nativeId, marker.logicalId, marker.source, marker.fingerprint);
+      throw error;
+    }
+    marketBackup.commit();
+    resourceBackup.commit();
+    return { receiptId: `apply:${prepared.handle.attemptId}:${prepared.handle.operationId}`, changed: true };
+  },
   disable: notInSlice,
   retire: async (prepared) => {
     if (prepared.handle.route !== 'managed') throw new Error('Official ZCode retire is managed; native uninstall deletes retained plugin data');
-    const nativeId = prepared.handle.nativeId;
-    const row = nativeById(nativeId);
-    const root = row === undefined ? undefined : zcodeSafeInstallRoot(row.installPath);
-    if (root !== undefined) rmSync(root, { recursive: true, force: true });
-    const removed = removeRegistryPlugin(nativeId);
-    removeEnabledFlag(nativeId);
     return {
       receiptId: `retire:${prepared.handle.attemptId}:${prepared.handle.operationId}`,
-      changed: removed || root !== undefined,
+      changed: retireOwned(prepared.handle.nativeId),
     };
   },
   readback: async (handle) => readbackFor(
@@ -637,6 +837,12 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
     if (installPath.length > 0 && !cachePresent) throw new Error('ZCode rollback cache copy is missing');
     if (installPath.length === 0 && cachePresent) throw new Error('ZCode rollback cache copy has no install path');
     if (installPath.length > 0 && !isCacheInstallPath(installPath)) throw new Error('ZCode rollback cache path is outside the native cache');
+    const current = nativeById(handle.nativeId);
+    const currentRoot = current === undefined ? undefined : zcodeSafeInstallRoot(current.installPath);
+    if (currentRoot !== undefined && currentRoot !== installPath) {
+      if (!isCacheInstallPath(currentRoot)) throw new Error('ZCode rollback cache path is outside the native cache');
+      rmSync(currentRoot, { recursive: true, force: true });
+    }
     restoreRegistryPlugin(handle.nativeId, join(dir, 'installed_plugins.json'));
     restorePluginConfig(handle.nativeId, join(dir, 'config.json'));
     if (installPath.length > 0) {
@@ -644,6 +850,8 @@ const zcodeCliLifecycleDefinition: LifecycleHostDefinition = {
       mkdirSync(dirname(installPath), { recursive: true });
       cpSync(cache, installPath, { recursive: true });
     }
+    restoreRecordedTree(dir, 'marketplace', zcodeMarketplaceRoot());
+    restoreRecordedTree(dir, 'resources', zcodeResourceRoot());
     return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
   },
   cleanup: async (reference: CleanupReference, _disposition: CleanupDisposition): Promise<CleanupResultData> => {
