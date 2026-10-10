@@ -237,14 +237,28 @@ function lstatIfPresent(path: string) { try { return lstatSync(path); } catch (e
 function assertManagedPath(root: string, target: string): void { const base = resolve(root); const selected = resolve(target); if (selected !== base && !selected.startsWith(`${base}/`)) throw new Error(`Kimi managed path escapes its home: ${target}`); let current = base; for (const part of selected.slice(base.length).split('/').filter(Boolean)) { if (lstatIfPresent(current) === undefined) break; const stat = lstatSync(current); if (stat.isSymbolicLink()) throw new Error(`Kimi managed path component is a symlink: ${current}`); if (!stat.isDirectory()) throw new Error(`Kimi managed path component is not a directory: ${current}`); current = join(current, part); } const stat = lstatIfPresent(current); if (stat !== undefined) { if (stat.isSymbolicLink()) throw new Error(`Kimi managed path component is a symlink: ${current}`); if (current !== selected && !stat.isDirectory()) throw new Error(`Kimi managed path component is not a directory: ${current}`); } }
 function assertFilePath(root: string, path: string): void { assertManagedPath(root, dirname(path)); const stat = lstatIfPresent(path); if (stat === undefined) return; if (stat.isSymbolicLink()) throw new Error(`Kimi managed metadata is a symlink: ${path}`); if (!stat.isFile()) throw new Error(`Kimi managed metadata is not a file: ${path}`); }
 
-function resolveKimiBinary(): string {
-  const explicit = process.env['OPEN_PLUGIN_KIMI_BIN'];
-  const binary = explicit ?? join(process.env['HOME'] ?? '.', '.local', 'share', 'kimi-code', 'bin', 'kimi');
-  if (!existsSync(binary)) throw new Error(`current Kimi Code binary not found: ${binary}`);
+const KIMI_VERSION = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+
+function kimiBinaryPath(): string {
+  return process.env['OPEN_PLUGIN_KIMI_BIN'] ?? join(process.env['HOME'] ?? '.', '.local', 'share', 'kimi-code', 'bin', 'kimi');
+}
+
+function readKimiBinaryVersion(binary: string): { exitCode: number | null; version: string } {
   const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
-  const version = new TextDecoder().decode(result.stdout).trim();
-  const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);
-  if (result.exitCode !== 0 || match === null || Number(match[1]) === 0) throw new Error(`current Kimi Code binary required; legacy or unsupported binary: ${binary}`);
+  return { exitCode: result.exitCode, version: new TextDecoder().decode(result.stdout).trim() };
+}
+
+function currentKimiVersion(exitCode: number | null, version: string): string | undefined {
+  const match = KIMI_VERSION.exec(version);
+  if (exitCode !== 0 || match === null || Number(match[1]) === 0) return undefined;
+  return version;
+}
+
+function resolveKimiBinary(): string {
+  const binary = kimiBinaryPath();
+  if (!existsSync(binary)) throw new Error(`current Kimi Code binary not found: ${binary}`);
+  const probed = readKimiBinaryVersion(binary);
+  if (currentKimiVersion(probed.exitCode, probed.version) === undefined) throw new Error(`current Kimi Code binary required; legacy or unsupported binary: ${binary}`);
   return binary;
 }
 async function reservePort(): Promise<number> { return runtimeReservePort(); }
@@ -329,12 +343,11 @@ export const kimiLifecycle: LifecycleHostDefinition = {
 };
 
 function probeKimiBinary(): TargetVersionObservation {
-  const binary = process.env['OPEN_PLUGIN_KIMI_BIN'];
-  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
-  const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe' });
-  const version = new TextDecoder().decode(result.stdout).trim();
-  const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.exec(version);
-  if (result.exitCode !== 0 || match === null || Number(match[1]) === 0) return { kind: 'unparseable' };
+  const binary = kimiBinaryPath();
+  if (!existsSync(binary)) return { kind: 'unknown' };
+  const probed = readKimiBinaryVersion(binary);
+  const version = currentKimiVersion(probed.exitCode, probed.version);
+  if (version === undefined) return { kind: 'unparseable' };
   return { kind: 'detected', version, probeId: `kimi-bin:${version}` };
 }
 

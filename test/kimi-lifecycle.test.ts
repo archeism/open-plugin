@@ -7,6 +7,7 @@ import { fingerprintTree } from '../src/fingerprint';
 import { kimiWriter, kimiLifecycle } from '../src/hosts/kimi-writer';
 import { kimi } from '../src/hosts/kimi';
 import {
+  LifecycleHostPhaseError,
   createFrozenPackageSnapshot,
   createLifecycleHostAdapter,
   createLifecyclePlanCoverage,
@@ -430,9 +431,51 @@ describe('Kimi lifecycle preflight', () => {
         expect(retireScope.kind === 'bounded' && retireScope.affectedNativeIds).toEqual(['demo']);
         expect(retire.kind === 'selected' && retire.route).toBe('native');
         expect(retire.kind === 'selected' && retire.operation).toBe('retire');
+        if (retire.kind !== 'selected') throw new Error('retire route was not selected');
+        let sealFailure: unknown;
+        try {
+          await adapter.prepareRetirement({
+            operationId: 'op-retire',
+            attemptId: 'attempt-retire',
+            action: 'remove',
+            selection: retire,
+            activation,
+          });
+        } catch (error) {
+          sealFailure = error;
+        }
+        expect(sealFailure instanceof LifecycleHostPhaseError).toBe(true);
+        if (!(sealFailure instanceof LifecycleHostPhaseError)) throw new Error('selected retire did not fail with a phase error');
+        expect(sealFailure.phase).toBe('seal');
+        expect(sealFailure.reason.code).toBe('internal.defect');
+        expect(sealFailure.mutationStarted).toBe(false);
+        expect(sealFailure.message).toContain('retirement-capture is not exposed');
+        expect(readFileSync(join(managed, 'payload.txt'), 'utf8')).toBe('installed\n');
       } finally {
         if (before === undefined) delete process.env.OPEN_PLUGIN_KIMI_BIN;
         else process.env.OPEN_PLUGIN_KIMI_BIN = before;
+      }
+    });
+  });
+
+  test('probes the default Kimi binary when OPEN_PLUGIN_KIMI_BIN is unset', async () => {
+    await withKimi(async ({ home }) => {
+      const binary = join(home, '.local', 'share', 'kimi-code', 'bin', 'kimi');
+      mkdirSync(join(home, '.local', 'share', 'kimi-code', 'bin'), { recursive: true });
+      writeFileSync(binary, '#!/bin/sh\necho 2.0.1\n');
+      chmodSync(binary, 0o755);
+      const beforeBin = process.env.OPEN_PLUGIN_KIMI_BIN;
+      const beforeHome = process.env.HOME;
+      delete process.env.OPEN_PLUGIN_KIMI_BIN;
+      process.env.HOME = home;
+      try {
+        const version = await createLifecycleHostAdapter(kimiLifecycle).probeVersion({ kind: 'kimi', instance: 'default' });
+        expect(version).toEqual({ kind: 'detected', version: '2.0.1', probeId: 'kimi-bin:2.0.1' });
+      } finally {
+        if (beforeBin === undefined) delete process.env.OPEN_PLUGIN_KIMI_BIN;
+        else process.env.OPEN_PLUGIN_KIMI_BIN = beforeBin;
+        if (beforeHome === undefined) delete process.env.HOME;
+        else process.env.HOME = beforeHome;
       }
     });
   });
