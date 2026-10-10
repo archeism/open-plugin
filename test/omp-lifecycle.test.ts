@@ -148,6 +148,25 @@ describe('OMP native extension-package lifecycle', () => {
     rmSync(link(root)); symlinkSync(owned(root), link(root));
     await ompWriter.remove('demo-plugin@personal');
     expect(existsSync(owned(root))).toBe(false); expect(existsSync(link(root))).toBe(false); expect(existsSync(foreign)).toBe(true);
+    const lock = JSON.parse(readFileSync(join(root, '.omp/plugins/omp-plugins.lock.json'), 'utf8')) as { plugins: Record<string, { enabled: boolean }> };
+    expect(lock.plugins[packageName]?.enabled).toBe(true);
+  }));
+
+  test('re-add keeps feature selection and settings while enabling the package', async () => isolated(async root => {
+    const incoming = fixture();
+    await ompWriter.add(incoming.plugin, incoming.resolved);
+    const lockFile = join(root, '.omp/plugins/omp-plugins.lock.json');
+    const lock = JSON.parse(readFileSync(lockFile, 'utf8')) as { plugins: Record<string, Record<string, unknown>>; settings: unknown };
+    lock.plugins[packageName] = { ...lock.plugins[packageName], enabled: false, enabledFeatures: ['skills'], settings: { theme: 'quiet' } };
+    lock.settings = { telemetry: false };
+    writeFileSync(lockFile, JSON.stringify(lock));
+    await ompWriter.add(incoming.plugin, incoming.resolved);
+    const next = JSON.parse(readFileSync(lockFile, 'utf8')) as { plugins: Record<string, { enabled: boolean; enabledFeatures: string[]; settings: { theme: string } }>; settings: { telemetry: boolean } };
+    expect(next.plugins[packageName]?.enabled).toBe(true);
+    expect(next.plugins[packageName]?.enabledFeatures).toEqual(['skills']);
+    expect(next.plugins[packageName]?.settings).toEqual({ theme: 'quiet' });
+    expect(next.settings).toEqual({ telemetry: false });
+    expect(readFileSync(join(owned(root), 'resources/value.txt'), 'utf8')).toBe('one\n');
   }));
 
   test('dry-run refuses unsupported invocation gates without creating the OMP store', async () => isolated(async root => {
