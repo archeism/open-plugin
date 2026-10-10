@@ -38,7 +38,6 @@ export type CodexVersionProbe =
   | { readonly kind: 'unknown' }
   | { readonly kind: 'unparseable' };
 
-/** Explicit `OPEN_PLUGIN_CODEX_BIN`, otherwise the first executable `codex` on `PATH`. */
 export function resolveCodexBinary(env: Record<string, string | undefined> = process.env): string | null {
   const explicit = env['OPEN_PLUGIN_CODEX_BIN'];
   const binary = explicit !== undefined && explicit.length > 0 ? explicit : which('codex');
