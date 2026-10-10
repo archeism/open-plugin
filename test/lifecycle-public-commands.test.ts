@@ -1200,6 +1200,68 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('scenario 15 managed retirement removes kept and leaves retained files; native uninstall that drops retained state is not selected, and Managed retirement keeps it', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const keptJson = '{"name":"kept","version":"1.0.0","description":"kept"}\n';
+      const retainedData = 'plugin data\n';
+      const retainedMetadata = 'inactive metadata\n';
+      const source = harness.source('scenario-15', {
+        'plugin.json': keptJson,
+        'skills/kept/SKILL.md': '---\nname: kept\ndescription: kept\n---\n\nKept.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const cursorStore = harness.storePath('cursor');
+      const installedPath = join(cursorStore, 'plugins', 'local', 'kept', 'plugin.json');
+      const dataPath = join(cursorStore, 'plugins', 'retained', 'kept', 'data', 'note.txt');
+      const metadataPath = join(cursorStore, 'plugins', 'retained', 'kept', 'metadata', 'note.txt');
+
+      const installed = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const installedReport = parseLifecycleReport(JSON.parse(installed.stdout));
+      const scopeId = installedReport.outcomes[0]?.scope.id;
+      expect({
+        exitCode: installed.exitCode,
+        stderr: installed.stderr,
+        scopeShape: scopeId !== undefined && /^scope-v1-[0-9a-f]{64}$/u.test(scopeId),
+        kept: readFileSync(installedPath, 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        scopeShape: true,
+        kept: keptJson,
+      });
+
+      mkdirSync(join(cursorStore, 'plugins', 'retained', 'kept', 'data'), { recursive: true });
+      mkdirSync(join(cursorStore, 'plugins', 'retained', 'kept', 'metadata'), { recursive: true });
+      writeFileSync(dataPath, retainedData);
+      writeFileSync(metadataPath, retainedMetadata);
+
+      const retired = harness.run(['retire-source', scopeId!, '--target', 'cursor', '--json'], { env });
+      const retiredReport = parseLifecycleReport(JSON.parse(retired.stdout));
+      const outcome = retiredReport.outcomes.find((row) => row.package === 'kept');
+      expect({
+        exitCode: retired.exitCode,
+        stderr: retired.stderr,
+        installed: existsSync(installedPath),
+        data: readFileSync(dataPath, 'utf8'),
+        metadata: readFileSync(metadataPath, 'utf8'),
+        route: outcome?.route ?? null,
+        action: outcome?.action ?? null,
+        result: outcome?.result ?? null,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        installed: false,
+        data: retainedData,
+        metadata: retainedMetadata,
+        route: 'managed',
+        action: 'retire-orphan',
+        result: 'succeeded',
+      });
+    });
+  });
+
   test('retire-source removes a recorded scope and keeps the report on the frozen plan', async () => {
     await withLifecycleCliHarness((harness) => {
       harness.writeHome({ '.cursor/.keep': '' });
