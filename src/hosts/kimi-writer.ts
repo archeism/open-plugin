@@ -12,6 +12,7 @@ import type {
   TargetInstallationData,
   TargetVersionObservation,
 } from '../lifecycle-host';
+import { homeRoot } from '../paths';
 import type { PluginSource, ResolvedSource } from '../source';
 import type { CapabilityOperation, PackageSemantic } from '../semantic-inventory';
 import { normalizeCommandSources } from '../conversion';
@@ -240,7 +241,7 @@ function assertFilePath(root: string, path: string): void { assertManagedPath(ro
 const KIMI_VERSION = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
 function kimiBinaryPath(): string {
-  return process.env['OPEN_PLUGIN_KIMI_BIN'] ?? join(process.env['HOME'] ?? '.', '.local', 'share', 'kimi-code', 'bin', 'kimi');
+  return process.env['OPEN_PLUGIN_KIMI_BIN'] ?? join(homeRoot(), '.local', 'share', 'kimi-code', 'bin', 'kimi');
 }
 
 function readKimiBinaryVersion(binary: string): { exitCode: number | null; version: string } {
@@ -315,7 +316,7 @@ export const kimiLifecycle: LifecycleHostDefinition = {
       sourceTypes: ['local', 'git'],
       operations: ['retire'],
       route: 'native',
-      operationStatus: 'supported',
+      operationStatus: 'unverified',
       semantics: kimiSemantics(KIMI_RETIRE_SEMANTICS),
       evidence: ['docs/evidence/kimi-public-lifecycle-20260922.json'],
     }),
