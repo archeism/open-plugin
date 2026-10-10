@@ -14,9 +14,10 @@ The published package ships `dist/plugnz.mjs` — one plain-JavaScript ESM bundl
 2026-10-10).** Every push to `main` publishes the next `0.0.x` patch
 automatically: build -> registry check (loop guard) -> patch bump ->
 Trusted Publishing publish -> `v<version>` tag -> bump commit back with
-`[skip ci]`. The loop guard is the registry itself — when package.json's
-version already exists on npm the run succeeds without publishing, so the
-bump commit's own re-trigger is a no-op. Manual dispatch (version must
+`[skip ci]`. Two guards make the loop safe: the release-bot's own bump
+commits are recognized by their `chore(release): v` subject and skip, and
+any re-run that would re-publish an existing version skips via the
+registry check. Manual dispatch (version must
 match `package.json`) remains for exact-version releases. Never hand-edit
 `package.json`'s version on main; the release-bot owns it. When the
 project outgrows this, move to tag-triggered releases before reinstating

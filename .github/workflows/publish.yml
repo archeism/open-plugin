@@ -45,17 +45,28 @@ jobs:
           DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           CURRENT=$(node -p "require('./package.json').version")
+          HEAD_SUBJECT=$(git log -1 --pretty=%s)
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$DISPATCH_VERSION" ]; then
             if [ "$CURRENT" != "$DISPATCH_VERSION" ]; then
               echo "dispatch requested $DISPATCH_VERSION but package.json is $CURRENT"; exit 1
             fi
             VERSION="$CURRENT"
-          elif npm view "plugnz@$CURRENT" version >/dev/null 2>&1; then
+          elif printf '%s' "$HEAD_SUBJECT" | grep -q '^chore(release): v'; then
+            # This push IS the release-bot's bump commit — the release it
+            # belongs to already happened in the run that created it.
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "$CURRENT is already on npm — nothing to release"
+            echo "head is release commit: $HEAD_SUBJECT"
             exit 0
           else
+            # Every other push to main releases the next patch. The registry
+            # check stays as a re-run guard: publishing an existing version
+            # would fail, so skip instead.
             VERSION=$(node -p "'$CURRENT'.split('.').map((p, i) => i === 2 ? +p + 1 : p).join('.')")
+            if npm view "plugnz@$VERSION" version >/dev/null 2>&1; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$VERSION already exists on npm — skipping re-run"
+              exit 0
+            fi
             node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); pkg.version = '$VERSION'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n')"
             bun install --frozen-lockfile
           fi
