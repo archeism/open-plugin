@@ -1,17 +1,59 @@
-/**
- * Read-only dcode (deepagents-code) plugin store reader.
- *
- * Evidence: deepagents-code 0.1.71 / upstream store.py at 59408ebe.  The
- * supported native state is `<DEEPAGENTS_HOME>/.state/{installed_plugins,
- * plugin_state}.json`; commands and invocation gating are deliberately not
- * inferred from the loader.
- */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
+import type { PluginMcpCandidate } from '../mcp';
+import { spawnSync, which } from '../runtime';
 import { singleInstanceTargetProfile } from '../target-profile';
 
+declare const TextDecoder: any;
+
 export const dcodeTargetProfile = singleInstanceTargetProfile('dcode');
+
+export type DcodeVersionObservation =
+  | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'unparseable' };
+
+const DCODE_VERSION_LINE = /^deepagents-code (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/;
+
+export function probeDcodeVersion(): DcodeVersionObservation {
+  const binary = dcodeBinary();
+  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
+  let stdout = '';
+  try {
+    const result = spawnSync([binary, '--version'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: dcodeProbeEnv(),
+      timeout: 10_000,
+    });
+    if (result.exitCode !== 0) return { kind: 'unparseable' };
+    stdout = new TextDecoder().decode(result.stdout);
+  } catch {
+    return { kind: 'unparseable' };
+  }
+  const line = stdout.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.length > 0);
+  const version = line === undefined ? undefined : DCODE_VERSION_LINE.exec(line)?.[1];
+  if (version === undefined) return { kind: 'unparseable' };
+  return { kind: 'detected', version, probeId: `dcode:${version}` };
+}
+
+function dcodeBinary(): string | undefined {
+  const override = process.env['OPEN_PLUGIN_DCODE_BIN'];
+  if (override !== undefined && override.length > 0) return override;
+  return which('dcode') ?? undefined;
+}
+
+function dcodeProbeEnv(): Record<string, string | undefined> {
+  const isolatedHome = process.env['OPEN_PLUGIN_HOME'];
+  const explicitRoot = process.env['OPEN_PLUGIN_DCODE_ROOT'];
+  const home = isolatedHome !== undefined && isolatedHome.length > 0
+    ? isolatedHome
+    : explicitRoot !== undefined && explicitRoot.length > 0
+      ? dcodeRoot()
+      : process.env['HOME'];
+  return { ...process.env, HOME: home, DEEPAGENTS_HOME: dcodeRoot() };
+}
 
 export function dcodeRoot(): string {
   const explicit = process.env['OPEN_PLUGIN_DCODE_ROOT'];
@@ -23,6 +65,17 @@ export function dcodeRoot(): string {
 export function dcodeStateDir(): string { return join(dcodeRoot(), '.state'); }
 export function dcodeRegistryFile(): string { return join(dcodeStateDir(), 'installed_plugins.json'); }
 export function dcodeEnablementFile(): string { return join(dcodeStateDir(), 'plugin_state.json'); }
+export function dcodeCacheRoot(): string { return join(dcodeRoot(), 'plugins', 'cache'); }
+
+export function dcodeMcpCandidates(): readonly PluginMcpCandidate[] {
+  return [
+    { kind: 'spec', file: '.mcp.json' },
+    { kind: 'spec', file: 'mcp.json' },
+    { kind: 'inline', manifest: 'plugin.json' },
+    { kind: 'inline', manifest: '.claude-plugin/plugin.json' },
+    { kind: 'inline', manifest: '.codex-plugin/plugin.json' },
+  ];
+}
 
 type Registry = { version: 1 | 2; plugins: Record<string, unknown> };
 type Enablement = { version?: number; enabledPlugins: Record<string, boolean> };
