@@ -48,22 +48,11 @@ if (args[0] === '--version') {
   console.log('grok ' + version + ' (' + (process.env.GROK_FAKE_BUILD ?? 'fixturebuild') + ')');
   process.exit(0);
 }
-if (args[0] === 'plugin' && args[1] === 'validate') {
-  const source = args[2];
-  const name = source.split('/').filter(Boolean).at(-1);
-  const value = registryValue();
-  const current = name === undefined ? undefined : value.repos[name];
-  const occupied = current && current.plugins && Object.keys(current.plugins).length > 0;
-  if (name && !occupied) {
-    value.repos[name] = { path: join(home, 'installed-plugins', 'cache', name), plugins: {}, kind: { type: 'Local', source_path: source } };
-    saveRegistry(value);
-  }
-  process.exit(0);
-}
+if (args[0] === 'plugin' && args[1] === 'validate') process.exit(0);
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'list') { console.log(JSON.stringify(markets())); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add') { const root = args[3]; write(state, [...markets(), { name: root.split('/').at(-1), kind: 'local', source: { path: root } }]); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'remove') { const root = args[3]; write(state, markets().filter(row => row.source.path !== root)); const value = registryValue(); for (const [key, repo] of Object.entries(value.repos)) if (repo.marketplace?.source_url_or_path === root) delete value.repos[key]; saveRegistry(value); process.exit(0); }
-const install = name => { const row = markets().find(item => item.name === args[2].split('@local/')[1]); if (!row) process.exit(2); const source = join(row.source.path, 'plugins', name); if (!existsSync(source)) process.exit(3); const value = registryValue(); const prior = value.repos[name]; const target = typeof prior?.path === 'string' ? prior.path : join(home, 'installed-plugins', 'cache', name); rmSync(target, { recursive: true, force: true }); cpSync(source, target, { recursive: true }); value.repos[name] = { path: target, plugins: { [name]: {} }, kind: { type: 'Local', source_path: source }, marketplace: { source_url_or_path: row.source.path, source_display_name: row.name, plugin_subdir: 'plugins/' + name } }; saveRegistry(value); };
+const install = name => { const row = markets().find(item => item.name === args[2].split('@local/')[1]); if (!row) process.exit(2); const source = join(row.source.path, 'plugins', name); if (!existsSync(source)) process.exit(3); const value = registryValue(); const prior = value.repos[name]; const occupied = prior && prior.plugins && Object.keys(prior.plugins).length > 0 && typeof prior.path === 'string'; const target = occupied ? prior.path : join(home, 'installed-plugins', 'assigned', name); rmSync(target, { recursive: true, force: true }); cpSync(source, target, { recursive: true }); value.repos[name] = { path: target, plugins: { [name]: {} }, kind: { type: 'Local', source_path: source }, marketplace: { source_url_or_path: row.source.path, source_display_name: row.name, plugin_subdir: 'plugins/' + name } }; saveRegistry(value); };
 if (args[0] === 'plugin' && args[1] === 'install') { install(args[2].split('@')[0]); process.exit(0); }
 if (args[0] === 'plugin' && args[1] === 'update') {
   const value = registryValue();
@@ -219,7 +208,9 @@ async function prepare(
 }
 
 function registryDocument(home: string): { repos: Record<string, { path?: string; note?: string; plugins?: Record<string, unknown> }> } {
-  return JSON.parse(readFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), 'utf8')) as { repos: Record<string, { path?: string; note?: string; plugins?: Record<string, unknown> }> };
+  const file = join(home, '.grok', 'installed-plugins', 'registry.json');
+  if (!existsSync(file)) return { repos: {} };
+  return JSON.parse(readFileSync(file, 'utf8')) as { repos: Record<string, { path?: string; note?: string; plugins?: Record<string, unknown> }> };
 }
 
 function registryInstallPath(home: string, name: string): string {
@@ -281,16 +272,19 @@ describe('Grok lifecycle SPI', () => {
       }));
       expect(installed.handle.route).toBe('native');
       expect(installed.handle.detectedVersion).toBe('1.0.41');
+      expect(registryDocument(home).repos.demo).toBeUndefined();
+      const sealedPath = installed.handle.expected.contentRoots[0]?.path;
       await adapter.apply(installed);
       const registryPath = registryInstallPath(home, 'demo');
-      expect(registryPath.endsWith('/cache/demo')).toBe(true);
+      expect(registryPath).toBe(join(home, '.grok', 'installed-plugins', 'assigned', 'demo'));
+      expect(sealedPath === registryPath).toBe(false);
       const active = join(registryPath, 'resources', 'value.txt');
       expect(readFileSync(active, 'utf8')).toBe('one\n');
       const installedReadback = await adapter.readback(installed.handle);
       adapter.verify(installed.handle, installedReadback);
       expect(installedReadback.contentRoots[0]?.path).toBe(registryPath);
       expect(installedReadback.transition).toEqual({ requirement: 'reload', status: 'effective' });
-      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toContain('plugin_auto_update = false');
+      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toBe('plugin_auto_update = false\n');
       expect(existsSync(join(marketplaceRoot(home), '.plgnz-lifecycle.json'))).toBe(false);
       expect(stageNames(home)).toEqual([]);
       const inspect = spawnSync(process.env.OPEN_PLUGIN_GROK_BIN ?? '', ['inspect', '--json'], {
@@ -336,6 +330,7 @@ describe('Grok lifecycle SPI', () => {
       expect(added.includes('plugin install')).toBe(false);
       expect(registryDocument(home).repos.other?.note).toBe('after');
       expect(grok.listInstalled().map((plugin) => plugin.id).sort()).toEqual(['demo@catalog', 'other']);
+      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toBe('plugin_auto_update = false\n');
       expect(stageNames(home)).toEqual([]);
     });
   });
@@ -345,19 +340,25 @@ describe('Grok lifecycle SPI', () => {
       const sibling = join(home, '.grok', 'installed-plugins', 'other-native');
       writeFiles(sibling, { 'keep.txt': 'sibling\n' });
       writeFiles(join(home, '.grok'), {
-        'config.toml': '[plugins]\ndisabled = ["kept"]\n',
+        'config.toml': '[plugins]\ndisabled = ["kept"]\nplugin_auto_update = true\n',
         'installed-plugins/registry.json': JSON.stringify({
           version: 1,
           repos: { other: { path: sibling, note: 'before', plugins: { other: {} }, kind: { type: 'Local', source_path: sibling } } },
         }),
       });
       const adapter = createGrokLifecycleAdapter();
+      const priorConfig = '[plugins]\ndisabled = ["kept"]\nplugin_auto_update = true\n';
       const prepared = await prepare(adapter, snapshot(root, {
         operationId: 'op-fresh',
         attemptId: 'attempt-fresh',
         action: 'install',
         bytes: 'fresh\n',
       }));
+      expect(registryDocument(home).repos.demo).toBeUndefined();
+      const sealedPath = prepared.handle.expected.contentRoots[0]?.path;
+      const pinnedConfig = readFileSync(join(home, '.grok', 'config.toml'), 'utf8');
+      expect(pinnedConfig.indexOf('plugin_auto_update = false')).toBeLessThan(pinnedConfig.indexOf('[plugins]'));
+      expect(pinnedConfig.includes('plugin_auto_update = true')).toBe(false);
       const during = registryDocument(home);
       during.repos.other = { ...during.repos.other, note: 'after' };
       writeFileSync(join(home, '.grok', 'installed-plugins', 'registry.json'), JSON.stringify({ version: 1, repos: during.repos }));
@@ -369,6 +370,8 @@ describe('Grok lifecycle SPI', () => {
       expect(error.phase).toBe('apply');
       expect(error.mutationStarted).toBe(true);
       const cache = registryInstallPath(home, 'demo');
+      expect(cache).toBe(join(home, '.grok', 'installed-plugins', 'assigned', 'demo'));
+      expect(sealedPath === cache).toBe(false);
       expect(readFileSync(join(cache, 'resources', 'value.txt'), 'utf8')).toBe('fresh\n');
       expect(existsSync(join(home, '.grok', 'plugins', 'demo'))).toBe(true);
       expect(JSON.parse(readFileSync(join(home, '.grok', 'fake-marketplaces.json'), 'utf8'))).toHaveLength(1);
@@ -391,9 +394,7 @@ describe('Grok lifecycle SPI', () => {
       expect(added.includes('plugin update')).toBe(false);
       expect(added.includes('plugin install')).toBe(true);
       expect(stageNames(home)).toEqual([]);
-      const config = readFileSync(join(home, '.grok', 'config.toml'), 'utf8');
-      expect(config).toContain('plugin_auto_update = false');
-      expect(config).toContain('disabled = ["kept"]');
+      expect(readFileSync(join(home, '.grok', 'config.toml'), 'utf8')).toBe(priorConfig);
     });
   });
 
