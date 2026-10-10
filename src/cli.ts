@@ -273,12 +273,18 @@ function withoutRetiredActivation(
 ): LifecycleStateV2 {
   const activation = state.activations.find((row) => row.scopeId === scopeId && row.packageId === packageId && row.nativeId === nativeId);
   if (activation === undefined) throw new Error(`activation '${packageId}' is not recorded for manual removal`);
+  const dropped = state.activations.filter((row) => row.scopeId !== scopeId || row.packageId !== packageId || row.nativeId !== nativeId);
   const tombstone = retirementTombstone(activation, retiredAt);
-  if (tombstone === null) throw new Error(`activation '${packageId}' cannot retain a tombstone`);
+  if (tombstone === null) {
+    if (activation.ownership.kind === 'legacy-claim' && activation.route.kind === 'legacy-unverified') {
+      return { ...state, stateGeneration: state.stateGeneration + 1, activations: dropped };
+    }
+    throw new Error(`activation '${packageId}' cannot retain a tombstone`);
+  }
   return {
     ...state,
     stateGeneration: state.stateGeneration + 1,
-    activations: state.activations.filter((row) => row.scopeId !== scopeId || row.packageId !== packageId || row.nativeId !== nativeId),
+    activations: dropped,
     tombstones: state.tombstones.some((row) => row.id === tombstone.id) ? state.tombstones : [...state.tombstones, tombstone],
   };
 }
@@ -808,7 +814,8 @@ export async function main(argv: string[]): Promise<number> {
         );
         break;
       }
-      if (record.ownership !== 'plgnz' && record.ownership !== undefined) {
+      const legacyClaim = lifecycleVersion === 2 && record.ownership === 'legacy-unverified';
+      if (record.ownership !== 'plgnz' && record.ownership !== undefined && !legacyClaim) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', 'install ownership is not proven; refusing removal');
         break;
       }
@@ -879,7 +886,19 @@ export async function main(argv: string[]): Promise<number> {
         if (current === undefined) throw new Error(`install record '${pair.record.id}' disappeared before apply`);
         const removeOptions = { source: pair.record.source, legacyNativeIds: pair.legacyNativeIds };
         let pending = current;
-        if (lifecycleVersion !== 2) {
+        if (lifecycleVersion === 2) {
+          const fresh = readLifecycleState();
+          if (fresh.sourceVersion !== 2 || fresh.state.stateGeneration !== lifecycleState.stateGeneration) {
+            throw new LifecycleCommandError(reason('internal', 'internal.invariant', `state generation moved before removal of '${nativeId}'`));
+          }
+          try {
+            lifecycleState = withoutRetiredActivation(fresh.state, operation.scope.id, operation.package, nativeId, new Date().toISOString());
+          } catch (error) {
+            throw new LifecycleCommandError(reason('internal', 'internal.invariant', unknownErrorDiagnostic(error)));
+          }
+          writeLifecycleState(lifecycleState, { globalPreflight: 'succeeded' });
+          state = readState();
+        } else {
           pending = { ...current, id: nativeId, pending: 'remove' as const };
           const pendingState = state.map((candidate) => candidate === current ? pending : candidate);
           writeState(pendingState);
@@ -902,8 +921,6 @@ export async function main(argv: string[]): Promise<number> {
         }
         pairTerminalPhase = 'finalize';
         if (lifecycleVersion === 2) {
-          lifecycleState = withoutRetiredActivation(lifecycleState, operation.scope.id, operation.package, nativeId, new Date().toISOString());
-          writeLifecycleState(lifecycleState, { globalPreflight: 'succeeded' });
           state = readState();
         } else {
           const finalized = state.filter((candidate) => candidate !== pending);

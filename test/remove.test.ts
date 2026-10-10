@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
 import { join } from 'node:path';
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { withHostEnvAsync, initGitRepo, writeFiles, writeLedger } from './util';
 import { main } from '../src/cli';
@@ -609,6 +609,71 @@ describe('remove', () => {
         code: 0,
         activations: [],
         tombstones: [{ packageId: 'demo-plugin', retentionState: 'plugin-state-retained' }],
+      });
+    });
+  });
+
+  test('manual remove of a legacy-claim activation decides the next state before deleting', async () => {
+    await withHostEnvAsync('codex', async (home) => {
+      const pluginFile = join(home, 'legacy-plugin.txt');
+      writeFileSync(pluginFile, 'installed');
+      const created = scopedRemoveState([{ target: 'codex', source: '/codex-source' }]);
+      const activation = created.activations[0];
+      if (activation === undefined) throw new Error('expected an activation');
+      writeFileSync(join(home, 'state.json'), JSON.stringify({
+        ...created,
+        activations: [{
+          scopeId: activation.scopeId,
+          packageId: activation.packageId,
+          nativeId: activation.nativeId,
+          sourceRevision: activation.sourceRevision,
+          route: { kind: 'legacy-unverified' },
+          ownership: { kind: 'legacy-claim' },
+          fingerprints: activation.fingerprints,
+          activationState: 'unknown',
+          readbackState: 'unverified',
+          pins: [],
+        }],
+      }));
+      let removedWhileClaimRemained = false;
+      const writer: HostWriter = {
+        id: 'codex', gui: false, plannedNativeId,
+        detect: () => true, stores: () => [], listInstalled: () => [], mcpEntries: () => [],
+        add: async () => {},
+        remove: async () => {
+          const document = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')) as {
+            activations?: Array<{ packageId?: string; ownership?: { kind?: string }; pending?: unknown }>;
+          };
+          const claim = document.activations?.find((row) => row.packageId === 'demo-plugin');
+          if (claim?.ownership?.kind === 'legacy-claim' && claim.pending === undefined) removedWhileClaimRemained = true;
+          rmSync(pluginFile);
+        },
+        pin: async () => ({ changes: [], refusals: [] }),
+      };
+      const original = [...cleanupWriters];
+      const output: string[] = [];
+      const originalLog = console.log;
+      cleanupWriters.splice(0, cleanupWriters.length, writer);
+      console.log = (value: string) => output.push(value);
+      let code = 1;
+      try {
+        code = await main(['remove', 'demo-plugin', '--target', 'codex', '--json']);
+      } finally {
+        cleanupWriters.splice(0, cleanupWriters.length, ...original);
+        console.log = originalLog;
+      }
+      const loaded = readLifecycleState();
+      if (code !== 0) expect(existsSync(pluginFile)).toBe(true);
+      expect({
+        code,
+        removedWhileClaimRemained,
+        activations: loaded.state.activations.map((row) => row.packageId),
+        tombstones: loaded.state.tombstones.map((row) => row.packageId),
+      }).toEqual({
+        code: 0,
+        removedWhileClaimRemained: false,
+        activations: [],
+        tombstones: [],
       });
     });
   });

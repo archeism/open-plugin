@@ -384,12 +384,18 @@ async function runRetire(
     receipt = await host.adapter.retire(sealed);
     const observation = await host.adapter.readback(receipt.handle);
     verified = host.adapter.verify(receipt.handle, observation);
-    ledger.confirmRetirement(plan, operation, prepared.recorded);
   } catch (error) {
-    return stop(operation, thrownReason(error));
+    const reason = thrownReason(error);
+    if (receipt !== undefined) return recoverApplied(plan, operation, host, ledger, receipt.handle, reason);
+    return stop(operation, reason);
   }
   if (receipt === undefined || verified === undefined) {
     return stop(operation, createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.operationId}' produced no verified removal`));
+  }
+  try {
+    ledger.confirmRetirement(plan, operation, prepared.recorded);
+  } catch (error) {
+    return recoverApplied(plan, operation, host, ledger, receipt.handle, thrownReason(error));
   }
   try {
     await host.adapter.cleanup(verified.handle, 'verified-commit');
@@ -619,6 +625,7 @@ class Ledger {
     const desiredPairs = plan.operations.filter((row) => row.operation.scope.id === operation.scope.id && row.operation.coverage === 'desired-pair');
     const converged = desiredPairs.every((row) =>
       row.operation.operationId === operation.operationId
+      || row.operation.action === 'unchanged'
       || this.journalState(plan.attemptId, row.operation.operationId) === 'completed');
     this.state = {
       ...this.state,

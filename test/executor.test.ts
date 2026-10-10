@@ -1071,6 +1071,102 @@ async function withHome<T>(home: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+test('a retirement readback mismatch rolls back or records recovery.required', async () => {
+  const root = temp('retire-readback-mismatch');
+  const home = join(root, 'home');
+  mkdirSync(home);
+  const alpha = writePlugin(join(root, 'sources'), 'alpha');
+  const codex = boundHost('codex', join(root, 'codex'), ['install', 'update', 'retire']);
+
+  await withHome(home, async () => {
+    const installed = expectFrozen(await planLifecycle({
+      manifest: manifest([syncEntry(alpha, 'codex')]),
+      dryRun: false,
+      validatedAt: now,
+      hosts: [codex.planner],
+    }));
+    const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+    expect(applied.exitCode).toBe(0);
+    const scopeId = readLifecycleState().state.scopes[0]?.id;
+    if (scopeId === undefined) throw new Error('expected a recorded scope');
+    rmSync(alpha, { recursive: true, force: true });
+
+    const retired = expectFrozen(await planLifecycle({
+      manifest: manifest([{ operation: 'retire-source', scopeId, target: { kind: 'codex', instance: 'default' } }]),
+      dryRun: false,
+      validatedAt: now,
+      hosts: [codex.planner],
+    }));
+    const mismatched: PlannerHost = {
+      ...codex.planner,
+      adapter: {
+        ...codex.planner.adapter,
+        readback: async (handle) => {
+          const observation = await codex.planner.adapter.readback(handle);
+          if (observation.presence !== 'absent') return observation;
+          return {
+            ...observation,
+            presence: 'present',
+            installedFingerprint: 'f'.repeat(64),
+            contentRoots: [{
+              label: 'plugin',
+              path: join(codex.fake.root, 'host', 'active', handle.nativeId),
+              fingerprint: 'f'.repeat(64),
+            }],
+          };
+        },
+      },
+    };
+
+    const executed = await executeLifecycle({ plan: retired, hosts: [mismatched], now });
+    const attempt = readLifecycleState().state.attempts.find((row) => row.id === retired.attemptId);
+    const journalState = attempt?.journal[0]?.state;
+    expect(executed.exitCode).toBe(1);
+    expect(journalState === 'rolled-back' || journalState === 'rollback').toBe(true);
+    if (journalState === 'rolled-back') {
+      expect(existsSync(join(codex.fake.root, 'host', 'active', 'alpha'))).toBe(true);
+    }
+  });
+});
+
+test('an unchanged pair plus an install stamps lastConverged', async () => {
+  const root = temp('unchanged-converges');
+  const home = join(root, 'home');
+  mkdirSync(home);
+  const collection = realpathSync(mkdirTemp(join(root, 'sources')));
+  writePlugin(collection, 'alpha');
+  writePlugin(collection, 'beta');
+  const codex = boundHost('codex', join(root, 'codex'), ['install', 'update']);
+
+  await withHome(home, async () => {
+    const installed = expectFrozen(await planLifecycle({
+      manifest: manifest([{
+        operation: 'sync',
+        source: { kind: 'local', locator: collection },
+        target: { kind: 'codex', instance: 'default' },
+        selectors: [{ package: 'alpha', adoptExisting: false }],
+      }]),
+      dryRun: false,
+      validatedAt: now,
+      hosts: [codex.planner],
+    }));
+    const applied = await executeLifecycle({ plan: installed, hosts: [codex.planner], now });
+    expect(applied.exitCode).toBe(0);
+
+    const plan = expectFrozen(await planLifecycle({
+      manifest: manifest([syncEntry(collection, 'codex')]),
+      dryRun: false,
+      validatedAt: now,
+      hosts: [codex.planner],
+    }));
+    expect(plan.operations.map((row) => row.operation.action).sort()).toEqual(['install', 'unchanged']);
+    const executed = await executeLifecycle({ plan, hosts: [codex.planner], now });
+    const packages = readLifecycleState().state.scopes[0]?.lastConverged?.packages.map((pkg) => pkg.packageId).sort();
+    expect(executed.exitCode).toBe(0);
+    expect(packages).toEqual(['alpha', 'beta']);
+  });
+});
+
 function boundHost(kind: string, root: string, operations: readonly CapabilityOperation[]): { fake: FakeLifecycleHost; planner: PlannerHost } {
   const fake = new FakeLifecycleHost(realpathSync(mkdirTemp(root)), operations.length === 0 ? [] : [managedProfile(operations)]);
   return {
