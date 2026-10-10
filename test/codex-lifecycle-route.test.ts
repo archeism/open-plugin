@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fingerprintTree } from '../src/fingerprint';
-import { codexLifecycle } from '../src/hosts/codex-writer';
+import { codexLifecycle, codexMarketplaceCheckoutRollback } from '../src/hosts/codex-writer';
 import type { FrozenPackageSnapshot, LifecycleRouteDecision, SelectedRouteDecision } from '../src/lifecycle-host';
 import {
   createFrozenPackageSnapshot,
@@ -290,6 +290,77 @@ describe('codex native marketplace upgrade route', () => {
       expect(observed.installations.find((installation) => installation.nativeId === demoId)?.installedVersion).toBe('1.0.0');
     });
   });
+
+  const timed = test as (name: string, fn: () => Promise<void>, timeoutMs: number) => void;
+  timed('marketplace upgrade waits longer than ten seconds', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home);
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      writeFiles(home, { '.codex/upgrade-mode': 'slow\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+    });
+  }, 20_000);
+
+  test('rollback restores only the affected plugin table', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.1.0');
+      const pins = createResolvedLifecyclePins([]);
+      const configPath = join(home, '.codex/config.toml');
+      writeFiles(home, {
+        '.codex/config.toml': [
+          'user_option = "original"',
+          '',
+          '[marketplaces.demo-market]',
+          'source_type = "git"',
+          `source = "${sourceLocator}"`,
+          'ref_name = "main"',
+          '',
+          '[plugins."demo-plugin@demo-market"]',
+          'enabled = true',
+          'note = "kept-field"',
+          '',
+          '[mcp_servers.user]',
+          'command = "user"',
+          '',
+        ].join('\n'),
+      });
+      installPlugin(home, 'demo-plugin', demoId, true);
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('managed');
+      writeFileSync(configPath, readFileSync(configPath, 'utf8')
+        .replace('user_option = "original"', 'user_option = "mutated"')
+        .replace('note = "kept-field"', 'note = "wiped"')
+        .replace('command = "user"', 'command = "changed"'));
+      await codexLifecycle.apply(prepared);
+      await codexLifecycle.rollback(prepared.handle);
+      const restored = readFileSync(configPath, 'utf8');
+      expect(restored).toContain('user_option = "mutated"');
+      expect(restored).toContain('command = "changed"');
+      expect(restored).toContain('note = "kept-field"');
+      expect(restored.includes('note = "wiped"')).toBe(false);
+    });
+  });
+
+  test('marketplace checkout rollback stays unverified', async () => {
+    expect(codexMarketplaceCheckoutRollback).toBe('unverified');
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.1.0');
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, 'main', [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      const checkout = join(home, '.codex/plugins/marketplaces/demo-market/HEAD');
+      writeFiles(home, { '.codex/plugins/marketplaces/demo-market/HEAD': 'recorded\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      writeFileSync(checkout, 'advanced\n');
+      await codexLifecycle.apply(prepared);
+      await codexLifecycle.rollback(prepared.handle);
+      expect(readFileSync(checkout, 'utf8')).toBe('advanced\n');
+    });
+  });
 });
 
 function selectedRoute(decision: LifecycleRouteDecision<'update'>): SelectedRouteDecision<'native' | 'managed', 'update'> {
@@ -337,6 +408,11 @@ if [ "$mode" = "rewrite-inplace" ]; then
 fi
 if [ "$mode" = "rewrite-new" ]; then
   copy_stage "$CODEX_HOME/plugins/cache/demo-market/demo-plugin/1.1.0"
+  printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
+  exit 0
+fi
+if [ "$mode" = "slow" ]; then
+  sleep 11
   printf '%s\\n' '{"selectedMarketplaces":["demo-market"],"upgradedRoots":["demo-market"],"errors":[]}'
   exit 0
 fi

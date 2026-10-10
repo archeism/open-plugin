@@ -440,6 +440,17 @@ type CodexCatalogBinding =
   | { readonly kind: 'absent'; readonly marketplace: string };
 
 const CODEX_ROUTE_VERSION = '0.162.0';
+const NATIVE_UPGRADE_TIMEOUT_MS = 120_000;
+/** Codex advances the marketplace checkout itself. plgnz does not capture that git state. */
+export const codexMarketplaceCheckoutRollback = 'unverified' as const;
+
+function nativeUpgradeTimeout(): number {
+  const raw = process.env['OPEN_PLUGIN_CODEX_UPGRADE_TIMEOUT_MS'];
+  if (raw === undefined || raw.trim() === '') return NATIVE_UPGRADE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < NATIVE_UPGRADE_TIMEOUT_MS) return NATIVE_UPGRADE_TIMEOUT_MS;
+  return parsed;
+}
 const RELOAD_EFFECTIVE = { requirement: 'reload', status: 'effective' } as const;
 const UPDATE_SEMANTICS = ['auto-update-control', 'readback', 'rollback', 'activation-reload'] as const satisfies readonly PackageSemantic[];
 const MANAGED_SEMANTICS = [...UPDATE_SEMANTICS, 'retirement', 'retention-safety'] as const satisfies readonly PackageSemantic[];
@@ -498,6 +509,10 @@ function codexRouteProfile(
   supportedSemantics: readonly PackageSemantic[],
   evidence: readonly string[],
 ): CapabilityEvidenceProfile {
+  const checkoutRollback = route === 'native' ? codexMarketplaceCheckoutRollback : 'supported';
+  if (checkoutRollback !== 'unverified' && route === 'native') {
+    throw new Error('codex marketplace checkout rollback must stay unverified');
+  }
   const supported = new Set<PackageSemantic>(supportedSemantics);
   const semantics = {} as Record<PackageSemantic, CapabilityStatus>;
   for (const semantic of PACKAGE_SEMANTICS) semantics[semantic] = supported.has(semantic) ? 'supported' : 'unsupported';
@@ -656,7 +671,7 @@ function applyNativeMarketplaceUpgrade(prepared: PreparedActivationMutation): Mu
   if (binary === null) throw new Error('codex marketplace upgrade stderr-only failure: codex binary is unavailable');
   const result = spawnSync([binary, 'plugin', 'marketplace', 'upgrade', marketplace, '--json'], {
     env: codexCommandEnv(),
-    timeout: 10_000,
+    timeout: nativeUpgradeTimeout(),
   });
   const stdout = decodeBytes(result.stdout);
   const stderr = decodeBytes(result.stderr).trim();
@@ -695,7 +710,7 @@ async function retireCodex(prepared: PreparedRetirementMutation): Promise<Mutati
 function restampNativeUpgrade(prepared: PreparedActivationMutation): void {
   const markerPath = join(prepared.stagingRoot, OWNERSHIP);
   if (!existsSync(markerPath)) return;
-  const marker = readFileSync(markerPath);
+  const marker = readFileSync(markerPath, 'utf8');
   const version = pluginVersion(prepared.stagingRoot);
   if (validVersionSegment(version)) {
     const destination = cacheDestination(prepared.handle.nativeId, version);
@@ -896,11 +911,8 @@ function saveCodexRollback(attemptId: string, operationId: string, nativeIds: re
   assertManagedPath(codexHome(), bundle);
   rmSync(bundle, { recursive: true, force: true });
   mkdirSync(bundle, { recursive: true });
-  const snapshot = readConfigSnapshot(configFile());
-  if (snapshot.existed) {
-    const write = writeFileSync as unknown as (file: string, bytes: Uint8Array) => void;
-    write(join(bundle, 'config.toml'), snapshot.bytes);
-  }
+  const toml = existsSync(configFile()) ? readFileSync(configFile(), 'utf8') : '';
+  const tables = nativeIds.map((nativeId) => ({ nativeId, block: extractPluginTable(toml, nativeId) }));
   const installs = nativeIds.map((nativeId, index) => {
     const slot = pluginSlot(nativeId);
     const versions = slot === null ? [] : slotVersions(slot);
@@ -910,7 +922,7 @@ function saveCodexRollback(attemptId: string, operationId: string, nativeIds: re
     cpSync(cachePath, join(bundle, 'cache', saved), { recursive: true });
     return { nativeId, existed: true as const, cachePath, saved, slot, versions };
   });
-  writeFileSync(join(bundle, 'manifest.json'), JSON.stringify({ configExisted: snapshot.existed, installs }));
+  writeFileSync(join(bundle, 'manifest.json'), JSON.stringify({ tables, installs }));
 }
 
 function restoreCodexRollback(handle: DurableLifecycleOperation): MutationResultData {
@@ -919,15 +931,7 @@ function restoreCodexRollback(handle: DurableLifecycleOperation): MutationResult
   if (!existsSync(manifestPath)) throw new Error(`codex lifecycle rollback bundle is missing: ${handle.operationId}`);
   const manifest = parseRollbackManifest(readFileSync(manifestPath, 'utf8'));
   const before = rollbackSurface(manifest.installs.map((install) => install.nativeId));
-  const configPath = configFile();
-  if (manifest.configExisted) {
-    const read = readFileSync as unknown as (file: string) => Uint8Array;
-    const write = writeFileSync as unknown as (file: string, bytes: Uint8Array) => void;
-    mkdirSync(dirname(configPath), { recursive: true });
-    write(configPath, read(join(bundle, 'config.toml')));
-  } else {
-    rmSync(configPath, { force: true });
-  }
+  restorePluginTables(manifest.tables);
   for (const install of manifest.installs) {
     if (!install.existed) {
       const current = codex.listInstalled().find((plugin) => plugin.id === install.nativeId)?.path;
@@ -995,8 +999,50 @@ function rollbackSurface(nativeIds: readonly string[]): string {
   return `${config}\n${slots}`;
 }
 
+function pluginTableHeader(id: string): string {
+  return `[plugins."${id}"]`;
+}
+
+function extractPluginTable(toml: string, id: string): string | null {
+  const header = pluginTableHeader(id);
+  const idx = toml.indexOf(header);
+  if (idx === -1) return null;
+  const next = toml.indexOf('\n[', idx + header.length);
+  const end = next === -1 ? toml.length : next;
+  return toml.slice(idx, end).trim();
+}
+
+function restorePluginTables(tables: readonly { readonly nativeId: string; readonly block: string | null }[]): void {
+  const configPath = configFile();
+  const current = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+  let next = current;
+  for (const table of tables) next = applyPluginTable(next, table.nativeId, table.block);
+  if (next === current) return;
+  if (next.trim() === '') {
+    rmSync(configPath, { force: true });
+    return;
+  }
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, next.endsWith('\n') ? next : `${next}\n`);
+}
+
+function applyPluginTable(toml: string, id: string, block: string | null): string {
+  if (extractPluginTable(toml, id) === block) return toml;
+  const header = pluginTableHeader(id);
+  const idx = toml.indexOf(header);
+  let removed = toml;
+  if (idx !== -1) {
+    const next = toml.indexOf('\n[', idx + header.length);
+    const end = next === -1 ? toml.length : next;
+    removed = toml.slice(0, idx) + toml.slice(end);
+  }
+  if (block === null) return removed;
+  const base = removed.replace(/\s+$/u, '');
+  return base.length === 0 ? `${block}\n` : `${base}\n\n${block}\n`;
+}
+
 function parseRollbackManifest(text: string): {
-  readonly configExisted: boolean;
+  readonly tables: readonly { readonly nativeId: string; readonly block: string | null }[];
   readonly installs: readonly (
     | { readonly nativeId: string; readonly existed: false; readonly slot: string | null; readonly versions: readonly string[] }
     | { readonly nativeId: string; readonly existed: true; readonly cachePath: string; readonly saved: string; readonly slot: string | null; readonly versions: readonly string[] }
@@ -1005,7 +1051,15 @@ function parseRollbackManifest(text: string): {
   const value: unknown = JSON.parse(text);
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('codex rollback manifest is invalid');
   const record = value as Record<string, unknown>;
-  if (typeof record['configExisted'] !== 'boolean' || !Array.isArray(record['installs'])) throw new Error('codex rollback manifest is invalid');
+  if (!Array.isArray(record['tables']) || !Array.isArray(record['installs'])) throw new Error('codex rollback manifest is invalid');
+  const tables = record['tables'].map((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('codex rollback manifest table is invalid');
+    const table = item as Record<string, unknown>;
+    if (typeof table['nativeId'] !== 'string' || (table['block'] !== null && typeof table['block'] !== 'string')) {
+      throw new Error('codex rollback manifest table is invalid');
+    }
+    return { nativeId: table['nativeId'], block: table['block'] };
+  });
   const installs = record['installs'].map((item) => {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('codex rollback manifest install is invalid');
     const install = item as Record<string, unknown>;
@@ -1016,7 +1070,7 @@ function parseRollbackManifest(text: string): {
     if (typeof install['cachePath'] !== 'string' || typeof install['saved'] !== 'string') throw new Error('codex rollback manifest install is invalid');
     return { nativeId: install['nativeId'], existed: true as const, cachePath: install['cachePath'], saved: install['saved'], slot, versions };
   });
-  return { configExisted: record['configExisted'], installs };
+  return { tables, installs };
 }
 
 function parseRollbackSlot(value: unknown): string | null {
