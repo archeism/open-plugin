@@ -610,11 +610,11 @@ describe('public lifecycle commands', () => {
       };
       const scope = recorded.scopes[0]!;
       const duplicateId = `${scope.id.slice(0, -1)}${scope.id.endsWith('a') ? 'b' : 'a'}`;
-      recorded.scopes.push({ ...structuredClone(scope), id: duplicateId });
+      recorded.scopes.push({ ...JSON.parse(JSON.stringify(scope)), id: duplicateId });
       recorded.activations.push(
         ...recorded.activations
           .filter((activation) => activation.scopeId === scope.id)
-          .map((activation) => ({ ...structuredClone(activation), scopeId: duplicateId })),
+          .map((activation) => ({ ...JSON.parse(JSON.stringify(activation)), scopeId: duplicateId })),
       );
       const duplicated = JSON.stringify(recorded);
       writeFileSync(statePath, duplicated);
