@@ -257,6 +257,39 @@ describe('codex native marketplace upgrade route', () => {
       expect(owned.installations.find((installation) => installation.nativeId === demoId)?.installedVersion).toBe('1.1.0');
     });
   });
+
+  test('managed update rollback leaves the previous version active', async () => {
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.1.0');
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, 'main', [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('managed');
+      await codexLifecycle.apply(prepared);
+      await codexLifecycle.rollback(prepared.handle);
+      const slot = join(home, '.codex/plugins/cache/demo-market/demo-plugin');
+      expect(existsSync(join(slot, '1.1.0'))).toBe(false);
+      const observed = await codexLifecycle.observeTarget(target);
+      expect(observed.installations.find((installation) => installation.nativeId === demoId)?.installedVersion).toBe('1.0.0');
+    });
+
+    await withCodexBinary(async (home) => {
+      const snapshot = frozenSnapshot(home, '1.1.0');
+      const pins = createResolvedLifecyclePins([]);
+      writeCatalog(home, frozenSha, [demoId]);
+      installPlugin(home, 'demo-plugin', demoId, true);
+      writeFiles(home, { '.codex/upgrade-mode': 'rewrite-new\n' });
+      const prepared = await prepareUpdate(snapshot, pins);
+      expect(prepared.handle.route).toBe('native');
+      await codexLifecycle.apply(prepared);
+      await codexLifecycle.rollback(prepared.handle);
+      const slot = join(home, '.codex/plugins/cache/demo-market/demo-plugin');
+      expect(existsSync(join(slot, '1.1.0'))).toBe(false);
+      const observed = await codexLifecycle.observeTarget(target);
+      expect(observed.installations.find((installation) => installation.nativeId === demoId)?.installedVersion).toBe('1.0.0');
+    });
+  });
 });
 
 function selectedRoute(decision: LifecycleRouteDecision<'update'>): SelectedRouteDecision<'native' | 'managed', 'update'> {

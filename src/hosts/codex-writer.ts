@@ -902,11 +902,13 @@ function saveCodexRollback(attemptId: string, operationId: string, nativeIds: re
     write(join(bundle, 'config.toml'), snapshot.bytes);
   }
   const installs = nativeIds.map((nativeId, index) => {
+    const slot = pluginSlot(nativeId);
+    const versions = slot === null ? [] : slotVersions(slot);
     const cachePath = codex.listInstalled().find((plugin) => plugin.id === nativeId)?.path;
-    if (cachePath === undefined) return { nativeId, existed: false as const };
+    if (cachePath === undefined) return { nativeId, existed: false as const, slot, versions };
     const saved = String(index);
     cpSync(cachePath, join(bundle, 'cache', saved), { recursive: true });
-    return { nativeId, existed: true as const, cachePath, saved };
+    return { nativeId, existed: true as const, cachePath, saved, slot, versions };
   });
   writeFileSync(join(bundle, 'manifest.json'), JSON.stringify({ configExisted: snapshot.existed, installs }));
 }
@@ -916,6 +918,7 @@ function restoreCodexRollback(handle: DurableLifecycleOperation): MutationResult
   const manifestPath = join(bundle, 'manifest.json');
   if (!existsSync(manifestPath)) throw new Error(`codex lifecycle rollback bundle is missing: ${handle.operationId}`);
   const manifest = parseRollbackManifest(readFileSync(manifestPath, 'utf8'));
+  const before = rollbackSurface(manifest.installs.map((install) => install.nativeId));
   const configPath = configFile();
   if (manifest.configExisted) {
     const read = readFileSync as unknown as (file: string) => Uint8Array;
@@ -928,22 +931,75 @@ function restoreCodexRollback(handle: DurableLifecycleOperation): MutationResult
   for (const install of manifest.installs) {
     if (!install.existed) {
       const current = codex.listInstalled().find((plugin) => plugin.id === install.nativeId)?.path;
-      if (current !== undefined) rmSync(current, { recursive: true, force: true });
-      continue;
+      if (current !== undefined) {
+        assertManagedPath(codexHome(), current);
+        rmSync(current, { recursive: true, force: true });
+      }
+    } else {
+      assertManagedPath(codexHome(), install.cachePath);
+      rmSync(install.cachePath, { recursive: true, force: true });
+      mkdirSync(dirname(install.cachePath), { recursive: true });
+      cpSync(join(bundle, 'cache', install.saved), install.cachePath, { recursive: true });
     }
-    assertManagedPath(codexHome(), install.cachePath);
-    rmSync(install.cachePath, { recursive: true, force: true });
-    mkdirSync(dirname(install.cachePath), { recursive: true });
-    cpSync(join(bundle, 'cache', install.saved), install.cachePath, { recursive: true });
+    removeUnsnapshotVersions(install.slot, install.versions);
   }
-  return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: true };
+  const after = rollbackSurface(manifest.installs.map((install) => install.nativeId));
+  return { receiptId: `rollback:${handle.attemptId}:${handle.operationId}`, changed: before !== after };
+}
+
+function pluginSlot(nativeId: string): string | null {
+  const marketplace = marketplaceOf(nativeId);
+  if (marketplace === null) return null;
+  const name = nativeId.slice(0, nativeId.indexOf('@'));
+  if (name.length === 0) return null;
+  return join(codexHome(), 'plugins', 'cache', marketplace, name);
+}
+
+function slotVersions(slot: string): string[] {
+  if (!existsSync(slot)) return [];
+  return readdirSync(slot).filter((version) => {
+    try {
+      return lstatSync(join(slot, version)).isDirectory();
+    } catch {
+      return false;
+    }
+  }).sort();
+}
+
+function removeUnsnapshotVersions(slot: string | null, versions: readonly string[]): void {
+  if (slot === null || !existsSync(slot)) return;
+  assertManagedPath(codexHome(), slot);
+  const kept = new Set(versions);
+  for (const version of slotVersions(slot)) {
+    if (kept.has(version)) continue;
+    const dir = join(slot, version);
+    assertManagedPath(codexHome(), dir);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function rollbackSurface(nativeIds: readonly string[]): string {
+  const config = existsSync(configFile()) ? readFileSync(configFile(), 'utf8') : 'absent';
+  const slots = nativeIds.map((nativeId) => {
+    const slot = pluginSlot(nativeId);
+    if (slot === null || !existsSync(slot)) return `${nativeId}:`;
+    return `${nativeId}:${slotVersions(slot).map((version) => {
+      const path = join(slot, version);
+      try {
+        return `${version}=${fingerprintTree(path)}`;
+      } catch {
+        return `${version}=unreadable`;
+      }
+    }).join(',')}`;
+  }).join('\n');
+  return `${config}\n${slots}`;
 }
 
 function parseRollbackManifest(text: string): {
   readonly configExisted: boolean;
   readonly installs: readonly (
-    | { readonly nativeId: string; readonly existed: false }
-    | { readonly nativeId: string; readonly existed: true; readonly cachePath: string; readonly saved: string }
+    | { readonly nativeId: string; readonly existed: false; readonly slot: string | null; readonly versions: readonly string[] }
+    | { readonly nativeId: string; readonly existed: true; readonly cachePath: string; readonly saved: string; readonly slot: string | null; readonly versions: readonly string[] }
   )[];
 } {
   const value: unknown = JSON.parse(text);
@@ -954,11 +1010,24 @@ function parseRollbackManifest(text: string): {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('codex rollback manifest install is invalid');
     const install = item as Record<string, unknown>;
     if (typeof install['nativeId'] !== 'string' || typeof install['existed'] !== 'boolean') throw new Error('codex rollback manifest install is invalid');
-    if (!install['existed']) return { nativeId: install['nativeId'], existed: false as const };
+    const slot = parseRollbackSlot(install['slot']);
+    const versions = parseRollbackVersions(install['versions']);
+    if (!install['existed']) return { nativeId: install['nativeId'], existed: false as const, slot, versions };
     if (typeof install['cachePath'] !== 'string' || typeof install['saved'] !== 'string') throw new Error('codex rollback manifest install is invalid');
-    return { nativeId: install['nativeId'], existed: true as const, cachePath: install['cachePath'], saved: install['saved'] };
+    return { nativeId: install['nativeId'], existed: true as const, cachePath: install['cachePath'], saved: install['saved'], slot, versions };
   });
   return { configExisted: record['configExisted'], installs };
+}
+
+function parseRollbackSlot(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0) throw new Error('codex rollback manifest install is invalid');
+  return value;
+}
+
+function parseRollbackVersions(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) throw new Error('codex rollback manifest install is invalid');
+  return value;
 }
 
 function installationRecord(plugin: InstalledPlugin): TargetInstallationData {
