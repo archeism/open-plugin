@@ -27,6 +27,7 @@ import { cursor, cursorInstanceRoot, localDir, mcpCandidates } from './cursor';
 
 const OWNERSHIP = '.plgnz-install.json';
 const CURSOR_MANAGED_VERSION = '2.4.0';
+const CURSOR_DIRECTORY_SURFACE = 'directory';
 const MARKETPLACE_REFRESH_UNVERIFIED = 'cursor-marketplace-refresh';
 const RELOAD_REQUIRED: LifecycleReadbackData['transition'] = { requirement: 'reload', status: 'effective' };
 
@@ -372,9 +373,37 @@ const cursorManagedProfile = createCapabilityEvidenceProfile({
   ],
 });
 
+const cursorDirectoryProfile = createCapabilityEvidenceProfile({
+  host: 'cursor',
+  detectedVersion: CURSOR_DIRECTORY_SURFACE,
+  sourceTypes: ['local', 'git'],
+  operations: ['install', 'update', 'retire'],
+  route: 'managed',
+  operationStatus: 'supported',
+  semantics: {
+    'ordinary-skills': 'supported',
+    mcp: 'unverified',
+    hooks: 'unverified',
+    commands: 'unverified',
+    agents: 'unverified',
+    'model-invocation-control': 'unverified',
+    'user-invocation-control': 'unverified',
+    'auto-update-control': 'supported',
+    resources: 'unverified',
+    'permissions-preprocessing': 'unverified',
+    retirement: 'supported',
+    'retention-safety': 'supported',
+    readback: 'supported',
+    rollback: 'supported',
+    'activation-reload': 'supported',
+    'reversible-disable': 'unverified',
+  },
+  evidence: ['docs/hosts/cursor.md'],
+});
+
 const cursorLifecycleDefinition: LifecycleHostDefinition = {
   id: 'cursor',
-  evidenceProfiles: [cursorManagedProfile],
+  evidenceProfiles: [cursorManagedProfile, cursorDirectoryProfile],
   async probeVersion(target) {
     assertCursorTarget(target);
     return probeCursorVersion();
@@ -547,7 +576,7 @@ function assertCursorTarget(target: LifecycleTargetIdentity): void {
 
 function probeCursorVersion(): TargetVersionObservation {
   const binary = cursorProbeBinary();
-  if (binary === undefined) return { kind: 'detected', version: CURSOR_MANAGED_VERSION, probeId: 'cursor-directory' };
+  if (binary === undefined) return { kind: 'detected', version: CURSOR_DIRECTORY_SURFACE, probeId: 'cursor-directory' };
   const result = spawnSync([binary, '--version'], {
     stdout: 'pipe',
     stderr: 'pipe',

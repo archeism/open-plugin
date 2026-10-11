@@ -392,11 +392,20 @@ describe('cursor managed local projection', () => {
       delete process.env['OPEN_PLUGIN_CURSOR_BIN'];
       rmSync(script, { force: true });
       const absent = await cursorManagedLifecycle.probeVersion(target);
-      expect(absent).toEqual({ kind: 'detected', version: '2.4.0', probeId: 'cursor-directory' });
+      expect(absent).toEqual({ kind: 'detected', version: 'directory', probeId: 'cursor-directory' });
       const directoryCopy = await installDecision(home, absent, 'install-absent', 'attempt-absent', 'planned-create');
       expect(directoryCopy.kind).toBe('selected');
       if (directoryCopy.kind !== 'selected') throw new Error('a missing cursor binary refused the managed copy');
       expect(directoryCopy.route).toBe('managed');
+      expect(directoryCopy.detectedVersion).toBe('directory');
+      const resourceGap = await installDecision(home, absent, 'install-resources', 'attempt-resources', 'planned-create', {
+        'plugin.json': '{"name":"demo-plugin","version":"1.2.0"}\n',
+        '.cursor-plugin/plugin.json': '{"name":"demo-plugin","version":"1.2.0"}\n',
+        'resources/value.txt': 'resource\n',
+      });
+      expect(resourceGap.kind).toBe('capability-gap');
+      if (resourceGap.kind !== 'capability-gap') throw new Error('a directory copy claimed resource support');
+      expect(resourceGap.gaps.some((item) => item.capabilityId === 'resources')).toBe(true);
 
       writeCursorBin(home, '2.4.0');
       const installed = await installOwned(home, 'one\n');
@@ -599,10 +608,11 @@ async function installDecision(
   operationId: string,
   attemptId: string,
   authorization: 'planned-create' | 'observed-owned',
+  files?: Record<string, string>,
 ) {
   const snapshotRoot = join(home.home, 'snapshot', operationId);
   const packageRoot = join(snapshotRoot, 'plugins', packageName);
-  writeFiles(packageRoot, {
+  writeFiles(packageRoot, files ?? {
     'plugin.json': '{"name":"demo-plugin","version":"1.2.0"}\n',
     '.cursor-plugin/plugin.json': '{"name":"demo-plugin","version":"1.2.0"}\n',
   });
