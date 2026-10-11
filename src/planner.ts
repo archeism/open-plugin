@@ -867,7 +867,6 @@ function chosenAction(
 
 function sameBytes(activation: ActivationRecord | undefined, installation: TargetInstallationData | undefined, plugin: PluginSource): boolean {
   if (activation === undefined || installation?.installedFingerprint === undefined || installation.installedFingerprint === null) return false;
-  if (activation.pins.length > 0) return false;
   return activation.fingerprints.source === plugin.contentFingerprint && activation.fingerprints.installed === installation.installedFingerprint;
 }
 
