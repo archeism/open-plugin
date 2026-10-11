@@ -1745,22 +1745,22 @@ describe('public lifecycle commands', () => {
       };
       const live = state.activations?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
       const tombstone = state.tombstones?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
-      const refused = result.exitCode !== 0
-        || report?.summary.result !== 'converged'
-        || (report?.outcomes ?? []).some((outcome) => outcome.result !== 'succeeded');
+      const diagnostic = report?.summary.reason?.diagnostic ?? '';
 
       expect({
-        refused,
         stderr: result.stderr,
         installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
         retired: live === undefined || tombstone !== undefined || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+        namesDemo: diagnostic.includes("package 'demo'"),
+        unknownPath: diagnostic.includes(`no install record for '${sourceB}'`),
         sourceA: readFileSync(join(sourceA, 'plugin.json'), 'utf8'),
         sourceB: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
       }).toEqual({
-        refused: true,
         stderr: '',
         installed: fromA,
         retired: false,
+        namesDemo: true,
+        unknownPath: false,
         sourceA: fromA,
         sourceB: fromB,
       });
