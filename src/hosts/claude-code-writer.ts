@@ -673,7 +673,7 @@ export function createClaudeCodeLifecycleHost(input?: {
       const decision = adapter.decideRoute(request);
       if (decision.kind !== 'selected') return decision;
       if (request.operation !== 'install' && request.operation !== 'update') return decision;
-      if (marketplaceName(request.nativeId) === undefined || soleMarketplaceInstall(request.nativeId)) return decision;
+      if (!autoUpdateControlBlocked(request.nativeId)) return decision;
       return selectLifecycleRoute(definition.id, profilesWithoutAutoUpdate(definition.evidenceProfiles), request);
     },
   };
@@ -1318,25 +1318,43 @@ function marketplaceName(nativeId: string): string | undefined {
   return nativeId.slice(at + 1);
 }
 
-function soleMarketplaceInstall(nativeId: string): boolean {
-  const marketplace = marketplaceName(nativeId);
-  if (marketplace === undefined) return false;
-  const registry = readRegistry(join(pluginsDir(), 'installed_plugins.json'));
-  return Object.entries(registry.plugins).every(([id, rows]) => id === nativeId || marketplaceName(id) !== marketplace || !hasUserRow(rows));
-}
-
-function hasUserRow(rows: unknown): boolean {
-  return Array.isArray(rows) && rows.some((row) => isRecord(row) && row['scope'] === 'user');
-}
-
 function marketplaceAutoUpdateTarget(nativeId: string): boolean {
-  if (!soleMarketplaceInstall(nativeId)) return false;
   const marketplace = marketplaceName(nativeId);
   if (marketplace === undefined) return false;
+  return autoUpdateNeedsControl(marketplace) && !hasForeignMarketplaceSibling(nativeId, marketplace);
+}
+
+function autoUpdateControlBlocked(nativeId: string): boolean {
+  const marketplace = marketplaceName(nativeId);
+  if (marketplace === undefined) return false;
+  return autoUpdateNeedsControl(marketplace) && hasForeignMarketplaceSibling(nativeId, marketplace);
+}
+
+function autoUpdateNeedsControl(marketplace: string): boolean {
+  const records = marketplaceAutoUpdateRecords(marketplace);
+  return records.length > 0 && records.some((record) => record['autoUpdate'] !== false);
+}
+
+function marketplaceAutoUpdateRecords(marketplace: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
   const known = readMarketplaces(join(pluginsDir(), 'known_marketplaces.json'))[marketplace];
-  if (isRecord(known)) return true;
+  if (isRecord(known)) records.push(known);
   const extra = readSettings(join(pluginsDir(), '..', 'settings.json'))['extraKnownMarketplaces'];
-  return isRecord(extra) && isRecord(extra[marketplace]);
+  if (isRecord(extra) && isRecord(extra[marketplace])) records.push(extra[marketplace]);
+  return records;
+}
+
+function hasForeignMarketplaceSibling(nativeId: string, marketplace: string): boolean {
+  const registry = readRegistry(join(pluginsDir(), 'installed_plugins.json'));
+  return Object.entries(registry.plugins).some(([id, rows]) => {
+    if (id === nativeId || marketplaceName(id) !== marketplace || !Array.isArray(rows)) return false;
+    return rows.some((row) => isRecord(row) && row['scope'] === 'user' && !plgnzOwnedInstall(id, row['installPath']));
+  });
+}
+
+function plgnzOwnedInstall(id: string, installPath: unknown): boolean {
+  if (typeof installPath !== 'string' || !existsSync(installPath)) return false;
+  return readOwnership(installPath)?.pluginId === id;
 }
 
 function disableMarketplaceAutoUpdate(nativeId: string): boolean {
