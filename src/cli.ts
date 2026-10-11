@@ -970,6 +970,26 @@ function mergeAddReports(reports: readonly LifecycleReport[]): LifecycleReport {
   });
 }
 
+function recordedPackageOnDifferentSource(requested: string, state: LifecycleStateV2, kinds: ReadonlySet<string>): string | null {
+  let resolved: ReturnType<typeof resolveSource>;
+  try {
+    resolved = resolveSource(requested);
+  } catch {
+    return null;
+  }
+  const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
+  for (const plugin of resolved.plugins) {
+    for (const activation of state.activations) {
+      if (activation.packageId !== plugin.name) continue;
+      const scope = scopes.get(activation.scopeId);
+      if (scope === undefined || scope.target.instance !== 'default' || !kinds.has(scope.target.kind)) continue;
+      if (sameSourceBinding(scope.source, resolved.snapshot.binding)) continue;
+      return plugin.name;
+    }
+  }
+  return null;
+}
+
 async function runRecordedLifecycleUpdate(flags: VerbFlags, state: LifecycleStateV2): Promise<LifecycleReport | null> {
   let profiles: ReturnType<typeof selectProfiles>;
   try {
@@ -1003,6 +1023,14 @@ async function runRecordedLifecycleUpdate(flags: VerbFlags, state: LifecycleStat
   if (matches.some((match) => !plannerKinds.has(match.scope.target.kind))) return null;
   if (matches.length === 0) {
     if (requested !== undefined) {
+      const collided = recordedPackageOnDifferentSource(requested, state, kinds);
+      if (collided !== null) {
+        return reportFor('update', flags.dryRun, [], [], {
+          terminalPhase: 'preflight',
+          mutationStarted: false,
+          reason: reason('internal', 'internal.ambiguous-ownership', `package '${collided}' is bound to a different source locator`),
+        });
+      }
       return reportFor('update', flags.dryRun, [], [], {
         terminalPhase: 'preflight',
         mutationStarted: false,
