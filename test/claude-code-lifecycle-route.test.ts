@@ -430,6 +430,31 @@ describe('claude-code lifecycle route', () => {
     });
   });
 
+  test('installs two plugins from one source and turns auto-update off', async () => {
+    await withClaude(async (root) => {
+      seedMarketplace(root, true);
+      const host = createClaudeCodeLifecycleHost();
+      await activate(host, updateSnapshot(root, 'source-demo', '1.2.0', '9'.repeat(40), 'install'));
+      const markets = JSON.parse(readFileSync(join(root, 'plugins/known_marketplaces.json'), 'utf8')) as {
+        market: { autoUpdate?: boolean };
+      };
+      markets.market.autoUpdate = true;
+      writeFileSync(join(root, 'plugins/known_marketplaces.json'), `${JSON.stringify(markets)}\n`);
+      const settings = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')) as {
+        extraKnownMarketplaces: { market: { autoUpdate?: boolean } };
+      };
+      settings.extraKnownMarketplaces.market.autoUpdate = true;
+      writeFileSync(join(root, 'settings.json'), `${JSON.stringify(settings)}\n`);
+
+      const second = await activate(host, updateSnapshot(root, 'source-other', '1.3.0', 'a'.repeat(40), 'install', [], 'other'));
+      expect(existsSync(join(root, 'plugins/cache/market/demo/1.2.0'))).toBe(true);
+      expect(existsSync(join(root, 'plugins/cache/market/other/1.3.0'))).toBe(true);
+      expect(marketplaceAutoUpdate(root)).toBe(false);
+      expect(settingsAutoUpdate(root)).toBe(false);
+      expect(second.directiveIds).toContain('claude-code.auto-update');
+    });
+  });
+
   test('gaps auto-update control when another plugin shares the marketplace', async () => {
     await withClaude(async (root) => {
       seedMarketplace(root, true);
@@ -631,15 +656,16 @@ function updateSnapshot(
   revision: string,
   action: 'install' | 'update' = 'update',
   requiredSemantics: PackageSemanticInventory['requiredSemantics'] = [],
+  packageName = 'demo',
 ) {
   const snapshotRoot = join(root, `snapshot-${attemptId}`);
-  const packageRoot = join(snapshotRoot, 'packages/demo');
+  const packageRoot = join(snapshotRoot, 'packages', packageName);
   mkdirSync(packageRoot, { recursive: true });
-  writeFileSync(join(packageRoot, 'plugin.json'), `${JSON.stringify({ name: 'demo', version })}\n`);
+  writeFileSync(join(packageRoot, 'plugin.json'), `${JSON.stringify({ name: packageName, version })}\n`);
   const packageFingerprint = fingerprintTree(packageRoot);
   const inventory: PackageSemanticInventory = {
     schemaVersion: 1,
-    package: { name: 'demo', version, fingerprint: packageFingerprint },
+    package: { name: packageName, version, fingerprint: packageFingerprint },
     components: { skills: [], mcp: [], hooks: [], commands: [], agents: [], resources: [], permissionsPreprocessing: [] },
     componentDefinitions: [],
     invocationPolicies: [],
@@ -655,13 +681,13 @@ function updateSnapshot(
     scopeId: 'scope-demo',
     target: claudeTarget,
     action,
-    packageName: 'demo',
-    nativeId: 'demo@market',
+    packageName,
+    nativeId: `${packageName}@market`,
     sourceType: 'git',
     immutableRevision: revision,
     snapshotRoot,
     packageRoot,
-    relativePackagePath: 'packages/demo',
+    relativePackagePath: join('packages', packageName),
     snapshotFingerprint: fingerprintTree(snapshotRoot),
     packageFingerprint,
     nativeGit: { locator, resolvedRevision: revision },
