@@ -1587,6 +1587,70 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('update refreshes the exact source package and does not rebind a same-name plugin', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const other = '{"name":"demo","version":"1.0.0","description":"from B"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const sourceA = harness.source('update-source-a', {
+        'plugin.json': original,
+        'skills/demo/SKILL.md': skill,
+      });
+      const sourceB = harness.source('update-source-b', {
+        'plugin.json': other,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', sourceA, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      writeFileSync(join(sourceA, 'plugin.json'), revised);
+
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        operationIdShape: operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          coverage: outcome.coverage,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          changed: outcome.changed,
+        })) ?? [],
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        rebound: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []).includes('from B'),
+        otherSource: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'update',
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          coverage: 'desired-pair',
+          action: 'update',
+          route: 'managed',
+          result: 'succeeded',
+          changed: true,
+        }],
+        installed: revised,
+        rebound: false,
+        otherSource: other,
+      });
+    });
+  });
 });
 
 function recordNativeRoute(statePath: string, packageId: string): void {
