@@ -1875,6 +1875,56 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('a second add keeps a recorded pin and installs the revised plugin bytes', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-add', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const result = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        result: report?.outcomes[0]?.result ?? null,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        result: 'succeeded',
+        installed: revised,
+        command: pinnedCommand,
+        pins: ['demo'],
+        retired: false,
+      });
+    });
+  });
+
   test('remove retires a recorded install, keeps retained data, and prints the versioned report', async () => {
     await withLifecycleCliHarness((harness) => {
       const pluginJson = '{"name":"demo","version":"1.0.0","description":"kept"}\n';
