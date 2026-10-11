@@ -1506,7 +1506,669 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('add installs the source bytes, prints one lifecycle report, and leaves a foreign plugin', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"Harness fixture"}\n';
+      const foreignJson = '{"name":"foreign","version":"9.9.9","description":"not ours"}\n';
+      harness.writeHome({
+        '.cursor/.keep': '',
+        '.cursor/plugins/local/foreign/.cursor-plugin/plugin.json': foreignJson,
+      });
+      const source = harness.source('add-source', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: Harness fixture\n---\n\nDemo body.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(3));
+      const result = harness.run(
+        ['add', source, '--target', 'cursor', '--json'],
+        { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } },
+      );
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        dryRun: report?.command.dryRun ?? null,
+        operationIds,
+        operationIdShape: operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          nativeId: outcome.nativeId,
+          coverage: outcome.coverage,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+          changed: outcome.changed,
+        })) ?? [],
+        summary: report === null ? null : {
+          result: report.summary.result,
+          terminalPhase: report.summary.terminalPhase,
+          mutationStarted: report.summary.mutationStarted,
+          changed: report.summary.changed,
+          failureCategory: report.summary.failureCategory,
+        },
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        foreign: bytesToText(result.stores.cursor.after.files['plugins/local/foreign/.cursor-plugin/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'add',
+        dryRun: false,
+        operationIds,
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          nativeId: 'demo',
+          coverage: 'desired-pair',
+          action: 'install',
+          route: 'managed',
+          result: 'succeeded',
+          resourceState: 'present',
+          activationState: 'active-conforming',
+          changed: true,
+        }],
+        summary: {
+          result: 'converged',
+          terminalPhase: 'complete',
+          mutationStarted: true,
+          changed: true,
+          failureCategory: null,
+        },
+        installed: pluginJson,
+        foreign: foreignJson,
+      });
+    });
+  });
+
+  test('a second add refreshes changed source bytes', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"first"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"second"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('second-add', {
+        'plugin.json': original,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const first = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(first.exitCode).toBe(0);
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const second = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const parsed = second.stdout.trim().startsWith('{') ? JSON.parse(second.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      expect({
+        exitCode: second.exitCode,
+        stderr: second.stderr,
+        command: report?.command.name ?? null,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        reason: report?.outcomes[0]?.reason?.code ?? null,
+        installed: bytesToText(second.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        command: 'add',
+        action: 'update',
+        result: 'succeeded',
+        reason: null,
+        installed: revised,
+      });
+    });
+  });
+
+  test('add without --target installs into each detected writer', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"fan-out"}\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('fan-out', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: fan-out\n---\n\nDemo.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(8));
+      const result = harness.run(['add', source, '--json'], { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } });
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        targets: report.outcomes.map((outcome) => outcome.scope.target.kind),
+        result: report.outcomes.map((outcome) => outcome.result),
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        targets: ['cursor'],
+        result: ['succeeded'],
+        installed: pluginJson,
+      });
+    });
+  });
+
+  test('update refreshes the exact source package and does not rebind a same-name plugin', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const other = '{"name":"demo","version":"1.0.0","description":"from B"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const sourceA = harness.source('update-source-a', {
+        'plugin.json': original,
+        'skills/demo/SKILL.md': skill,
+      });
+      const sourceB = harness.source('update-source-b', {
+        'plugin.json': other,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', sourceA, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      writeFileSync(join(sourceA, 'plugin.json'), revised);
+
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        operationIdShape: operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          coverage: outcome.coverage,
+          action: outcome.action,
+          route: outcome.route,
+          result: outcome.result,
+          changed: outcome.changed,
+        })) ?? [],
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        rebound: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []).includes('from B'),
+        otherSource: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'update',
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          coverage: 'desired-pair',
+          action: 'update',
+          route: 'managed',
+          result: 'succeeded',
+          changed: true,
+        }],
+        installed: revised,
+        rebound: false,
+        otherSource: other,
+      });
+    });
+  });
+
+  test('update pointed at a different source locator keeps the recorded install', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const fromA = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const fromB = '{"name":"demo","version":"1.0.0","description":"from B"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const sourceA = harness.source('same-name-source-a', {
+        'plugin.json': fromA,
+        'skills/demo/SKILL.md': skill,
+      });
+      const sourceB = harness.source('same-name-source-b', {
+        'plugin.json': fromB,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', sourceA, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+
+      const result = harness.run(['update', sourceB, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; nativeId?: string }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const live = state.activations?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+      const tombstone = state.tombstones?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+      const diagnostic = report?.summary.reason?.diagnostic ?? '';
+
+      expect({
+        stderr: result.stderr,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        retired: live === undefined || tombstone !== undefined || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+        namesDemo: diagnostic.includes("package 'demo'"),
+        unknownPath: diagnostic.includes(`no install record for '${sourceB}'`),
+        sourceA: readFileSync(join(sourceA, 'plugin.json'), 'utf8'),
+        sourceB: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        stderr: '',
+        installed: fromA,
+        retired: false,
+        namesDemo: true,
+        unknownPath: false,
+        sourceA: fromA,
+        sourceB: fromB,
+      });
+    });
+  });
+
+  test('a recorded pin is reapplied before the projected fingerprint and survives update', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-update', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+      };
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        action: 'update',
+        result: 'succeeded',
+        installed: revised,
+        command: pinnedCommand,
+        pins: ['demo'],
+      });
+    });
+  });
+
+  test('update drops a recorded pin whose server is absent from the new source', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-dropped', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      writeFileSync(join(source, 'mcp.json'), '{"mcpServers":{}}\n');
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const combined = `${result.stdout}\n${result.stderr}`;
+      const reasonCode = report?.outcomes[0]?.reason?.code ?? report?.summary.reason?.code ?? null;
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        result: report?.outcomes[0]?.result ?? null,
+        invariant: reasonCode === 'internal.invariant' || combined.includes('internal.invariant'),
+        droppedPin: combined.includes("dropped pin 'demo'"),
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        result: 'succeeded',
+        invariant: false,
+        droppedPin: true,
+        installed: revised,
+        pins: [],
+        retired: false,
+      });
+    });
+  });
+
+  test('an unchanged sync keeps a recorded pin and the pinned readback fingerprint', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-sync', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+      const pinnedState = JSON.parse(bytesToText(pinned.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; fingerprints?: { source?: string; installed?: string } }>;
+      };
+      const pinnedActivation = pinnedState.activations?.find((row) => row.packageId === 'demo');
+      const pinnedFingerprint = pinnedActivation?.fingerprints?.installed ?? '';
+      const sourceFingerprint = pinnedActivation?.fingerprints?.source ?? '';
+
+      const result = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[]; fingerprints?: { source?: string; installed?: string } }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const activation = state.activations?.find((row) => row.packageId === 'demo');
+      const installedFingerprint = activation?.fingerprints?.installed ?? '';
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        reason: report?.outcomes[0]?.reason?.diagnostic ?? null,
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: activation?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+        pinnedReadback: installedFingerprint === pinnedFingerprint && installedFingerprint !== sourceFingerprint && sourceFingerprint !== '',
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        action: 'unchanged',
+        result: 'succeeded',
+        reason: null,
+        command: pinnedCommand,
+        pins: ['demo'],
+        retired: false,
+        pinnedReadback: true,
+      });
+    });
+  });
+
+  test('a second add keeps a recorded pin and installs the revised plugin bytes', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-add', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const result = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        result: report?.outcomes[0]?.result ?? null,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        result: 'succeeded',
+        installed: revised,
+        command: pinnedCommand,
+        pins: ['demo'],
+        retired: false,
+      });
+    });
+  });
+
+  test('remove retires a recorded install, keeps retained data, and prints the versioned report', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"kept"}\n';
+      const skill = '---\nname: demo\ndescription: kept\n---\n\nDemo.\n';
+      const retainedData = 'retained-data\n';
+      const retainedMetadata = 'retained-metadata\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('remove-retained', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      harness.writeHome({
+        '.cursor/plugins/retained/demo/data/keep.txt': retainedData,
+        '.cursor/plugins/retained/demo/metadata/keep.txt': retainedMetadata,
+      });
+
+      const result = harness.run(['remove', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: unknown[];
+        tombstones?: Array<{ packageId?: string; nativeId?: string; retentionState?: string }>;
+      };
+      const tombstone = state.tombstones?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && !Array.isArray(parsed) && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        operationIdShape: operationIds.length > 0 && operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          action: outcome.action,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+        })) ?? [],
+        pluginRemoved: result.stores.cursor.after.files['plugins/local/demo/plugin.json'] === undefined,
+        retainedData: bytesToText(result.stores.cursor.after.files['plugins/retained/demo/data/keep.txt'] ?? []),
+        retainedMetadata: bytesToText(result.stores.cursor.after.files['plugins/retained/demo/metadata/keep.txt'] ?? []),
+        retentionState: tombstone?.retentionState ?? null,
+        liveActivations: state.activations?.length ?? null,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'remove',
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          action: 'retire-orphan',
+          result: 'succeeded',
+          resourceState: 'absent',
+          activationState: 'inactive',
+        }],
+        pluginRemoved: true,
+        retainedData,
+        retainedMetadata,
+        retentionState: 'plugin-state-retained',
+        liveActivations: 0,
+      });
+    });
+  });
+
+  test('add --target dcode after a planner install keeps state v2', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '', '.deepagents/.keep': '' });
+      const source = harness.source('dcode-after-v2', {
+        'plugin.json': '{"name":"demo","version":"1.0.0","description":"from planner"}\n',
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: demo\n---\n\nDemo.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(40));
+      const dcode = harness.fakeNative('dcode', Array.from({ length: 8 }, () => ({
+        args: ['--version'],
+        stdout: 'deepagents-code 0.1.83\n',
+      })));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path, OPEN_PLUGIN_DCODE_BIN: dcode.path };
+      const planned = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const plannedState = JSON.parse(bytesToText(planned.state.after ?? [])) as { version?: number };
+      expect(planned.exitCode).toBe(0);
+      expect(plannedState.version).toBe(2);
+
+      const added = harness.run(['add', source, '--target', 'dcode', '--json'], { env });
+      const combined = `${added.stdout}\n${added.stderr}`;
+      const ledger = JSON.parse(bytesToText(added.state.after ?? [])) as {
+        version?: number;
+        activations?: Array<{ packageId?: string; nativeId?: string; scopeId?: string }>;
+        scopes?: Array<{ id?: string; target?: { kind?: string } }>;
+      };
+      const cursorScope = ledger.scopes?.find((scope) => scope.target?.kind === 'cursor');
+      const cursorKept = ledger.activations?.some((row) =>
+        row.packageId === 'demo' && cursorScope !== undefined && row.scopeId === cursorScope.id) ?? false;
+      expect({
+        exitCode: added.exitCode,
+        stderr: added.stderr,
+        downgrade: combined.includes('refusing to downgrade state.json version 2'),
+        version: ledger.version ?? null,
+        cursorKept,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        downgrade: false,
+        version: 2,
+        cursorKept: true,
+      });
+
+      const updated = harness.run(['update', '--json'], { env });
+      const updateParsed = updated.stdout.trim().startsWith('{') ? JSON.parse(updated.stdout) : null;
+      const updateReport = updateParsed === null ? null : parseLifecycleReport(updateParsed);
+      const cursorUpdate = updateReport?.outcomes.find((outcome) => outcome.scope.target.kind === 'cursor');
+      expect({
+        exitCode: updated.exitCode,
+        stderr: updated.stderr,
+        frozen: (cursorUpdate?.operationId ?? '').startsWith('operation-v1-'),
+        result: cursorUpdate?.result ?? null,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        frozen: true,
+        result: 'succeeded',
+      });
+    });
+  });
+
+  test('an explicit empty or missing cursor binary refuses and does not claim the directory profile', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('cursor-bin-refusal', {
+        'plugin.json': '{"name":"demo","version":"1.0.0","description":"fixture"}\n',
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: demo\n---\n\nDemo.\n',
+      });
+      const missing = join(harness.home, 'missing-cursor');
+      const cases = ['', missing].map((cursorBin) => {
+        const added = harness.run(['add', source, '--target', 'cursor', '--json'], {
+          env: { OPEN_PLUGIN_CURSOR_BIN: cursorBin },
+        });
+        const parsed = added.stdout.trim().startsWith('{') ? JSON.parse(added.stdout) : null;
+        const report = parsed === null ? null : parseLifecycleReport(parsed);
+        const outcome = report?.outcomes[0];
+        const combined = `${added.stdout}\n${added.stderr}`;
+        return {
+          cursorBin: cursorBin === '' ? 'empty' : 'missing',
+          exitCode: added.exitCode,
+          stderr: added.stderr,
+          result: outcome?.result ?? null,
+          code: outcome?.reason?.code ?? null,
+          diagnostic: outcome?.reason?.diagnostic ?? null,
+          installed: bytesToText(added.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+          claimsCursor240: combined.includes('2.4.0'),
+          directoryProfile: combined.includes("version 'directory'") || combined.includes('cursor-directory'),
+        };
+      });
+      expect(cases).toEqual([
+        {
+          cursorBin: 'empty',
+          exitCode: 1,
+          stderr: '',
+          result: 'failed',
+          code: 'capability.unverified',
+          diagnostic: "target 'cursor' has no verified native install profile for version 'unknown/unparseable' and local Sources",
+          installed: '',
+          claimsCursor240: false,
+          directoryProfile: false,
+        },
+        {
+          cursorBin: 'missing',
+          exitCode: 1,
+          stderr: '',
+          result: 'failed',
+          code: 'capability.unverified',
+          diagnostic: "target 'cursor' has no verified native install profile for version 'unknown/unparseable' and local Sources",
+          installed: '',
+          claimsCursor240: false,
+          directoryProfile: false,
+        },
+      ]);
+    });
+  });
 });
+
+function mcpCommand(bytes: number[] | undefined): string {
+  if (bytes === undefined) return '';
+  const parsed = JSON.parse(bytesToText(bytes)) as { mcpServers?: { demo?: { command?: string } } };
+  return parsed.mcpServers?.demo?.command ?? '';
+}
 
 function recordNativeRoute(statePath: string, packageId: string): void {
   const recorded = JSON.parse(readFileSync(statePath, 'utf8')) as {

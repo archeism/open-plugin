@@ -9,7 +9,7 @@ import { isScopeId, projectScopeInventory, renderScopeInventory, sameSourceBindi
 import { parseSyncManifest, SyncManifestValidationError } from './sync-manifest';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
 import { retirementTombstone } from './owned-activation';
-import { writeLifecycleState, writeState } from './state-write';
+import { withLegacyWriterRecord, writeLifecycleState, writeState } from './state-write';
 import type { InstallRecord } from './state';
 import { runPin } from './pin';
 import { runUpdate, type UpdateFinding } from './update';
@@ -61,6 +61,12 @@ verbs:
 mutation output:
   --json                            schema-v1 lifecycle report
   --legacy-json                     one-release InstallOutcome[] compatibility output
+
+cursor directory profile:
+  With no cursor binary configured, add may copy into the cursor store.
+  mcp, commands, resources, and model-invocation are unverified and refused
+  on that profile. An explicit OPEN_PLUGIN_CURSOR_BIN that is empty or missing
+  is refused and is not reported as Cursor 2.4.0.
 `;
 
 interface VerbFlags {
@@ -625,6 +631,522 @@ function renderLifecycleReport(report: LifecycleReport): string {
   return [header, ...rows, summary, ...diagnostic].join('\n');
 }
 
+const plannerKinds = new Set(lifecyclePlannerHosts.flatMap((host) => [...host.kinds]));
+
+type AddTargetSplit =
+  | { readonly kind: 'usage'; readonly diagnostic: string; readonly code?: Extract<LifecycleReasonCode, `usage.${string}`> }
+  | { readonly kind: 'refused'; readonly report: LifecycleReport }
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'ready'; readonly planner: readonly string[]; readonly writers: readonly HostWriter[] };
+
+function splitAddTargets(requested: readonly string[], dryRun: boolean): AddTargetSplit {
+  if (requested.length > 0) {
+    let profiles: ReturnType<typeof selectProfiles>;
+    try {
+      profiles = selectProfiles(requested);
+    } catch (error) {
+      return { kind: 'refused', report: reportFor('add', dryRun, [], [], {
+        terminalPhase: 'preflight',
+        mutationStarted: false,
+        reason: reason('internal', 'internal.defect', unknownErrorDiagnostic(error)),
+      }) };
+    }
+    if (profiles.error !== undefined) return { kind: 'usage', diagnostic: profiles.error, code: 'usage.invalid-selection' };
+    const excluded = profiles.selected.find((profile) => profile.scope === 'excluded-standalone');
+    if (excluded !== undefined) {
+      let failure: LifecycleReason;
+      try {
+        requireCompatible(excluded, 'install');
+        failure = reason('internal', 'internal.invariant', `excluded target '${excluded.id}' was unexpectedly admitted`);
+      } catch (error) {
+        failure = reasonForError(error);
+      }
+      return { kind: 'refused', report: reportFor('add', dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure }) };
+    }
+    const present = select(writers, profiles.selected.map((profile) => profile.id));
+    if (present.error !== undefined) return { kind: 'usage', diagnostic: present.error, code: 'usage.invalid-selection' };
+    if (present.selected.length === 0) return { kind: 'empty' };
+    return {
+      kind: 'ready',
+      planner: present.selected.filter((writer) => plannerKinds.has(writer.id)).map((writer) => writer.id),
+      writers: present.selected.filter((writer) => !plannerKinds.has(writer.id)),
+    };
+  }
+  const detected = writers.filter((writer) => writer.detect());
+  if (detected.length === 0) return { kind: 'empty' };
+  return {
+    kind: 'ready',
+    planner: detected.filter((writer) => plannerKinds.has(writer.id)).map((writer) => writer.id),
+    writers: detected.filter((writer) => !plannerKinds.has(writer.id)),
+  };
+}
+
+async function runAdd(argv: string[], mode: MutationOutputMode): Promise<number> {
+  const flags = parseFlags(argv);
+  const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting']));
+  if (disallowed !== undefined) return emitAddReport(usageReport('add', flags.dryRun, disallowed), mode);
+  if (flags.positionals.length !== 1) {
+    const diagnostic = flags.positionals.length === 0 ? 'missing source' : `unexpected argument: ${flags.positionals[1]}`;
+    return emitAddReport(usageReport('add', flags.dryRun, diagnostic), mode);
+  }
+  const source = flags.positionals[0]!;
+  const split = splitAddTargets(flags.targets, flags.dryRun);
+  if (split.kind === 'usage') return emitAddReport(usageReport('add', flags.dryRun, split.diagnostic, split.code), mode);
+  if (split.kind === 'refused') return emitAddReport(split.report, mode);
+  if (split.kind === 'ready' && split.planner.length > 0 && flags.adoptExisting && flags.plugins.length === 0) {
+    return emitAddReport(usageReport('add', flags.dryRun, '--adopt-existing requires --plugin'), mode);
+  }
+  if (split.kind === 'empty') {
+    return emitAddReport(reportFor('add', flags.dryRun, [], [], {
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      reason: reason('runtime', 'runtime.operation-failed', 'No detected writer targets'),
+    }), mode);
+  }
+  let binding: SourceBinding;
+  try {
+    binding = sourceBindingForArgument(source);
+  } catch (error) {
+    return emitAddReport(reportFor('add', flags.dryRun, [], [], {
+      terminalPhase: 'resolve',
+      mutationStarted: false,
+      reason: reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error)),
+    }), mode);
+  }
+  const reports: LifecycleReport[] = [];
+  if (split.writers.length > 0) reports.push(await runWriterAdd(source, split.writers, flags, mode));
+  if (split.planner.length > 0) reports.push(await runPlannerAdd(binding, split.planner, flags));
+  return emitAddReport(reports.length === 1 ? reports[0]! : mergeAddReports(reports), mode);
+}
+
+async function runPlannerAdd(binding: SourceBinding, targets: readonly string[], flags: VerbFlags): Promise<LifecycleReport> {
+  let manifest;
+  try {
+    manifest = parseSyncManifest({
+      schemaVersion: 1,
+      entries: targets.map((kind) => ({
+        operation: 'sync',
+        source: binding,
+        target: { kind, instance: 'default' },
+        ...(flags.plugins.length === 0 ? {} : {
+          selectors: flags.plugins.map((packageName) => ({ package: packageName, adoptExisting: flags.adoptExisting })),
+        }),
+      })),
+    });
+  } catch (error) {
+    if (error instanceof SyncManifestValidationError) return usageReport('add', flags.dryRun, error.reason.diagnostic, error.reason.code);
+    throw error;
+  }
+  const executed = await runFrozenLifecycle({
+    manifest,
+    dryRun: flags.dryRun,
+    hosts: lifecyclePlannerHosts,
+    now: new Date().toISOString(),
+    command: 'add',
+  });
+  return parseLifecycleReport({
+    ...executed.report,
+    command: { ...executed.report.command, name: 'add' },
+  });
+}
+
+function writeInstallLedger(records: InstallRecord[], changed: InstallRecord, binding: SourceBinding): void {
+  const loaded = readLifecycleState();
+  if (loaded.sourceVersion !== 2) {
+    writeState(records);
+    return;
+  }
+  writeLifecycleState(withLegacyWriterRecord(loaded.state, changed, binding), { globalPreflight: 'succeeded' });
+}
+
+async function runWriterAdd(
+  source: string,
+  selectedWriters: readonly HostWriter[],
+  flags: VerbFlags,
+  mode: MutationOutputMode,
+): Promise<LifecycleReport> {
+  let resolved;
+  try {
+    resolved = resolveSource(source);
+  } catch (error) {
+    return reportFor('add', flags.dryRun, [], [], {
+      terminalPhase: 'resolve',
+      mutationStarted: false,
+      reason: reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error)),
+    });
+  }
+  const sourceSnapshotId = 'source-0';
+  const sourceSnapshots = [{ id: sourceSnapshotId, reference: resolved.snapshot }];
+  const pluginSelection = selectPlugins(resolved.plugins, flags.plugins);
+  if (pluginSelection.error !== undefined) return usageReport('add', flags.dryRun, pluginSelection.error, 'usage.invalid-selection');
+  const profiles = selectedWriters.map((writer) => findConsumerProfile(writer.id)).filter((profile): profile is ConsumerProfile => profile !== undefined);
+  const incompatible = compatibilityOutcomes(profiles, pluginSelection.selected.map((plugin) => plugin.name), 'install', resolved.snapshot.binding, sourceSnapshotId);
+  if (incompatible !== undefined) {
+    return reportFor('add', flags.dryRun, incompatible.plan, incompatible.outcomes, { terminalPhase: 'preflight', mutationStarted: false, sourceSnapshots });
+  }
+  const captured = selectedWriters.flatMap((writer) => pluginSelection.selected.map((plugin) => {
+    const scope = createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' });
+    const identity = captureNativeIdentity(writer, plugin);
+    return identity.ok
+      ? { writer, plugin, scope, nativeId: identity.identity.nativeId, equivalent: identity.identity.equivalentNativeIds, failure: null as LifecycleReason | null }
+      : { writer, plugin, scope, nativeId: identity.nativeId, equivalent: [] as readonly string[], failure: reason('internal', 'internal.defect', unknownErrorDiagnostic(identity.error)) };
+  }));
+  const identityFailure = captured.find((pair) => pair.failure !== null)?.failure ?? null;
+  if (identityFailure !== null) {
+    const plan = freezePlan(captured.map((pair) => planOperation({
+      command: 'add',
+      scope: pair.scope,
+      sourceSnapshotId,
+      package: pair.plugin.name,
+      nativeId: pair.nativeId,
+      action: pair.failure === null ? 'install' : 'not-attempted',
+      route: pair.failure === null ? 'managed' : 'none',
+    })));
+    const blocked = reason('runtime', 'runtime.operation-failed', 'not attempted after an adapter identity preflight failure');
+    return reportFor('add', flags.dryRun, plan, plan.map((operation, index) => outcomeFor(operation, {
+      result: captured[index]!.failure === null ? 'not-attempted' : 'failed',
+      changed: false,
+      reason: captured[index]!.failure ?? blocked,
+    })), { terminalPhase: 'preflight', mutationStarted: false, reason: identityFailure, sourceSnapshots });
+  }
+  if (flags.adoptExisting && selectedWriters.some((writer) => writer.supportsAdoption !== true)) {
+    const blocked = reason('runtime', 'runtime.operation-failed', 'not attempted because another selected target does not support adoption');
+    const rows = captured.map((pair) => {
+      const supported = pair.writer.supportsAdoption === true;
+      const operation = planOperation({
+        command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.nativeId, action: 'not-attempted', route: 'none',
+      });
+      return {
+        operation,
+        outcome: outcomeFor(operation, {
+          result: supported ? 'not-attempted' : 'failed',
+          changed: false,
+          reason: supported ? blocked : reason('capability', 'capability.unsupported', `target '${pair.writer.id}' does not support --adopt-existing`, 'adoption', 'writer.supportsAdoption'),
+        }),
+      };
+    });
+    return reportFor('add', flags.dryRun, freezePlan(rows.map(({ operation }) => operation)), rows.map(({ outcome }) => outcome), { terminalPhase: 'preflight', mutationStarted: false, sourceSnapshots });
+  }
+  let state: InstallRecord[];
+  try {
+    state = readState();
+  } catch (error) {
+    return reportFor('add', flags.dryRun, [], [], {
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      reason: reason('internal', 'internal.corrupt-state', unknownErrorDiagnostic(error)),
+      sourceSnapshots,
+    });
+  }
+  const plan = freezePlan(captured.map((pair) => planOperation({
+    command: 'add',
+    scope: pair.scope,
+    sourceSnapshotId,
+    package: pair.plugin.name,
+    nativeId: pair.nativeId,
+    action: 'install',
+    route: 'managed',
+  })));
+  const outcomes: LifecycleOperationOutcome[] = [];
+  let mutationStarted = false;
+  for (let index = 0; index < captured.length; index++) {
+    const pair = captured[index]!;
+    const operation = plan[index]!;
+    if (flags.dryRun) {
+      try {
+        if (mode === 'json') await withLogsOnStderr(() => pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting }));
+        else await pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting });
+        outcomes.push(outcomeFor(operation, { result: 'succeeded', changed: false }));
+      } catch (error) {
+        outcomes.push(outcomeFor(operation, { result: 'failed', changed: false, reason: reasonForError(error) }));
+        break;
+      }
+      continue;
+    }
+    const nativeId = pair.nativeId;
+    if (nativeId === null) {
+      outcomes.push(outcomeFor(operation, { result: 'failed', changed: false, reason: reason('internal', 'internal.invariant', `writer install of '${pair.plugin.name}' has no native identity`) }));
+      break;
+    }
+    const stateIds = new Set(pair.equivalent);
+    const existing = state.findIndex((record) => record.host === pair.writer.id && stateIds.has(record.id));
+    const previous = existing === -1 ? undefined : state[existing];
+    const pending: InstallRecord = {
+      ...(previous ?? { host: pair.writer.id, id: nativeId }),
+      host: pair.writer.id,
+      id: nativeId,
+      source: resolved.sourceUri,
+      sourceSha: resolved.sha,
+      ownership: previous?.ownership ?? 'plgnz',
+      pending: 'install',
+    };
+    const pendingState = existing === -1 ? [...state, pending] : state.map((record) => record === previous ? pending : record);
+    try {
+      writeInstallLedger(pendingState, pending, resolved.snapshot.binding);
+    } catch (error) {
+      outcomes.push(outcomeFor(operation, { result: 'failed', changed: false, reason: reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error)) }));
+      break;
+    }
+    mutationStarted = true;
+    state = pendingState;
+    let changed = false;
+    try {
+      const writerResult = mode === 'json'
+        ? await withLogsOnStderr(() => pair.writer.add(pair.plugin, resolved, { dryRun: false, adoptExisting: flags.adoptExisting }))
+        : await pair.writer.add(pair.plugin, resolved, { dryRun: false, adoptExisting: flags.adoptExisting });
+      changed = writerResult !== 'unchanged';
+    } catch (error) {
+      outcomes.push(outcomeFor(operation, {
+        result: 'pending',
+        changed: false,
+        resourceState: 'potentially-changed',
+        activationState: 'unknown',
+        reason: reason('recovery', 'recovery.required', `install of '${pair.plugin.name}' requires recovery after pending intent was persisted — ${unknownErrorDiagnostic(error)}`),
+      }));
+      break;
+    }
+    try {
+      const installed = pair.writer.listInstalled();
+      const marketplace = pair.plugin.marketplace ?? 'local';
+      const match = installed.find((plugin) => plugin.id === nativeId && plugin.name === pair.plugin.name
+        && (plugin.marketplace === marketplace || (marketplace === 'local' && plugin.marketplace === undefined))
+        && plugin.enabled !== false);
+      if (match?.path === undefined) throw new LifecycleCommandError(reason('readback', 'readback.mismatch', `native install readback is missing ${nativeId}`));
+      const installedFingerprint = fingerprintInstallation(match);
+      const finalized: InstallRecord = {
+        ...pending,
+        id: nativeId,
+        source: resolved.sourceUri,
+        sourceSha: resolved.sha,
+        installedAt: new Date().toISOString(),
+        sourceDir: pair.plugin.sourceDir ?? pair.plugin.dir,
+        installedFingerprint,
+        ...(pair.plugin.contentFingerprint === undefined ? {} : { fingerprint: pair.plugin.contentFingerprint }),
+      };
+      delete finalized.pending;
+      const finalizedState = state.map((record) => record === pending ? finalized : record);
+      writeInstallLedger(finalizedState, finalized, resolved.snapshot.binding);
+      state = finalizedState;
+      outcomes.push(outcomeFor(operation, { result: 'succeeded', changed }));
+    } catch (error) {
+      const failure = reasonForError(error);
+      outcomes.push(outcomeFor(operation, {
+        result: failure.category === 'recovery' || failure.category === 'readback' ? 'pending' : 'failed',
+        changed,
+        resourceState: 'potentially-changed',
+        reason: failure.category === 'readback' ? failure : reason('recovery', 'recovery.required', failure.diagnostic),
+      }));
+      break;
+    }
+  }
+  const reported = new Set(outcomes.map((outcome) => outcome.operationId));
+  for (const operation of plan) {
+    if (reported.has(operation.operationId)) continue;
+    outcomes.push(outcomeFor(operation, {
+      result: 'not-attempted',
+      changed: false,
+      reason: reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier install failure'),
+    }));
+  }
+  const failure = outcomes.find((outcome) => outcome.result !== 'succeeded')?.reason ?? null;
+  return reportFor('add', flags.dryRun, plan, outcomes, {
+    terminalPhase: failure === null ? undefined : failure.category === 'readback' ? 'readback' : mutationStarted ? 'apply' : 'preflight',
+    mutationStarted,
+    reason: failure,
+    sourceSnapshots,
+  });
+}
+
+function mergeAddReports(reports: readonly LifecycleReport[]): LifecycleReport {
+  const snapshots = new Map<string, LifecycleSourceSnapshotContext>();
+  for (const report of reports) {
+    for (const snapshot of report.command.sourceSnapshots) snapshots.set(snapshot.id, snapshot);
+  }
+  const failure = reports.find((report) => report.summary.result !== 'converged') ?? null;
+  return parseLifecycleReport({
+    schemaVersion: 1,
+    command: { name: 'add', dryRun: reports.some((report) => report.command.dryRun), sourceSnapshots: [...snapshots.values()] },
+    plan: reports.flatMap((report) => report.plan),
+    outcomes: reports.flatMap((report) => report.outcomes),
+    summary: failure === null
+      ? {
+        result: 'converged',
+        terminalPhase: 'complete',
+        mutationStarted: reports.some((report) => report.summary.mutationStarted),
+        changed: reports.some((report) => report.summary.changed),
+        failureCategory: null,
+        reason: null,
+        recoveryId: null,
+        readbackId: null,
+      }
+      : failure.summary,
+  });
+}
+
+async function runRecordedLifecycleRemove(
+  flags: VerbFlags,
+  target: string,
+  state: LifecycleStateV2,
+  selected: readonly HostWriter[],
+): Promise<LifecycleReport | null> {
+  const kinds = new Set(selected.map((writer) => writer.id));
+  const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
+  const matches = state.activations.flatMap((activation) => {
+    const scope = scopes.get(activation.scopeId);
+    if (scope === undefined || scope.target.instance !== 'default' || !kinds.has(scope.target.kind)) return [];
+    const writer = selected.find((candidate) => candidate.id === scope.target.kind);
+    const alias = writer?.persistedNativeIdMayAlias?.(activation.nativeId, target) === true;
+    if (target !== activation.packageId && target !== activation.nativeId && !alias) return [];
+    return [{ scope }];
+  });
+  if (matches.length === 0 || matches.some((match) => !plannerKinds.has(match.scope.target.kind))) return null;
+  const byScope = new Map<string, LifecycleStateV2['scopes'][number]>();
+  for (const match of matches) byScope.set(match.scope.id, match.scope);
+  for (const scopeId of byScope.keys()) {
+    const inScope = state.activations.filter((activation) => activation.scopeId === scopeId).length;
+    const selectedInScope = matches.filter((match) => match.scope.id === scopeId).length;
+    if (inScope !== selectedInScope) return null;
+  }
+  const perHost = new Map<string, number>();
+  for (const match of matches) {
+    const count = (perHost.get(match.scope.target.kind) ?? 0) + 1;
+    if (count > 1) return null;
+    perHost.set(match.scope.target.kind, count);
+  }
+  let manifest;
+  try {
+    manifest = parseSyncManifest({
+      schemaVersion: 1,
+      entries: [...byScope.values()].map((scope) => ({
+        operation: 'retire-source',
+        scopeId: scope.id,
+        target: { kind: scope.target.kind, instance: scope.target.instance },
+      })),
+    });
+  } catch (error) {
+    if (error instanceof SyncManifestValidationError) return usageReport('remove', flags.dryRun, error.reason.diagnostic, error.reason.code);
+    throw error;
+  }
+  const executed = await runFrozenLifecycle({
+    manifest,
+    dryRun: flags.dryRun,
+    hosts: lifecyclePlannerHosts,
+    now: new Date().toISOString(),
+    command: 'remove',
+  });
+  return executed.report;
+}
+
+function recordedPackageOnDifferentSource(requested: string, state: LifecycleStateV2, kinds: ReadonlySet<string>): string | null {
+  let resolved: ReturnType<typeof resolveSource>;
+  try {
+    resolved = resolveSource(requested);
+  } catch {
+    return null;
+  }
+  const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
+  for (const plugin of resolved.plugins) {
+    for (const activation of state.activations) {
+      if (activation.packageId !== plugin.name) continue;
+      const scope = scopes.get(activation.scopeId);
+      if (scope === undefined || scope.target.instance !== 'default' || !kinds.has(scope.target.kind)) continue;
+      if (sameSourceBinding(scope.source, resolved.snapshot.binding)) continue;
+      return plugin.name;
+    }
+  }
+  return null;
+}
+
+async function runRecordedLifecycleUpdate(flags: VerbFlags, state: LifecycleStateV2): Promise<LifecycleReport | null> {
+  let profiles: ReturnType<typeof selectProfiles>;
+  try {
+    profiles = selectProfiles(flags.targets);
+  } catch (error) {
+    return reportFor('update', flags.dryRun, [], [], {
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      reason: reason('internal', 'internal.defect', unknownErrorDiagnostic(error)),
+    });
+  }
+  if (profiles.error !== undefined) return usageReport('update', flags.dryRun, profiles.error, 'usage.invalid-selection');
+  const present = flags.targets.length === 0 ? select(writers, []) : select(writers, profiles.selected.map((profile) => profile.id));
+  if (present.error !== undefined) return usageReport('update', flags.dryRun, present.error, 'usage.invalid-selection');
+  if (present.selected.length === 0) {
+    return reportFor('update', flags.dryRun, [], [], {
+      terminalPhase: 'preflight',
+      mutationStarted: false,
+      reason: reason('runtime', 'runtime.operation-failed', 'No detected writer targets'),
+    });
+  }
+  const kinds = new Set(present.selected.map((writer) => writer.id));
+  const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
+  const requested = flags.positionals[0];
+  const matches = state.activations.flatMap((activation) => {
+    const scope = scopes.get(activation.scopeId);
+    if (scope === undefined || scope.target.instance !== 'default' || !kinds.has(scope.target.kind)) return [];
+    if (requested !== undefined && requested !== activation.packageId && requested !== activation.nativeId) return [];
+    return [{ scope, packageId: activation.packageId }];
+  });
+  const plannerMatches = matches.filter((match) => plannerKinds.has(match.scope.target.kind));
+  if (matches.length > 0 && plannerMatches.length === 0) return null;
+  if (plannerMatches.length === 0) {
+    if (requested !== undefined) {
+      const collided = recordedPackageOnDifferentSource(requested, state, kinds);
+      if (collided !== null) {
+        return reportFor('update', flags.dryRun, [], [], {
+          terminalPhase: 'preflight',
+          mutationStarted: false,
+          reason: reason('internal', 'internal.ambiguous-ownership', `package '${collided}' is bound to a different source locator`),
+        });
+      }
+      return reportFor('update', flags.dryRun, [], [], {
+        terminalPhase: 'preflight',
+        mutationStarted: false,
+        reason: reason('internal', 'internal.ambiguous-ownership', `no install record for '${requested}' in state.json — not installed by plgnz; refusing to modify it`),
+      });
+    }
+    return reportFor('update', flags.dryRun, [], [], { mutationStarted: false });
+  }
+  const byScope = new Map<string, { scope: LifecycleStateV2['scopes'][number]; packages: string[] }>();
+  for (const match of plannerMatches) {
+    const group = byScope.get(match.scope.id) ?? { scope: match.scope, packages: [] };
+    if (!group.packages.includes(match.packageId)) group.packages.push(match.packageId);
+    byScope.set(match.scope.id, group);
+  }
+  let manifest;
+  try {
+    manifest = parseSyncManifest({
+      schemaVersion: 1,
+      entries: [...byScope.values()].map((group) => ({
+        operation: 'sync',
+        source: group.scope.source,
+        target: { kind: group.scope.target.kind, instance: group.scope.target.instance },
+        selectors: group.packages.map((packageName) => ({ package: packageName })),
+      })),
+    });
+  } catch (error) {
+    if (error instanceof SyncManifestValidationError) return usageReport('update', flags.dryRun, error.reason.diagnostic, error.reason.code);
+    throw error;
+  }
+  const executed = await runFrozenLifecycle({
+    manifest,
+    dryRun: flags.dryRun,
+    hosts: lifecyclePlannerHosts,
+    now: new Date().toISOString(),
+    command: 'update',
+  });
+  return parseLifecycleReport({
+    ...executed.report,
+    command: { ...executed.report.command, name: 'update' },
+  });
+}
+
+function emitAddReport(report: LifecycleReport, mode: MutationOutputMode): number {
+  if (mode === 'json') return emitValidatedReport(report, true);
+  printReport(report, mode);
+  return exitCodeForLifecycleReport(report);
+}
+
 async function runSync(argv: string[], json: boolean): Promise<number> {
   const flags = parseFlags(argv);
   const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting', 'instance', 'manifest']));
@@ -918,6 +1440,13 @@ export async function main(argv: string[]): Promise<number> {
       printReport(report, mutationOutput);
       return exitCodeForLifecycleReport(report);
     }
+    if (lifecycleVersion === 2) {
+      const recorded = await runRecordedLifecycleRemove(flags, target, lifecycleState, selection.selected);
+      if (recorded !== null) {
+        printReport(recorded, mutationOutput);
+        return exitCodeForLifecycleReport(recorded);
+      }
+    }
     const pairs: Array<{
       writer: (typeof cleanupWriters)[number];
       record: InstallRecord;
@@ -1160,384 +1689,7 @@ export async function main(argv: string[]): Promise<number> {
     printReport(report, mutationOutput);
     return exitCodeForLifecycleReport(report);
   }
-  if (verb === 'add') {
-    const flags = parseFlags(args.slice(1));
-    const outcomes: LifecycleOperationOutcome[] = [];
-    let plan: readonly LifecyclePlanOperation[] = Object.freeze([]);
-    let activeOperationId: string | undefined;
-    let activePairMutationStarted = false;
-    let activePairChanged = false;
-    let activeReadbackConfirmed = false;
-    let activeTerminalPhase: LifecycleTerminalPhase = 'apply';
-    let mutationStarted = false;
-    let sourceSnapshots: LifecycleSourceSnapshotContext[] = [];
-    const disallowed = rejectDisallowed(flags, new Set(['target', 'plugin', 'dryRun', 'adoptExisting']));
-    if (disallowed) {
-      const report = usageReport('add', flags.dryRun, disallowed);
-      printReport(report, mutationOutput);
-      return exitCodeForLifecycleReport(report);
-    }
-    if (flags.positionals.length > 1) {
-      const report = usageReport('add', flags.dryRun, `unexpected argument: ${flags.positionals[1]}`);
-      printReport(report, mutationOutput);
-      return exitCodeForLifecycleReport(report);
-    }
-    const sourceArg = flags.positionals[0];
-    if (sourceArg === undefined) {
-      const report = usageReport('add', flags.dryRun, 'missing source');
-      printReport(report, mutationOutput);
-      return exitCodeForLifecycleReport(report);
-    }
-
-    try {
-      let profileSelection: ReturnType<typeof selectProfiles>;
-      try {
-        profileSelection = selectProfiles(flags.targets);
-      } catch (error) {
-        return printDetectionDefect('add', flags.dryRun, error, mutationOutput);
-      }
-      if (profileSelection.error) {
-        const report = usageReport('add', flags.dryRun, profileSelection.error, 'usage.invalid-selection');
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      if (profileSelection.selected.some((profile) => profile.scope === 'excluded-standalone')) {
-        const excluded = profileSelection.selected.find((profile) => profile.scope === 'excluded-standalone')!;
-        let failure: LifecycleReason;
-        try {
-          requireCompatible(excluded, 'install');
-          failure = reason('internal', 'internal.invariant', `excluded target '${excluded.id}' was unexpectedly admitted`);
-        } catch (error) {
-          failure = reasonForError(error);
-        }
-        const report = reportFor('add', flags.dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      let state: InstallRecord[];
-      try {
-        state = readState();
-      } catch (error) {
-        const failure = reason('internal', 'internal.corrupt-state', unknownErrorDiagnostic(error));
-        const report = reportFor('add', flags.dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      let resolved;
-      try { resolved = resolveSource(sourceArg); }
-      catch (error) {
-        const failure = reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error));
-        const report = reportFor('add', flags.dryRun, [], [], { terminalPhase: 'resolve', mutationStarted: false, reason: failure });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      const sourceSnapshotId = 'source-0';
-      sourceSnapshots = [{ id: sourceSnapshotId, reference: resolved.snapshot }];
-      const pluginSelection = selectPlugins(resolved.plugins, flags.plugins);
-      if (pluginSelection.error) {
-        const report = usageReport('add', flags.dryRun, pluginSelection.error, 'usage.invalid-selection');
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      const incompatible = compatibilityOutcomes(
-        profileSelection.selected,
-        pluginSelection.selected.map((plugin) => plugin.name),
-        'install',
-        resolved.snapshot.binding,
-        sourceSnapshotId,
-      );
-      if (incompatible !== undefined) {
-        const report = reportFor('add', flags.dryRun, incompatible.plan, incompatible.outcomes, { terminalPhase: 'preflight', mutationStarted: false, sourceSnapshots });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      let selection: { selected: (typeof writers)[number][]; error?: string };
-      try {
-        selection = flags.targets.length === 0
-          ? select(writers, [])
-          : select(writers, profileSelection.selected.map((profile) => profile.id));
-      } catch (error) {
-        return printDetectionDefect('add', flags.dryRun, error, mutationOutput, sourceSnapshots);
-      }
-      if (selection.error) {
-        const report = usageReport('add', flags.dryRun, selection.error, 'usage.invalid-selection');
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      if (selection.selected.length === 0) {
-        const failure = reason('runtime', 'runtime.operation-failed', 'No detected writer targets');
-        const report = reportFor('add', flags.dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure, sourceSnapshots });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      const capturedAddPairs = selection.selected.flatMap((writer) => pluginSelection.selected.map((plugin) => {
-        const scope = createDeploymentScopeIdentity(resolved.snapshot.binding, { kind: writer.id, instance: 'default' });
-        const captured = captureNativeIdentity(writer, plugin);
-        return captured.ok
-          ? { writer, plugin, scope, identity: captured.identity, nativeId: captured.identity.nativeId, failure: null }
-          : {
-              writer,
-              plugin,
-              scope,
-              identity: null,
-              nativeId: captured.nativeId,
-              failure: reason('internal', 'internal.defect', unknownErrorDiagnostic(captured.error)),
-            };
-      }));
-      const identityFailure = capturedAddPairs.find((pair) => pair.failure !== null)?.failure ?? null;
-      if (identityFailure !== null) {
-        const identityPlan = freezePlan(capturedAddPairs.map((pair) => planOperation({
-          command: 'add',
-          scope: pair.scope,
-          sourceSnapshotId,
-          package: pair.plugin.name,
-          nativeId: pair.nativeId,
-          action: pair.failure === null ? 'install' : 'not-attempted',
-          route: pair.failure === null ? 'managed' : 'none',
-        })));
-        const blocked = reason('runtime', 'runtime.operation-failed', 'not attempted after an adapter identity preflight failure');
-        const identityOutcomes = identityPlan.map((operation, index) => outcomeFor(operation, {
-          result: capturedAddPairs[index]!.failure === null ? 'not-attempted' : 'failed',
-          changed: false,
-          reason: capturedAddPairs[index]!.failure ?? blocked,
-        }));
-        const report = reportFor('add', flags.dryRun, identityPlan, identityOutcomes, {
-          terminalPhase: 'preflight',
-          mutationStarted: false,
-          reason: identityFailure,
-          sourceSnapshots,
-        });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-      const addPairs = capturedAddPairs.map((pair) => ({ ...pair, identity: pair.identity! }));
-      if (flags.adoptExisting && selection.selected.some((writer) => writer.supportsAdoption !== true)) {
-        const blocked = reason('runtime', 'runtime.operation-failed', 'not attempted because another selected target does not support adoption');
-        const adoptionRows = addPairs.map(({ writer, plugin, scope, identity }) => {
-          const supported = writer.supportsAdoption === true;
-          const diagnostic = `target '${writer.id}' does not support --adopt-existing`;
-          const operation = planOperation({
-            command: 'add',
-            scope,
-            sourceSnapshotId,
-            package: plugin.name,
-            nativeId: identity.nativeId,
-            action: 'not-attempted',
-            route: 'none',
-          });
-          return { operation, outcome: outcomeFor(operation, {
-            result: supported ? 'not-attempted' : 'failed',
-            changed: false,
-            reason: supported ? blocked : reason('capability', 'capability.unsupported', diagnostic, 'adoption', 'writer.supportsAdoption'),
-          }) };
-        });
-        const adoptionPlan = freezePlan(adoptionRows.map(({ operation }) => operation));
-        const report = reportFor('add', flags.dryRun, adoptionPlan, adoptionRows.map(({ outcome }) => outcome), {
-          terminalPhase: 'preflight',
-          mutationStarted: false,
-          sourceSnapshots,
-        });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-
-      for (const { writer, identity } of addPairs) {
-        const stateIds = new Set(identity.equivalentNativeIds);
-        if (state.filter((record) => record.host === writer.id && stateIds.has(record.id)).length > 1) {
-          const failure = reason(
-            'internal',
-            'internal.ambiguous-ownership',
-            `multiple ${writer.id} ledger records match native identity '${identity.nativeId}'`,
-          );
-          const report = reportFor('add', flags.dryRun, [], [], {
-            terminalPhase: 'preflight',
-            mutationStarted: false,
-            reason: failure,
-            sourceSnapshots,
-          });
-          printReport(report, mutationOutput);
-          return exitCodeForLifecycleReport(report);
-        }
-      }
-
-      if (flags.dryRun) {
-        const dryRunPairs = Object.freeze(addPairs);
-        const rows: Array<{ operation: LifecyclePlanOperation; outcome: LifecycleOperationOutcome }> = [];
-        let stopped = false;
-        for (const pair of dryRunPairs) {
-          if (stopped) {
-            const operation = planOperation({
-              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.identity.nativeId,
-              action: 'install', route: 'managed',
-            });
-            rows.push({ operation, outcome: outcomeFor(operation, {
-              result: 'not-attempted',
-              changed: false,
-              reason: reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier install preflight failure'),
-            }) });
-            continue;
-          }
-          try {
-            const writerResult = json
-              ? await withLogsOnStderr(() => pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting }))
-              : await pair.writer.add(pair.plugin, resolved, { dryRun: true, adoptExisting: flags.adoptExisting });
-            const operation = planOperation({
-              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.identity.nativeId,
-              action: writerResult === 'unchanged' ? 'unchanged' : 'install', route: 'managed',
-            });
-            rows.push({ operation, outcome: outcomeFor(operation, { result: 'succeeded', changed: false }) });
-          } catch (error) {
-            const capability = error instanceof CompatibilityError;
-            const operation = planOperation({
-              command: 'add', scope: pair.scope, sourceSnapshotId, package: pair.plugin.name, nativeId: pair.identity.nativeId,
-              action: capability ? 'not-attempted' : 'install', route: capability ? 'none' : 'managed',
-            });
-            rows.push({ operation, outcome: outcomeFor(operation, {
-              result: 'failed',
-              changed: false,
-              reason: reasonForError(error),
-            }) });
-            stopped = !capability;
-          }
-        }
-        plan = freezePlan(rows.map(({ operation }) => operation));
-        const report = reportFor('add', true, plan, rows.map(({ outcome }) => outcome), {
-          terminalPhase: rows.some(({ outcome }) => outcome.result !== 'succeeded') ? 'preflight' : undefined,
-          mutationStarted: false,
-          sourceSnapshots,
-        });
-        printReport(report, mutationOutput);
-        return exitCodeForLifecycleReport(report);
-      }
-
-      activeTerminalPhase = 'preflight';
-      const executionPairs = addPairs.map((pair) => ({
-        ...pair,
-        operation: planOperation({
-          command: 'add',
-          scope: pair.scope,
-          sourceSnapshotId,
-          package: pair.plugin.name,
-          nativeId: pair.identity.nativeId,
-          action: 'install',
-          route: 'managed',
-        }),
-      }));
-      activeTerminalPhase = 'apply';
-      plan = freezePlan(executionPairs.map(({ operation }) => operation));
-      for (let operationIndex = 0; operationIndex < executionPairs.length; operationIndex++) {
-        const { writer: w, plugin, identity } = executionPairs[operationIndex]!;
-        const operation = plan[operationIndex]!;
-        activeOperationId = operation.operationId;
-        activePairMutationStarted = false;
-        activePairChanged = false;
-        activeReadbackConfirmed = false;
-        activeTerminalPhase = 'apply';
-        const nativeId = identity.nativeId;
-        const stateIds = new Set(identity.equivalentNativeIds);
-        const idx = state.findIndex(r => r.host === w.id && stateIds.has(r.id));
-        const previous = idx !== -1 ? state[idx] : undefined;
-        const rec: InstallRecord = {
-          ...(previous ?? {
-            host: w.id,
-            id: nativeId,
-          }),
-          host: w.id,
-          id: nativeId,
-          source: resolved.sourceUri,
-          sourceSha: resolved.sha,
-          ownership: previous?.ownership ?? 'plgnz',
-          pending: 'install',
-        };
-        const pendingState = idx === -1 ? [...state, rec] : state.map((candidate) => candidate === previous ? rec : candidate);
-        try {
-          writeState(pendingState);
-        } catch (error) {
-          throw new LifecycleCommandError(reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error)));
-        }
-        activePairMutationStarted = true;
-        mutationStarted = true;
-        state = pendingState;
-        let writerResult: void | 'unchanged';
-        try {
-          writerResult = json
-            ? await withLogsOnStderr(() => w.add(plugin, resolved, { dryRun: false, adoptExisting: flags.adoptExisting }))
-            : await w.add(plugin, resolved, { dryRun: false, adoptExisting: flags.adoptExisting });
-          activePairChanged = writerResult !== 'unchanged';
-        } catch (error) {
-          const diagnostic = error instanceof CompatibilityError
-            ? `target '${w.id}' refused install after pending intent was persisted — ${error.message}`
-            : `install of '${plugin.name}' requires recovery after pending intent was persisted — ${unknownErrorDiagnostic(error)}`;
-          throw new LifecycleCommandError(reason('recovery', 'recovery.required', diagnostic));
-        }
-        activeTerminalPhase = 'readback';
-        let match;
-        let installedFingerprint: string;
-        try {
-          const installed = w.listInstalled();
-          const expectedMarketplace = plugin.marketplace ?? 'local';
-          match = installed.find(p => p.id === nativeId && p.name === plugin.name &&
-            (p.marketplace === expectedMarketplace || (expectedMarketplace === 'local' && p.marketplace === undefined)) && p.enabled !== false);
-          if (match?.path === undefined) throw new LifecycleCommandError(reason('readback', 'readback.mismatch', `native install readback is missing ${nativeId}`));
-          installedFingerprint = fingerprintInstallation(match);
-          activeReadbackConfirmed = true;
-        } catch (error) {
-          if (error instanceof LifecycleCommandError) throw error;
-          throw new LifecycleCommandError(reason('readback', 'readback.failed', unknownErrorDiagnostic(error)));
-        }
-        const finalized: InstallRecord = {
-          ...rec,
-          id: nativeId,
-          source: resolved.sourceUri,
-          sourceSha: resolved.sha,
-          installedAt: new Date().toISOString(),
-          sourceDir: plugin.sourceDir ?? plugin.dir,
-          installedFingerprint,
-          ...(plugin.contentFingerprint !== undefined ? { fingerprint: plugin.contentFingerprint } : {}),
-        };
-        delete finalized.pending;
-        const finalizedState = state.map((candidate) => candidate === rec ? finalized : candidate);
-        activeTerminalPhase = 'finalize';
-        try {
-          writeState(finalizedState);
-        } catch (error) {
-          throw new LifecycleCommandError(reason('recovery', 'recovery.required', `install of '${plugin.name}' requires recovery after finalization failed — ${unknownErrorDiagnostic(error)}`));
-        }
-        state = finalizedState;
-        outcomes.push(outcomeFor(operation, { result: 'succeeded', changed: activePairChanged }));
-      }
-      const report = reportFor('add', false, plan, outcomes, { mutationStarted, sourceSnapshots });
-      printReport(report, mutationOutput);
-      return exitCodeForLifecycleReport(report);
-    } catch (error: unknown) {
-      const failureReason = reasonForError(error);
-      const reported = new Set(outcomes.map((candidate) => candidate.operationId));
-      const failures: LifecycleOperationOutcome[] = [];
-      for (const operation of plan) {
-        if (reported.has(operation.operationId)) continue;
-        const active = operation.operationId === activeOperationId;
-        const activeResult = failureReason.category === 'recovery' ||
-          (activePairMutationStarted && failureReason.category === 'readback')
-          ? 'pending'
-          : 'failed';
-        failures.push(outcomeFor(operation, {
-          result: active ? activeResult : 'not-attempted',
-          changed: active && activePairChanged,
-          resourceState: active && activeReadbackConfirmed ? 'present' : active && activePairMutationStarted ? 'potentially-changed' : 'unknown',
-          activationState: active && activeReadbackConfirmed ? 'active-conforming' : 'unknown',
-          reason: active ? failureReason : reason('runtime', 'runtime.operation-failed', 'not attempted after an earlier install failure'),
-        }));
-      }
-      const report = reportFor('add', flags.dryRun, plan, [...outcomes, ...failures], {
-        terminalPhase: activeTerminalPhase,
-        mutationStarted,
-        reason: failureReason,
-        sourceSnapshots,
-      });
-      printReport(report, mutationOutput);
-      return exitCodeForLifecycleReport(report);
-    }
-  }
+  if (verb === 'add') return runAdd(args.slice(1), mutationOutput);
   if (verb === 'pin') {
     const flags = parseFlags(args.slice(1));
     if (rejectDisallowed(flags, new Set(['target', 'all', 'dryRun'])) || flags.positionals.length > 0) fail(`plugnz pin: unexpected argument: ${flags.positionals[0]}`, 2);
@@ -1566,6 +1718,22 @@ export async function main(argv: string[]): Promise<number> {
       const report = usageReport('update', flags.dryRun, disallowed ?? `unexpected argument: ${flags.positionals[1]}`);
       printReport(report, mutationOutput);
       return exitCodeForLifecycleReport(report);
+    }
+    let recordedLifecycle: ReturnType<typeof readLifecycleState>;
+    try {
+      recordedLifecycle = readLifecycleState();
+    } catch (error) {
+      const failure = reason('internal', 'internal.corrupt-state', unknownErrorDiagnostic(error));
+      const report = reportFor('update', flags.dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure });
+      printReport(report, mutationOutput);
+      return exitCodeForLifecycleReport(report);
+    }
+    if (recordedLifecycle.sourceVersion === 2) {
+      const recorded = await runRecordedLifecycleUpdate(flags, recordedLifecycle.state);
+      if (recorded !== null) {
+        printReport(recorded, mutationOutput);
+        return exitCodeForLifecycleReport(recorded);
+      }
     }
     let profileSelection: ReturnType<typeof selectProfiles>;
     try {

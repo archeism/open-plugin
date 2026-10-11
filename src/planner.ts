@@ -99,6 +99,7 @@ export interface PlanLifecycleInput {
   readonly dryRun: boolean;
   readonly validatedAt: string;
   readonly hosts: readonly PlannerHost[];
+  readonly command?: 'add' | 'update' | 'remove';
 }
 
 type FrozenOperation = Extract<LifecyclePlan, { kind: 'frozen' }>['operations'][number];
@@ -131,7 +132,7 @@ type PreparedRetire = {
 type Prepared = PreparedSync | PreparedRetire;
 
 export async function planLifecycle(input: PlanLifecycleInput): Promise<LifecyclePlan> {
-  const command = commandName(input.manifest);
+  const command = input.command ?? commandName(input.manifest);
   let loaded: LoadedLifecycleState;
   try {
     loaded = readLifecycleState();
@@ -156,7 +157,7 @@ export async function planLifecycle(input: PlanLifecycleInput): Promise<Lifecycl
   const scopes: PlannedScope[] = [];
   const operations: FrozenOperation[] = [];
   for (const item of prepared) {
-    const planned = await planPrepared(item, attemptId, input.validatedAt, loaded.state);
+    const planned = await planPrepared(item, attemptId, input.validatedAt, loaded.state, command);
     if (planned.kind === 'defect') return zeroWrite(command, input.dryRun, planned.reason);
     scopes.push(planned.scope);
     operations.push(...planned.operations);
@@ -308,10 +309,11 @@ async function planPrepared(
   attemptId: string,
   validatedAt: string,
   state: LifecycleStateV2,
+  command: LifecycleCommandName,
 ): Promise<{ readonly kind: 'planned'; readonly scope: PlannedScope; readonly operations: readonly FrozenOperation[] } | Defect> {
   switch (item.kind) {
     case 'sync':
-      return planSync(item, attemptId, validatedAt, state);
+      return planSync(item, attemptId, validatedAt, state, command);
     case 'retire-source':
       return planRetire(item, attemptId, state);
     default: {
@@ -326,6 +328,7 @@ async function planSync(
   attemptId: string,
   validatedAt: string,
   state: LifecycleStateV2,
+  command: LifecycleCommandName,
 ): Promise<{ readonly kind: 'planned'; readonly scope: PlannedScope; readonly operations: readonly FrozenOperation[] } | Defect> {
   const existing = state.scopes.find((scope) => scope.id === item.scope.id);
   const packages: DesiredPackageRecord[] = [];
@@ -346,11 +349,11 @@ async function planSync(
       requiredCapabilities: [...requiredSemanticsForOperation(inventory, 'install')].sort(),
       adoptionRequested: selected.adoptionRequested,
     });
-    const row = await classifyDesired(item, selected, inventory, nativeId, attemptId, state);
+    const row = await classifyDesired(item, selected, inventory, nativeId, attemptId, state, command === 'add' || command === 'update');
     if (row.kind === 'defect') return row;
     classified.push(row);
   }
-  const blocks = classified.some((row) => row.blocksPrune) || !canPruneOmissions(existing);
+  const blocks = command === 'add' || command === 'update' || classified.some((row) => row.blocksPrune) || !canPruneOmissions(existing);
   const retirements = blocks ? { kind: 'omissions' as const, operations: [] } : await planOmissions(item, attemptId, state, packages);
   if (retirements.kind === 'defect') return retirements;
   return {
@@ -372,6 +375,7 @@ async function classifyDesired(
   nativeId: string,
   attemptId: string,
   state: LifecycleStateV2,
+  applyUpdates: boolean,
 ): Promise<Classified | Defect> {
   const operationId = operationIdentity('desired-pair', item.scope.id, selected.plugin.name, nativeId, item.frozen.snapshot.fingerprint);
   const snapshotId = sourceSnapshotId(item.frozen);
@@ -420,7 +424,7 @@ async function classifyDesired(
   }
   const recordedRoute = activation?.route.kind === 'managed' || activation?.route.kind === 'native' ? activation.route.kind : null;
   const action = chosenAction(replacing, recordedRoute, decision.route, sameBytes(activation, installation, selected.plugin));
-  if (action === 'update' || action === 'route-migrate') {
+  if (action === 'route-migrate' || (action === 'update' && !applyUpdates)) {
     return classified(
       operationId,
       'desired-pair',
@@ -863,7 +867,6 @@ function chosenAction(
 
 function sameBytes(activation: ActivationRecord | undefined, installation: TargetInstallationData | undefined, plugin: PluginSource): boolean {
   if (activation === undefined || installation?.installedFingerprint === undefined || installation.installedFingerprint === null) return false;
-  if (activation.pins.length > 0) return false;
   return activation.fingerprints.source === plugin.contentFingerprint && activation.fingerprints.installed === installation.installedFingerprint;
 }
 

@@ -28,8 +28,8 @@
 import type { HostWriter } from './host';
 import type { Mark } from './doctor';
 import { writers as allWriters } from './hosts/writers';
-import { findRecord, readState, type InstallRecord } from './state';
-import { writeState } from './state-write';
+import { findRecord, readLifecycleState, readState, type InstallRecord, type LifecycleStateV2 } from './state';
+import { writeLifecycleState, writeState } from './state-write';
 import { fingerprintTree } from './fingerprint';
 
 export interface PinFinding {
@@ -120,8 +120,35 @@ export async function runPin(options: PinRunOptions = {}): Promise<PinRunResult>
     }
   }
 
-  if (ledgerChanged) writeState(state);
+  if (ledgerChanged) persistRecordedPins(state, options.state !== undefined);
   return { findings, exitCode: findings.some((f) => f.mark === '✗') ? 1 : 0 };
+}
+
+function persistRecordedPins(records: InstallRecord[], legacyLedger: boolean): void {
+  const loaded = legacyLedger ? null : readLifecycleState();
+  if (loaded === null || loaded.sourceVersion !== 2) {
+    writeState(records);
+    return;
+  }
+  const scopes = new Map(loaded.state.scopes.map((scope) => [scope.id, scope]));
+  const next: LifecycleStateV2 = {
+    ...loaded.state,
+    stateGeneration: loaded.state.stateGeneration + 1,
+    activations: loaded.state.activations.map((activation) => {
+      const scope = scopes.get(activation.scopeId);
+      const record = records.find((candidate) => candidate.host === scope?.target.kind && candidate.id === activation.nativeId);
+      if (record === undefined) return activation;
+      return {
+        ...activation,
+        pins: [...(record.pins ?? [])].sort(),
+        fingerprints: {
+          ...activation.fingerprints,
+          ...(record.installedFingerprint === undefined ? {} : { installed: record.installedFingerprint }),
+        },
+      };
+    }),
+  };
+  writeLifecycleState(next, { globalPreflight: 'succeeded' });
 }
 
 function selectTargets(all: readonly HostWriter[], options: PinRunOptions): HostWriter[] {

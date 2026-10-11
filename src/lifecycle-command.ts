@@ -9,6 +9,7 @@ export interface FrozenLifecycleCommand {
   readonly dryRun: boolean;
   readonly hosts: readonly PlannerHost[];
   readonly now: string;
+  readonly command?: 'add' | 'update' | 'remove';
 }
 
 export async function runFrozenLifecycle(command: FrozenLifecycleCommand): Promise<{
@@ -20,6 +21,7 @@ export async function runFrozenLifecycle(command: FrozenLifecycleCommand): Promi
     dryRun: command.dryRun,
     validatedAt: command.now,
     hosts: command.hosts,
+    ...(command.command === undefined ? {} : { command: command.command }),
   });
   const executed = await executeLifecycle({
     plan,

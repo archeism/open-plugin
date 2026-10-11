@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
+import { which } from './exec';
 import { unknownErrorDiagnostic } from './error-diagnostic';
 import type { FrozenPackageSnapshot, LifecycleTargetIdentity, RecordedOwnedActivation, SelectedLifecycleRoute, SelectedRouteDecision, TargetInstallationData } from './lifecycle-host';
 import {
@@ -94,12 +97,13 @@ async function runOperation(
 ): Promise<OperationStep> {
   switch (operation.action) {
     case 'install':
-      return runInstall(plan, operation, hosts, ledger);
+      return runActivation(plan, operation, hosts, ledger, 'install');
+    case 'update':
+      return runActivation(plan, operation, hosts, ledger, 'update');
     case 'unchanged':
       return succeeded(operation, false);
     case 'retire-orphan':
       return runRetire(plan, operation, hosts, ledger);
-    case 'update':
     case 'route-migrate':
     case 'disable-nonconforming':
     case 'retain-prior':
@@ -116,30 +120,32 @@ async function runOperation(
   }
 }
 
-async function runInstall(
+async function runActivation(
   plan: FrozenPlan,
   operation: LifecyclePlanOperation,
   hosts: readonly PlannerHost[],
   ledger: Ledger,
+  action: 'install' | 'update',
 ): Promise<OperationStep> {
   if (ledger.journalState(plan.attemptId, operation.operationId) === 'completed') return succeeded(operation, false);
   const nativeId = operation.nativeId;
   if (nativeId === null) {
-    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' has no native identity`));
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.operationId}' has no native identity`));
   }
   const host = hosts.find((candidate) => candidate.kinds.includes(operation.scope.target.kind));
   if (host === undefined) {
-    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.package}' has no host adapter`));
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.package}' has no host adapter`));
   }
-  let prepared: Awaited<ReturnType<typeof prepareInstall>>;
+  let prepared: Awaited<ReturnType<typeof prepareActivation>>;
   try {
-    prepared = await prepareInstall(plan, operation, host, nativeId);
+    const recordedPins = ledger.activation(operation.scope.id, operation.package, nativeId)?.pins ?? [];
+    prepared = await prepareActivation(plan, operation, host, nativeId, action, recordedPins);
   } catch (error) {
     return stop(operation, thrownReason(error));
   }
   if (prepared.kind === 'refused') return stop(operation, prepared.reason);
   try {
-    ledger.acceptJournal(plan, operation, 'install');
+    ledger.acceptJournal(plan, operation, action);
   } catch (error) {
     return stop(operation, thrownReason(error));
   }
@@ -174,7 +180,7 @@ async function runInstall(
     return stop(operation, reason);
   }
   if (receipt === undefined || verified === undefined) {
-    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' produced no verified activation`));
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.operationId}' produced no verified activation`));
   }
   const projected = verified.handle.projectedFingerprint;
   const installed = verified.observation.installedFingerprint;
@@ -185,9 +191,10 @@ async function runInstall(
       host,
       ledger,
       verified.handle,
-      createLifecycleReason('internal', 'internal.invariant', `install '${operation.operationId}' readback has no fingerprint`),
+      createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.operationId}' readback has no fingerprint`),
     );
   }
+  const recorded = ledger.activation(operation.scope.id, operation.package, nativeId);
   try {
     ledger.confirmActivation(plan, operation, {
       scopeId: operation.scope.id,
@@ -196,11 +203,13 @@ async function runInstall(
       sourceRelativeDir: sourceRelativeDir(plan, operation),
       sourceRevision: verified.handle.sourceRevision,
       route: { kind: verified.handle.route, evidenceKey: { kind: 'capability-profile', key: verified.handle.evidenceId } },
-      ownership: {
-        kind: 'created',
-        proofKey: { kind: 'managed-marker', key: contentAddress(receipt.receiptId) },
-        verifiedAt: ledger.timestamp(),
-      },
+      ownership: recorded?.ownership.kind === 'created' || recorded?.ownership.kind === 'adopted'
+        ? recorded.ownership
+        : {
+          kind: 'created',
+          proofKey: { kind: 'managed-marker', key: contentAddress(receipt.receiptId) },
+          verifiedAt: ledger.timestamp(),
+        },
       fingerprints: {
         source: prepared.snapshot.packageFingerprint,
         projected,
@@ -208,10 +217,10 @@ async function runInstall(
       },
       activationState: 'active',
       readbackState: 'verified',
-      pins: [],
-      activatedAt: ledger.timestamp(),
+      pins: [...prepared.pinNames],
+      activatedAt: recorded?.activatedAt ?? ledger.timestamp(),
       readbackAt: ledger.timestamp(),
-      createdAt: ledger.timestamp(),
+      createdAt: recorded?.createdAt ?? ledger.timestamp(),
       updatedAt: ledger.timestamp(),
     });
   } catch (error) {
@@ -220,74 +229,81 @@ async function runInstall(
   try {
     await host.adapter.cleanup(verified.handle, 'verified-commit');
   } catch {
-    ledger.markCleanupPending(plan, operation);
+    ledger.markCleanupPending(plan, operation, action);
     return pendingCleanup(operation);
   }
   ledger.markCompleted(plan, operation);
-  return succeeded(operation, receipt.changed);
+  return succeeded(operation, receipt.changed, prepared.notices);
 }
 
-async function prepareInstall(
+async function prepareActivation(
   plan: FrozenPlan,
   operation: LifecyclePlanOperation,
   host: PlannerHost,
   nativeId: string,
+  action: 'install' | 'update',
+  recordedPins: readonly string[],
 ): Promise<
   | {
       readonly kind: 'ready';
-      readonly selection: SelectedRouteDecision<SelectedLifecycleRoute, 'install'>;
-      readonly snapshot: FrozenPackageSnapshot & { readonly action: 'install' };
+      readonly selection: SelectedRouteDecision<SelectedLifecycleRoute, 'install' | 'update'>;
+      readonly snapshot: FrozenPackageSnapshot & { readonly action: 'install' | 'update' };
       readonly pins: ReturnType<typeof createResolvedLifecyclePins>;
+      readonly pinNames: readonly string[];
+      readonly notices: readonly string[];
     }
   | { readonly kind: 'refused'; readonly reason: LifecycleReason }
 > {
   const context = plan.report.command.sourceSnapshots.find((snapshot) => snapshot.id === operation.sourceSnapshotId);
   if (context === undefined) {
-    return refused(createLifecycleReason('internal', 'internal.invariant', `install '${operation.package}' has no frozen source snapshot`));
+    return refused(createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.package}' has no frozen source snapshot`));
   }
   const frozen = resolveSource(sourceArgument(operation.scope.source));
   if (frozen.snapshot.fingerprint !== context.reference.fingerprint || frozen.snapshot.revision !== context.reference.revision) {
-    return refused(createLifecycleReason('internal', 'internal.invariant', `install '${operation.package}' source bytes drifted from the frozen snapshot`));
+    return refused(createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.package}' source bytes drifted from the frozen snapshot`));
   }
   const plugin = frozen.plugins.find((candidate) => candidate.name === operation.package);
   const packageFingerprint = plugin?.contentFingerprint;
   if (plugin === undefined || packageFingerprint === undefined) {
-    return refused(createLifecycleReason('internal', 'internal.invariant', `install '${operation.package}' is missing from the frozen source`));
+    return refused(createLifecycleReason('internal', 'internal.invariant', `${action} '${operation.package}' is missing from the frozen source`));
   }
   const target = lifecycleTarget(operation);
   const observation = await host.adapter.observeTarget(target);
   const version = await host.adapter.probeVersion(observation.target);
   if (version.kind !== 'detected') {
-    return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `install '${operation.package}' lost its detected target version`));
+    return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `${action} '${operation.package}' lost its detected target version`));
   }
   const inventory = inventoryPackageSemantics(plugin);
-  const pins = createResolvedLifecyclePins([]);
-  const snapshot = sealInstallSnapshot(operation, plan.attemptId, nativeId, frozen, plugin, packageFingerprint, inventory, observation.target);
-  if (!isInstallSnapshot(snapshot)) throw new Error(`frozen snapshot action '${snapshot.action}' is not install`);
+  const resolvedPins = resolveRecordedPinExecutables(plugin.dir, recordedPins);
+  if (resolvedPins.kind === 'refused') return refused(resolvedPins.reason);
+  const pins = createResolvedLifecyclePins(resolvedPins.pins);
+  const pinNames = resolvedPins.pins.map((pin) => pin.server);
+  const notices = resolvedPins.dropped.map((server) => `dropped pin '${server}'`);
+  const snapshot = sealActivationSnapshot(operation, plan.attemptId, nativeId, frozen, plugin, packageFingerprint, inventory, observation.target, action);
   const planCoverage = createLifecyclePlanCoverage(observation, [{
     nativeId,
     operationId: operation.operationId,
-    operation: 'install',
+    operation: action,
     mutationGroupId: operation.operationId,
-    authorization: 'planned-create',
+    authorization: action === 'update' ? 'observed-owned' : 'planned-create',
   }]);
   const sourceType = operation.scope.source.kind;
   const nativeScope = await host.adapter.observeNativeMutationScope({
     targetObservation: observation,
-    operation: 'install',
+    operation: action,
     packageName: plugin.name,
     nativeId,
     sourceType,
   });
   const nativeProjection = await host.adapter.observeNativeProjection({
     targetObservation: observation,
-    operation: 'install',
+    operation: action,
     snapshot,
     pins,
   });
   const decision = host.adapter.decideRoute({
     target: observation.target,
-    operation: 'install',
+    operation: action,
     operationId: operation.operationId,
     attemptId: plan.attemptId,
     scopeId: operation.scope.id,
@@ -302,17 +318,17 @@ async function prepareInstall(
     snapshot,
     pins,
   });
-  if (decision.kind !== 'selected' || decision.operation !== 'install' || decision.route !== operation.route) {
+  if (decision.kind !== 'selected' || decision.operation !== action || decision.route !== operation.route) {
     return refused(createLifecycleReason(
       'runtime',
       'runtime.operation-failed',
-      `install '${operation.package}' kept frozen route '${operation.route}'`,
+      `${action} '${operation.package}' kept frozen route '${operation.route}'`,
     ));
   }
-  return { kind: 'ready', selection: decision, snapshot, pins };
+  return { kind: 'ready', selection: decision, snapshot, pins, pinNames, notices };
 }
 
-function sealInstallSnapshot(
+function sealActivationSnapshot(
   operation: LifecyclePlanOperation,
   attemptId: string,
   nativeId: string,
@@ -321,14 +337,15 @@ function sealInstallSnapshot(
   packageFingerprint: string,
   inventory: PackageSemanticInventory,
   target: LifecycleTargetIdentity,
-) {
+  action: 'install' | 'update',
+): FrozenPackageSnapshot & { readonly action: 'install' | 'update' } {
   const relativePackagePath = plugin.relativeDir !== undefined && plugin.relativeDir.length > 0 ? plugin.relativeDir : '.';
-  return createFrozenPackageSnapshot({
+  const snapshot = createFrozenPackageSnapshot({
     operationId: operation.operationId,
     attemptId,
     scopeId: operation.scope.id,
     target,
-    action: 'install',
+    action,
     packageName: plugin.name,
     nativeId,
     sourceType: operation.scope.source.kind,
@@ -340,10 +357,8 @@ function sealInstallSnapshot(
     packageFingerprint,
     inventory,
   });
-}
-
-function isInstallSnapshot(snapshot: FrozenPackageSnapshot): snapshot is FrozenPackageSnapshot & { readonly action: 'install' } {
-  return snapshot.action === 'install';
+  if (snapshot.action !== action) throw new Error(`frozen snapshot action '${snapshot.action}' is not ${action}`);
+  return snapshot as FrozenPackageSnapshot & { readonly action: 'install' | 'update' };
 }
 
 async function runRetire(
@@ -401,7 +416,7 @@ async function runRetire(
   try {
     await host.adapter.cleanup(verified.handle, 'verified-commit');
   } catch {
-    ledger.markCleanupPending(plan, operation);
+    ledger.markCleanupPending(plan, operation, 'retire-orphan');
     return pendingCleanup(operation);
   }
   ledger.markCompleted(plan, operation);
@@ -525,7 +540,7 @@ class Ledger {
     );
   }
 
-  acceptJournal(plan: FrozenPlan, operation: LifecyclePlanOperation, action: Extract<JournalAction, 'install' | 'retire-orphan'>): void {
+  acceptJournal(plan: FrozenPlan, operation: LifecyclePlanOperation, action: Extract<JournalAction, 'install' | 'update' | 'retire-orphan'>): void {
     const entry: JournalEntryRecord = {
       operationId: operation.operationId,
       scopeId: operation.scope.id,
@@ -598,13 +613,13 @@ class Ledger {
     this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'readback-verified', 'readback', true));
   }
 
-  markCleanupPending(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+  markCleanupPending(plan: FrozenPlan, operation: LifecyclePlanOperation, action: 'install' | 'update' | 'retire-orphan'): void {
     this.state = {
       ...this.state,
       activations: this.state.activations.map((row) => row.packageId === operation.package && row.scopeId === operation.scope.id
         ? {
           ...row,
-          pending: { operation: 'install', phase: 'cleanup', attemptId: plan.attemptId, startedAt: this.now },
+          pending: { operation: action, phase: 'cleanup', attemptId: plan.attemptId, startedAt: this.now },
           updatedAt: this.now,
         }
         : row),
@@ -815,7 +830,7 @@ function mutationBegan(state: JournalState): boolean {
   }
 }
 
-function succeeded(operation: LifecyclePlanOperation, changed: boolean): OperationStep {
+function succeeded(operation: LifecyclePlanOperation, changed: boolean, notices: readonly string[] = []): OperationStep {
   return {
     stop: false,
     reason: null,
@@ -826,6 +841,7 @@ function succeeded(operation: LifecyclePlanOperation, changed: boolean): Operati
       activationState: 'active-conforming',
       changed,
       reason: null,
+      ...(notices.length === 0 ? {} : { notices: [...notices] }),
     },
   };
 }
@@ -1027,4 +1043,62 @@ function summaryFor(outcomes: readonly LifecycleOperationOutcome[]): LifecycleRe
     recoveryId: pending?.operationId ?? null,
     readbackId: readback?.operationId ?? null,
   };
+}
+
+function resolveRecordedPinExecutables(
+  packageRoot: string,
+  servers: readonly string[],
+): { kind: 'ready'; pins: { server: string; executable: string }[]; dropped: string[] } | { kind: 'refused'; reason: LifecycleReason } {
+  const pins: { server: string; executable: string }[] = [];
+  const dropped: string[] = [];
+  for (const server of servers) {
+    const command = recordedPinCommand(packageRoot, server);
+    if (command === null) {
+      dropped.push(server);
+      continue;
+    }
+    const executable = absolutePinExecutable(command);
+    if (executable === null) {
+      return {
+        kind: 'refused',
+        reason: createLifecycleReason('runtime', 'runtime.operation-failed', `pin server '${server}' command '${command}' does not resolve`),
+      };
+    }
+    pins.push({ server, executable });
+  }
+  pins.sort((left, right) => left.server < right.server ? -1 : left.server > right.server ? 1 : left.executable < right.executable ? -1 : left.executable > right.executable ? 1 : 0);
+  dropped.sort();
+  return { kind: 'ready', pins, dropped };
+}
+
+function recordedPinCommand(packageRoot: string, server: string): string | null {
+  for (const name of ['.mcp.json', 'mcp.json']) {
+    const file = join(packageRoot, name);
+    if (!existsSync(file)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
+    const definitions = (parsed as Record<string, unknown>)['mcpServers'];
+    if (typeof definitions !== 'object' || definitions === null || Array.isArray(definitions)) continue;
+    const definition = (definitions as Record<string, unknown>)[server];
+    if (typeof definition !== 'object' || definition === null || Array.isArray(definition)) continue;
+    const command = (definition as Record<string, unknown>)['command'];
+    if (typeof command === 'string' && command.length > 0) return command;
+  }
+  return null;
+}
+
+function absolutePinExecutable(command: string): string | null {
+  if (command.includes('/')) {
+    if (!isAbsolute(command)) return null;
+    const canonical = resolve(command);
+    return canonical === command ? command : null;
+  }
+  const found = which(command);
+  if (found === null) return null;
+  return resolve(found);
 }
