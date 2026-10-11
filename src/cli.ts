@@ -9,7 +9,7 @@ import { isScopeId, projectScopeInventory, renderScopeInventory, sameSourceBindi
 import { parseSyncManifest, SyncManifestValidationError } from './sync-manifest';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
 import { retirementTombstone } from './owned-activation';
-import { writeLifecycleState, writeState } from './state-write';
+import { withLegacyWriterRecord, writeLifecycleState, writeState } from './state-write';
 import type { InstallRecord } from './state';
 import { runPin } from './pin';
 import { runUpdate, type UpdateFinding } from './update';
@@ -709,9 +709,7 @@ async function runAdd(argv: string[], mode: MutationOutputMode): Promise<number>
   }
   const reports: LifecycleReport[] = [];
   if (split.writers.length > 0) reports.push(await runWriterAdd(source, split.writers, flags, mode));
-  if (split.planner.length > 0 && (reports.length === 0 || reports.every((report) => report.summary.result === 'converged'))) {
-    reports.push(await runPlannerAdd(binding, split.planner, flags));
-  }
+  if (split.planner.length > 0) reports.push(await runPlannerAdd(binding, split.planner, flags));
   return emitAddReport(reports.length === 1 ? reports[0]! : mergeAddReports(reports), mode);
 }
 
@@ -744,6 +742,15 @@ async function runPlannerAdd(binding: SourceBinding, targets: readonly string[],
     ...executed.report,
     command: { ...executed.report.command, name: 'add' },
   });
+}
+
+function writeInstallLedger(records: InstallRecord[], changed: InstallRecord, binding: SourceBinding): void {
+  const loaded = readLifecycleState();
+  if (loaded.sourceVersion !== 2) {
+    writeState(records);
+    return;
+  }
+  writeLifecycleState(withLegacyWriterRecord(loaded.state, changed, binding), { globalPreflight: 'succeeded' });
 }
 
 async function runWriterAdd(
@@ -869,7 +876,7 @@ async function runWriterAdd(
     };
     const pendingState = existing === -1 ? [...state, pending] : state.map((record) => record === previous ? pending : record);
     try {
-      writeState(pendingState);
+      writeInstallLedger(pendingState, pending, resolved.snapshot.binding);
     } catch (error) {
       outcomes.push(outcomeFor(operation, { result: 'failed', changed: false, reason: reason('runtime', 'runtime.operation-failed', unknownErrorDiagnostic(error)) }));
       break;
@@ -912,7 +919,7 @@ async function runWriterAdd(
       };
       delete finalized.pending;
       const finalizedState = state.map((record) => record === pending ? finalized : record);
-      writeState(finalizedState);
+      writeInstallLedger(finalizedState, finalized, resolved.snapshot.binding);
       state = finalizedState;
       outcomes.push(outcomeFor(operation, { result: 'succeeded', changed }));
     } catch (error) {
@@ -1074,8 +1081,9 @@ async function runRecordedLifecycleUpdate(flags: VerbFlags, state: LifecycleStat
     if (requested !== undefined && requested !== activation.packageId && requested !== activation.nativeId) return [];
     return [{ scope, packageId: activation.packageId }];
   });
-  if (matches.some((match) => !plannerKinds.has(match.scope.target.kind))) return null;
-  if (matches.length === 0) {
+  const plannerMatches = matches.filter((match) => plannerKinds.has(match.scope.target.kind));
+  if (matches.length > 0 && plannerMatches.length === 0) return null;
+  if (plannerMatches.length === 0) {
     if (requested !== undefined) {
       const collided = recordedPackageOnDifferentSource(requested, state, kinds);
       if (collided !== null) {
@@ -1094,7 +1102,7 @@ async function runRecordedLifecycleUpdate(flags: VerbFlags, state: LifecycleStat
     return reportFor('update', flags.dryRun, [], [], { mutationStarted: false });
   }
   const byScope = new Map<string, { scope: LifecycleStateV2['scopes'][number]; packages: string[] }>();
-  for (const match of matches) {
+  for (const match of plannerMatches) {
     const group = byScope.get(match.scope.id) ?? { scope: match.scope, packages: [] };
     if (!group.packages.includes(match.packageId)) group.packages.push(match.packageId);
     byScope.set(match.scope.id, group);
