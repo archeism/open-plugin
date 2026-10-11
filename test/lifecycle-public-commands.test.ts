@@ -2054,6 +2054,61 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('an explicit empty or missing cursor binary refuses and does not claim the directory profile', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('cursor-bin-refusal', {
+        'plugin.json': '{"name":"demo","version":"1.0.0","description":"fixture"}\n',
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: demo\n---\n\nDemo.\n',
+      });
+      const missing = join(harness.home, 'missing-cursor');
+      const cases = ['', missing].map((cursorBin) => {
+        const added = harness.run(['add', source, '--target', 'cursor', '--json'], {
+          env: { OPEN_PLUGIN_CURSOR_BIN: cursorBin },
+        });
+        const parsed = added.stdout.trim().startsWith('{') ? JSON.parse(added.stdout) : null;
+        const report = parsed === null ? null : parseLifecycleReport(parsed);
+        const outcome = report?.outcomes[0];
+        const combined = `${added.stdout}\n${added.stderr}`;
+        return {
+          cursorBin: cursorBin === '' ? 'empty' : 'missing',
+          exitCode: added.exitCode,
+          stderr: added.stderr,
+          result: outcome?.result ?? null,
+          code: outcome?.reason?.code ?? null,
+          diagnostic: outcome?.reason?.diagnostic ?? null,
+          installed: bytesToText(added.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+          claimsCursor240: combined.includes('2.4.0'),
+          directoryProfile: combined.includes("version 'directory'") || combined.includes('cursor-directory'),
+        };
+      });
+      expect(cases).toEqual([
+        {
+          cursorBin: 'empty',
+          exitCode: 1,
+          stderr: '',
+          result: 'failed',
+          code: 'capability.unverified',
+          diagnostic: "target 'cursor' has no verified native install profile for version 'unknown/unparseable' and local Sources",
+          installed: '',
+          claimsCursor240: false,
+          directoryProfile: false,
+        },
+        {
+          cursorBin: 'missing',
+          exitCode: 1,
+          stderr: '',
+          result: 'failed',
+          code: 'capability.unverified',
+          diagnostic: "target 'cursor' has no verified native install profile for version 'unknown/unparseable' and local Sources",
+          installed: '',
+          claimsCursor240: false,
+          directoryProfile: false,
+        },
+      ]);
+    });
+  });
 });
 
 function mcpCommand(bytes: number[] | undefined): string {

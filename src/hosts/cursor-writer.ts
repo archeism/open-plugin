@@ -575,9 +575,14 @@ function assertCursorTarget(target: LifecycleTargetIdentity): void {
 }
 
 function probeCursorVersion(): TargetVersionObservation {
-  const binary = cursorProbeBinary();
-  if (binary === undefined) return { kind: 'detected', version: CURSOR_DIRECTORY_SURFACE, probeId: 'cursor-directory' };
-  const result = spawnSync([binary, '--version'], {
+  const located = locateCursorProbeBinary();
+  if (located.kind === 'refused') return { kind: 'unknown' };
+  if (located.kind === 'absent') return { kind: 'detected', version: CURSOR_DIRECTORY_SURFACE, probeId: 'cursor-directory' };
+  if (located.kind !== 'path') {
+    const unreachable: never = located;
+    return unreachable;
+  }
+  const result = spawnSync([located.path, '--version'], {
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 10_000,
@@ -588,10 +593,17 @@ function probeCursorVersion(): TargetVersionObservation {
   return { kind: 'detected', version, probeId: `cursor-${version}` };
 }
 
-function cursorProbeBinary(): string | undefined {
+function locateCursorProbeBinary():
+  | { readonly kind: 'refused' }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'path'; readonly path: string } {
   const override = process.env['OPEN_PLUGIN_CURSOR_BIN'];
-  if (override !== undefined && override.length > 0) return existsSync(override) ? override : undefined;
-  return whichOnPath(cursorProbePath(), 'cursor');
+  if (override !== undefined) {
+    if (override.length === 0 || !existsSync(override)) return { kind: 'refused' };
+    return { kind: 'path', path: override };
+  }
+  const found = whichOnPath(cursorProbePath(), 'cursor');
+  return found === undefined ? { kind: 'absent' } : { kind: 'path', path: found };
 }
 
 function cursorProbePath(): string {

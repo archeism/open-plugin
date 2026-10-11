@@ -71,6 +71,12 @@ directories without a matching marker are refused unless `--adopt-existing`
 is explicit and their native identity matches. Removal deletes only a
 marker-owned directory. User `~/.cursor/mcp.json` is never changed.
 
+When no `cursor` binary is configured, that copy uses the directory profile.
+mcp, commands, resources, and model-invocation are unverified and refused on
+that profile, and a missing binary is not reported as Cursor 2.4.0. An
+explicit `OPEN_PLUGIN_CURSOR_BIN` that is empty or points at a missing file is
+a refusal, not a silent fallthrough to the directory profile.
+
 The current evidence proves plugin `skills/<name>/SKILL.md`, including the
 top-level `disable-model-invocation: true` gate, so the writer copies those
 bytes without a conversion. Cursor's command-directory grammar, arguments and

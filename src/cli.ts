@@ -61,6 +61,12 @@ verbs:
 mutation output:
   --json                            schema-v1 lifecycle report
   --legacy-json                     one-release InstallOutcome[] compatibility output
+
+cursor directory profile:
+  With no cursor binary configured, add may copy into the cursor store.
+  mcp, commands, resources, and model-invocation are unverified and refused
+  on that profile. An explicit OPEN_PLUGIN_CURSOR_BIN that is empty or missing
+  is refused and is not reported as Cursor 2.4.0.
 `;
 
 interface VerbFlags {
