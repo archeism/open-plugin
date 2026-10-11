@@ -1588,6 +1588,71 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('a second add refreshes changed source bytes', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"first"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"second"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('second-add', {
+        'plugin.json': original,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const first = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(first.exitCode).toBe(0);
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const second = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const parsed = second.stdout.trim().startsWith('{') ? JSON.parse(second.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      expect({
+        exitCode: second.exitCode,
+        stderr: second.stderr,
+        command: report?.command.name ?? null,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        reason: report?.outcomes[0]?.reason?.code ?? null,
+        installed: bytesToText(second.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        command: 'add',
+        action: 'update',
+        result: 'succeeded',
+        reason: null,
+        installed: revised,
+      });
+    });
+  });
+
+  test('add without --target installs into each detected writer', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"fan-out"}\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('fan-out', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: fan-out\n---\n\nDemo.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(8));
+      const result = harness.run(['add', source, '--json'], { env: { OPEN_PLUGIN_CURSOR_BIN: cursor.path } });
+      const report = parseLifecycleReport(JSON.parse(result.stdout));
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        targets: report.outcomes.map((outcome) => outcome.scope.target.kind),
+        result: report.outcomes.map((outcome) => outcome.result),
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        targets: ['cursor'],
+        result: ['succeeded'],
+        installed: pluginJson,
+      });
+    });
+  });
+
   test('update refreshes the exact source package and does not rebind a same-name plugin', async () => {
     await withLifecycleCliHarness((harness) => {
       const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
