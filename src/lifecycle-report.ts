@@ -133,6 +133,8 @@ export interface LifecycleOperationOutcome extends LifecyclePlanOperation {
   activationState: LifecycleActivationState;
   changed: boolean;
   reason: LifecycleReason | null;
+  /** Present when a successful outcome dropped recorded pins that the new source no longer contains. */
+  notices?: readonly string[];
 }
 
 export interface LifecycleReportSummary {
@@ -290,6 +292,7 @@ const OUTCOME_FIELDS = [
   'activationState',
   'changed',
   'reason',
+  'notices',
 ] as const;
 
 function assertPlanOperation(
@@ -360,6 +363,13 @@ function assertOutcome(
   }
   if (reason !== null && (reason as Record<string, unknown>)['category'] === 'usage') {
     throw contradiction(`usage reason cannot belong to pair outcome '${outcome['operationId']}'`);
+  }
+  const notices = outcome['notices'];
+  if (notices !== undefined) {
+    if (!Array.isArray(notices) || notices.some((item) => typeof item !== 'string' || item.length === 0)) {
+      throw invalid(`outcome '${outcome['operationId']}' notices must be non-empty strings`);
+    }
+    if (outcome['result'] !== 'succeeded') throw contradiction(`outcome '${outcome['operationId']}' can report a dropped pin only after success`);
   }
   if (outcome['result'] === 'succeeded' && reason !== null) throw contradiction(`successful outcome '${outcome['operationId']}' cannot have a failure reason`);
   if (outcome['result'] !== 'succeeded' && reason === null) throw contradiction(`non-success outcome '${outcome['operationId']}' needs a reason`);

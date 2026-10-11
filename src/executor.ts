@@ -217,7 +217,7 @@ async function runActivation(
       },
       activationState: 'active',
       readbackState: 'verified',
-      pins: recorded?.pins ?? [],
+      pins: [...prepared.pinNames],
       activatedAt: recorded?.activatedAt ?? ledger.timestamp(),
       readbackAt: ledger.timestamp(),
       createdAt: recorded?.createdAt ?? ledger.timestamp(),
@@ -233,7 +233,7 @@ async function runActivation(
     return pendingCleanup(operation);
   }
   ledger.markCompleted(plan, operation);
-  return succeeded(operation, receipt.changed);
+  return succeeded(operation, receipt.changed, prepared.notices);
 }
 
 async function prepareActivation(
@@ -249,6 +249,8 @@ async function prepareActivation(
       readonly selection: SelectedRouteDecision<SelectedLifecycleRoute, 'install' | 'update'>;
       readonly snapshot: FrozenPackageSnapshot & { readonly action: 'install' | 'update' };
       readonly pins: ReturnType<typeof createResolvedLifecyclePins>;
+      readonly pinNames: readonly string[];
+      readonly notices: readonly string[];
     }
   | { readonly kind: 'refused'; readonly reason: LifecycleReason }
 > {
@@ -275,6 +277,8 @@ async function prepareActivation(
   const resolvedPins = resolveRecordedPinExecutables(plugin.dir, recordedPins);
   if (resolvedPins.kind === 'refused') return refused(resolvedPins.reason);
   const pins = createResolvedLifecyclePins(resolvedPins.pins);
+  const pinNames = resolvedPins.pins.map((pin) => pin.server);
+  const notices = resolvedPins.dropped.map((server) => `dropped pin '${server}'`);
   const snapshot = sealActivationSnapshot(operation, plan.attemptId, nativeId, frozen, plugin, packageFingerprint, inventory, observation.target, action);
   const planCoverage = createLifecyclePlanCoverage(observation, [{
     nativeId,
@@ -321,7 +325,7 @@ async function prepareActivation(
       `${action} '${operation.package}' kept frozen route '${operation.route}'`,
     ));
   }
-  return { kind: 'ready', selection: decision, snapshot, pins };
+  return { kind: 'ready', selection: decision, snapshot, pins, pinNames, notices };
 }
 
 function sealActivationSnapshot(
@@ -826,7 +830,7 @@ function mutationBegan(state: JournalState): boolean {
   }
 }
 
-function succeeded(operation: LifecyclePlanOperation, changed: boolean): OperationStep {
+function succeeded(operation: LifecyclePlanOperation, changed: boolean, notices: readonly string[] = []): OperationStep {
   return {
     stop: false,
     reason: null,
@@ -837,6 +841,7 @@ function succeeded(operation: LifecyclePlanOperation, changed: boolean): Operati
       activationState: 'active-conforming',
       changed,
       reason: null,
+      ...(notices.length === 0 ? {} : { notices: [...notices] }),
     },
   };
 }
@@ -1043,15 +1048,14 @@ function summaryFor(outcomes: readonly LifecycleOperationOutcome[]): LifecycleRe
 function resolveRecordedPinExecutables(
   packageRoot: string,
   servers: readonly string[],
-): { kind: 'ready'; pins: { server: string; executable: string }[] } | { kind: 'refused'; reason: LifecycleReason } {
+): { kind: 'ready'; pins: { server: string; executable: string }[]; dropped: string[] } | { kind: 'refused'; reason: LifecycleReason } {
   const pins: { server: string; executable: string }[] = [];
+  const dropped: string[] = [];
   for (const server of servers) {
     const command = recordedPinCommand(packageRoot, server);
     if (command === null) {
-      return {
-        kind: 'refused',
-        reason: createLifecycleReason('internal', 'internal.invariant', `pin server '${server}' is absent from the frozen package`),
-      };
+      dropped.push(server);
+      continue;
     }
     const executable = absolutePinExecutable(command);
     if (executable === null) {
@@ -1063,7 +1067,8 @@ function resolveRecordedPinExecutables(
     pins.push({ server, executable });
   }
   pins.sort((left, right) => left.server < right.server ? -1 : left.server > right.server ? 1 : left.executable < right.executable ? -1 : left.executable > right.executable ? 1 : 0);
-  return { kind: 'ready', pins };
+  dropped.sort();
+  return { kind: 'ready', pins, dropped };
 }
 
 function recordedPinCommand(packageRoot: string, server: string): string | null {
