@@ -1994,6 +1994,66 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('add --target dcode after a planner install keeps state v2', async () => {
+    await withLifecycleCliHarness((harness) => {
+      harness.writeHome({ '.cursor/.keep': '', '.deepagents/.keep': '' });
+      const source = harness.source('dcode-after-v2', {
+        'plugin.json': '{"name":"demo","version":"1.0.0","description":"from planner"}\n',
+        'skills/demo/SKILL.md': '---\nname: demo\ndescription: demo\n---\n\nDemo.\n',
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(40));
+      const dcode = harness.fakeNative('dcode', Array.from({ length: 8 }, () => ({
+        args: ['--version'],
+        stdout: 'deepagents-code 0.1.83\n',
+      })));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path, OPEN_PLUGIN_DCODE_BIN: dcode.path };
+      const planned = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      const plannedState = JSON.parse(bytesToText(planned.state.after ?? [])) as { version?: number };
+      expect(planned.exitCode).toBe(0);
+      expect(plannedState.version).toBe(2);
+
+      const added = harness.run(['add', source, '--target', 'dcode', '--json'], { env });
+      const combined = `${added.stdout}\n${added.stderr}`;
+      const ledger = JSON.parse(bytesToText(added.state.after ?? [])) as {
+        version?: number;
+        activations?: Array<{ packageId?: string; nativeId?: string; scopeId?: string }>;
+        scopes?: Array<{ id?: string; target?: { kind?: string } }>;
+      };
+      const cursorScope = ledger.scopes?.find((scope) => scope.target?.kind === 'cursor');
+      const cursorKept = ledger.activations?.some((row) =>
+        row.packageId === 'demo' && cursorScope !== undefined && row.scopeId === cursorScope.id) ?? false;
+      expect({
+        exitCode: added.exitCode,
+        stderr: added.stderr,
+        downgrade: combined.includes('refusing to downgrade state.json version 2'),
+        version: ledger.version ?? null,
+        cursorKept,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        downgrade: false,
+        version: 2,
+        cursorKept: true,
+      });
+
+      const updated = harness.run(['update', '--json'], { env });
+      const updateParsed = updated.stdout.trim().startsWith('{') ? JSON.parse(updated.stdout) : null;
+      const updateReport = updateParsed === null ? null : parseLifecycleReport(updateParsed);
+      const cursorUpdate = updateReport?.outcomes.find((outcome) => outcome.scope.target.kind === 'cursor');
+      expect({
+        exitCode: updated.exitCode,
+        stderr: updated.stderr,
+        frozen: (cursorUpdate?.operationId ?? '').startsWith('operation-v1-'),
+        result: cursorUpdate?.result ?? null,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        frozen: true,
+        result: 'succeeded',
+      });
+    });
+  });
 });
 
 function mcpCommand(bytes: number[] | undefined): string {
