@@ -363,7 +363,7 @@ describe('cursor managed local projection', () => {
     });
   });
 
-  test('selects no managed mutation for a non-2.4.0 probe, an absent probe, or disable', async () => {
+  test('refuses a non-2.4.0 probe and disable, and admits a directory copy when no binary resolves', async () => {
     await withCursorHome(async (home) => {
       const script = join(home.home, 'bin', 'cursor');
       const observed = readFileSync(observedCursorVersion, 'utf8');
@@ -392,9 +392,11 @@ describe('cursor managed local projection', () => {
       delete process.env['OPEN_PLUGIN_CURSOR_BIN'];
       rmSync(script, { force: true });
       const absent = await cursorManagedLifecycle.probeVersion(target);
-      expect(absent).toEqual({ kind: 'unknown' });
-      const absentGap = await installDecision(home, absent, 'install-absent', 'attempt-absent', 'planned-create');
-      expect(absentGap.kind).toBe('capability-gap');
+      expect(absent).toEqual({ kind: 'detected', version: '2.4.0', probeId: 'cursor-directory' });
+      const directoryCopy = await installDecision(home, absent, 'install-absent', 'attempt-absent', 'planned-create');
+      expect(directoryCopy.kind).toBe('selected');
+      if (directoryCopy.kind !== 'selected') throw new Error('a missing cursor binary refused the managed copy');
+      expect(directoryCopy.route).toBe('managed');
 
       writeCursorBin(home, '2.4.0');
       const installed = await installOwned(home, 'one\n');

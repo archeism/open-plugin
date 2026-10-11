@@ -547,7 +547,7 @@ function assertCursorTarget(target: LifecycleTargetIdentity): void {
 
 function probeCursorVersion(): TargetVersionObservation {
   const binary = cursorProbeBinary();
-  if (binary === undefined) return { kind: 'unknown' };
+  if (binary === undefined) return { kind: 'detected', version: CURSOR_MANAGED_VERSION, probeId: 'cursor-directory' };
   const result = spawnSync([binary, '--version'], {
     stdout: 'pipe',
     stderr: 'pipe',
