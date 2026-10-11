@@ -939,6 +939,12 @@ describe('state v2 public reader and writer', () => {
         installedAt: earlier,
         sourceDir: '/srv/personal/plugins/addy',
         pending: 'install',
+      }, {
+        host: 'dcode',
+        id: 'foreign@personal',
+        source: '/srv/personal',
+        sourceSha: 'ghi789',
+        ownership: 'foreign',
       }],
     }, null, 2);
     writeFileSync(file, original);
@@ -952,7 +958,9 @@ describe('state v2 public reader and writer', () => {
     expect(loaded.state.scopes[0]?.desired).toBeUndefined();
     expect(loaded.state.scopes[0]?.lastConverged).toBeUndefined();
     expect(loaded.state.scopes[0]?.createdAt).toBeUndefined();
-    expect(loaded.state.activations[0]?.ownership).toEqual({ kind: 'legacy-claim' });
+    expect(loaded.state.activations[0]?.ownership).toEqual({ kind: 'legacy-claim', prior: 'plgnz' });
+    expect(loaded.state.activations[1]?.ownership).toEqual({ kind: 'legacy-claim', prior: 'unrecorded' });
+    expect(loaded.state.activations[2]?.ownership).toEqual({ kind: 'legacy-claim', prior: 'unproven' });
     expect(loaded.state.activations[0]?.sourceRevision).toBe('abc123');
     expect(loaded.state.activations[0]?.activatedAt).toBe(earlier);
     expect(loaded.state.activations[0]?.createdAt).toBe(earlier);

@@ -73,7 +73,7 @@ export type LifecycleRouteRecord =
   | { kind: 'managed' | 'native'; evidenceKey: CapabilityEvidenceReferenceRecord };
 
 export type OwnershipProofRecord =
-  | { kind: 'legacy-claim' }
+  | { kind: 'legacy-claim'; prior?: 'plgnz' | 'unrecorded' | 'unproven' }
   | { kind: 'created'; proofKey: OwnershipProofReferenceRecord; verifiedAt: string }
   | { kind: 'adopted'; proofKey: OwnershipProofReferenceRecord; verifiedAt: string; adoptedAt: string };
 
@@ -380,7 +380,7 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
       ...(relativeDir === undefined ? {} : { sourceRelativeDir: relativeDir }),
       sourceRevision: record.sourceSha,
       route: { kind: 'legacy-unverified' },
-      ownership: { kind: 'legacy-claim' },
+      ownership: legacyClaimOwnership(record.ownership),
       fingerprints: {
         ...(record.fingerprint === undefined ? {} : { source: record.fingerprint }),
         ...(record.installedFingerprint === undefined ? {} : { installed: record.installedFingerprint }),
@@ -423,6 +423,11 @@ function importV1(records: InstallRecord[]): LifecycleStateV2 {
   }
   state.scopes = [...scopes.values()];
   return validateLifecycleStateDocument(state, 0);
+}
+
+function legacyClaimOwnership(ownership: string | undefined): OwnershipProofRecord {
+  const prior = ownership === undefined ? 'unrecorded' : ownership === 'plgnz' ? 'plgnz' : 'unproven';
+  return { kind: 'legacy-claim', prior };
 }
 
 function projectV2(state: LifecycleStateV2): InstallRecord[] {
@@ -559,7 +564,8 @@ function validateRoute(value: unknown, label: string): LifecycleRouteRecord {
 function validateOwnership(value: unknown, label: string): OwnershipProofRecord {
   const rec = asObject(value, label);
   const kind = oneOf(rec['kind'], ['legacy-claim', 'created', 'adopted'], `${label}.kind`);
-  exactFields(rec, kind === 'legacy-claim' ? ['kind'] : kind === 'created' ? ['kind', 'proofKey', 'verifiedAt'] : ['kind', 'proofKey', 'verifiedAt', 'adoptedAt'], 'ownership proof');
+  exactFields(rec, kind === 'legacy-claim' ? ['kind', 'prior'] : kind === 'created' ? ['kind', 'proofKey', 'verifiedAt'] : ['kind', 'proofKey', 'verifiedAt', 'adoptedAt'], 'ownership proof');
+  if (kind === 'legacy-claim' && rec['prior'] !== undefined) oneOf(rec['prior'], ['plgnz', 'unrecorded', 'unproven'], `${label}.prior`);
   if (kind !== 'legacy-claim') {
     validateOwnershipProofReference(rec['proofKey'], `${label}.proofKey`);
     timestamp(rec['verifiedAt'], `${label}.verifiedAt`);

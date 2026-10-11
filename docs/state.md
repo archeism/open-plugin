@@ -86,8 +86,11 @@ existing additive verbs and `doctor`; v2 legacy ownership projects as
 
 Ownership proof is a closed union:
 
-- `legacy-claim` records only that a v1 row existed. It has no deletion
-  authority and can use only the `legacy-unverified` route.
+- `legacy-claim` records a v1 row and can use only the `legacy-unverified`
+  route. It has no tombstone authority. Its closed `prior` is `plgnz` or
+  `unrecorded` when v1 would have removed the row, and `unproven` when v1
+  refused it. A missing `prior` stays refused. `plgnz` and `unrecorded`
+  may be removed without a tombstone.
 - `created` records a verified plugnz creation proof.
 - `adopted` records a verified adoption proof and adoption timestamp.
 
@@ -165,7 +168,9 @@ without changing the file:
   generation, and cannot establish omission/prune authority;
 - every row becomes a `legacy-claim` Activation with unverified route and
   readback, while preserving its Source revision, safe relative directory,
-  fingerprints, pins, and known timestamps;
+  fingerprints, pins, known timestamps, and a closed `prior` taken from the
+  v1 `ownership` field (`plgnz`, `unrecorded` when the field was absent, or
+  `unproven` for any other marker);
 - legacy `pending: install|remove` becomes an explicit recovery Attempt,
   journal entry, and matching pending Activation operation. The imported tuple
   conservatively uses pending/journal `applying` with

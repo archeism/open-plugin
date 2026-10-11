@@ -1,5 +1,5 @@
 import { unknownErrorDiagnostic } from './error-diagnostic';
-import type { FrozenPackageSnapshot, LifecycleTargetIdentity, SelectedLifecycleRoute, SelectedRouteDecision } from './lifecycle-host';
+import type { FrozenPackageSnapshot, LifecycleTargetIdentity, RecordedOwnedActivation, SelectedLifecycleRoute, SelectedRouteDecision, TargetInstallationData } from './lifecycle-host';
 import {
   exitCodeForLifecycleReport,
   parseLifecycleReport,
@@ -10,12 +10,13 @@ import {
   type LifecycleReport,
 } from './lifecycle-report';
 import { LifecycleHostPhaseError, createFrozenPackageSnapshot, createLifecyclePlanCoverage, createResolvedLifecyclePins } from './lifecycle-runtime';
+import { ownedActivation, retirementTombstone } from './owned-activation';
 import { lifecycleAttemptIdForPlannedScopes, type LifecyclePlan, type PlannerHost } from './planner';
 import { inventoryPackageSemantics, type PackageSemanticInventory } from './semantic-inventory';
 import { CryptoHasher } from './runtime';
 import { resolveSource, type FrozenSource, type PluginSource } from './source';
 import type { SourceBinding } from './source-reference';
-import { readLifecycleState, type ActivationRecord, type DeploymentScopeRecord, type JournalEntryRecord, type JournalState, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
+import { readLifecycleState, type ActivationRecord, type DeploymentScopeRecord, type JournalAction, type JournalEntryRecord, type JournalState, type LifecycleAttemptRecord, type LifecycleStateV2 } from './state';
 import { writeLifecycleState } from './state-write';
 
 export interface ExecuteLifecycleInput {
@@ -87,12 +88,14 @@ async function runOperation(
   switch (operation.action) {
     case 'install':
       return runInstall(plan, operation, hosts, ledger);
-    case 'update':
     case 'unchanged':
+      return succeeded(operation, false);
+    case 'retire-orphan':
+      return runRetire(plan, operation, hosts, ledger);
+    case 'update':
     case 'route-migrate':
     case 'disable-nonconforming':
     case 'retain-prior':
-    case 'retire-orphan':
     case 'not-attempted':
       return stop(operation, createLifecycleReason(
         'internal',
@@ -129,7 +132,7 @@ async function runInstall(
   }
   if (prepared.kind === 'refused') return stop(operation, prepared.reason);
   try {
-    ledger.acceptInstall(plan, operation);
+    ledger.acceptJournal(plan, operation, 'install');
   } catch (error) {
     return stop(operation, thrownReason(error));
   }
@@ -336,6 +339,153 @@ function isInstallSnapshot(snapshot: FrozenPackageSnapshot): snapshot is FrozenP
   return snapshot.action === 'install';
 }
 
+async function runRetire(
+  plan: FrozenPlan,
+  operation: LifecyclePlanOperation,
+  hosts: readonly PlannerHost[],
+  ledger: Ledger,
+): Promise<OperationStep> {
+  if (ledger.journalState(plan.attemptId, operation.operationId) === 'completed') return retired(operation, false);
+  const nativeId = operation.nativeId;
+  if (nativeId === null) {
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.operationId}' has no native identity`));
+  }
+  const planned = plan.scopes.find((scope) => scope.scope.id === operation.scope.id);
+  if (planned === undefined || planned.prune !== 'planned') {
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.package}' is blocked for this scope`));
+  }
+  const host = hosts.find((candidate) => candidate.kinds.includes(operation.scope.target.kind));
+  if (host === undefined) {
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.package}' has no host adapter`));
+  }
+  let prepared: Awaited<ReturnType<typeof prepareRetirement>>;
+  try {
+    prepared = await prepareRetirement(plan, operation, host, nativeId, ledger);
+  } catch (error) {
+    return stop(operation, thrownReason(error));
+  }
+  if (prepared.kind === 'refused') return stop(operation, prepared.reason);
+  try {
+    ledger.acceptJournal(plan, operation, 'retire-orphan');
+  } catch (error) {
+    return stop(operation, thrownReason(error));
+  }
+  let receipt: Awaited<ReturnType<PlannerHost['adapter']['retire']>> | undefined;
+  let verified: ReturnType<PlannerHost['adapter']['verify']> | undefined;
+  try {
+    const sealed = await host.adapter.prepareRetirement({
+      operationId: operation.operationId,
+      attemptId: plan.attemptId,
+      action: 'retire-orphan',
+      selection: prepared.selection,
+      activation: prepared.activation,
+    });
+    ledger.markPruning(plan, operation);
+    receipt = await host.adapter.retire(sealed);
+    const observation = await host.adapter.readback(receipt.handle);
+    verified = host.adapter.verify(receipt.handle, observation);
+  } catch (error) {
+    const reason = thrownReason(error);
+    if (receipt !== undefined) return recoverApplied(plan, operation, host, ledger, receipt.handle, reason);
+    return stop(operation, reason);
+  }
+  if (receipt === undefined || verified === undefined) {
+    return stop(operation, createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.operationId}' produced no verified removal`));
+  }
+  try {
+    ledger.confirmRetirement(plan, operation, prepared.recorded);
+  } catch (error) {
+    return recoverApplied(plan, operation, host, ledger, receipt.handle, thrownReason(error));
+  }
+  try {
+    await host.adapter.cleanup(verified.handle, 'verified-commit');
+  } catch {
+    ledger.markCleanupPending(plan, operation);
+    return pendingCleanup(operation);
+  }
+  ledger.markCompleted(plan, operation);
+  return retired(operation, receipt.changed);
+}
+
+async function prepareRetirement(
+  plan: FrozenPlan,
+  operation: LifecyclePlanOperation,
+  host: PlannerHost,
+  nativeId: string,
+  ledger: Ledger,
+): Promise<
+  | {
+      readonly kind: 'ready';
+      readonly selection: SelectedRouteDecision<SelectedLifecycleRoute, 'retire'>;
+      readonly activation: RecordedOwnedActivation;
+      readonly recorded: ActivationRecord;
+    }
+  | { readonly kind: 'refused'; readonly reason: LifecycleReason }
+> {
+  const recorded = ledger.activation(operation.scope.id, operation.package, nativeId);
+  if (recorded === undefined || recorded.route.kind === 'legacy-unverified' || recorded.ownership.kind === 'legacy-claim' || recorded.sourceRevision === undefined) {
+    return refused(createLifecycleReason('internal', 'internal.invariant', `ownership of '${operation.package}' was not revalidated`));
+  }
+  const target = lifecycleTarget(operation);
+  const observation = await host.adapter.observeTarget(target);
+  const installation = observation.installations.find((row) => row.nativeId === nativeId);
+  if (installation === undefined || installation.presence !== 'present' || installation.ownership.kind !== 'owned' || installation.ownership.scopeId !== operation.scope.id) {
+    return refused(createLifecycleReason('internal', 'internal.ambiguous-ownership', `package '${nativeId}' on ${operation.scope.target.kind}/${operation.scope.target.instance} is not ownership-proven`));
+  }
+  const version = await host.adapter.probeVersion(observation.target);
+  if (version.kind !== 'detected') {
+    return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `retirement '${operation.package}' lost its detected target version`));
+  }
+  if (recorded.fingerprints.installed !== installation.installedFingerprint) {
+    return refused(createLifecycleReason('internal', 'internal.invariant', `retirement '${operation.package}' fingerprint does not match the owned install`));
+  }
+  const owned = ownedActivation(operation.scope, operation.scope.source, recorded, installation, observation.target);
+  if (owned === null) {
+    return refused(createLifecycleReason('internal', 'internal.invariant', `ownership of '${operation.package}' was not revalidated`));
+  }
+  const planCoverage = createLifecyclePlanCoverage(observation, [{
+    nativeId,
+    operationId: operation.operationId,
+    operation: 'retire',
+    mutationGroupId: operation.operationId,
+    authorization: 'observed-owned',
+  }]);
+  const nativeScope = await host.adapter.observeNativeMutationScope({
+    targetObservation: observation,
+    operation: 'retire',
+    packageName: owned.packageName,
+    nativeId,
+    sourceType: owned.sourceType,
+  });
+  const nativeProjection = await host.adapter.observeNativeProjection({
+    targetObservation: observation,
+    operation: 'retire',
+    operationId: operation.operationId,
+    attemptId: plan.attemptId,
+    activation: owned,
+  });
+  const decision = host.adapter.decideRoute({
+    target: observation.target,
+    operation: 'retire',
+    operationId: operation.operationId,
+    attemptId: plan.attemptId,
+    scopeId: operation.scope.id,
+    packageName: owned.packageName,
+    nativeId,
+    version,
+    sourceType: owned.sourceType,
+    targetObservation: observation,
+    nativeScope,
+    nativeProjection,
+    planCoverage,
+    activation: owned,
+  });
+  if (decision.kind !== 'selected' || decision.operation !== 'retire' || decision.route !== operation.route) {
+    return refused(createLifecycleReason('runtime', 'runtime.operation-failed', `retirement '${operation.package}' kept frozen route '${operation.route}'`));
+  }
+  return { kind: 'ready', selection: decision, activation: owned, recorded };
+}
+
 function lifecycleTarget(operation: LifecyclePlanOperation): LifecycleTargetIdentity {
   return { kind: operation.scope.target.kind, instance: operation.scope.target.instance };
 }
@@ -374,25 +524,26 @@ class Ledger {
     );
   }
 
-  acceptInstall(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+  acceptJournal(plan: FrozenPlan, operation: LifecyclePlanOperation, action: Extract<JournalAction, 'install' | 'retire-orphan'>): void {
     const entry: JournalEntryRecord = {
       operationId: operation.operationId,
       scopeId: operation.scope.id,
       packageId: operation.package,
       ...(operation.nativeId === null ? {} : { nativeId: operation.nativeId }),
-      action: 'install',
+      action,
       state: 'pending',
       startedAt: this.now,
       updatedAt: this.now,
     };
     const existing = this.state.attempts.find((attempt) => attempt.id === plan.attemptId);
+    const journal = existing === undefined ? [entry] : [...existing.journal.filter((row) => row.operationId !== entry.operationId), entry];
     const attempt: LifecycleAttemptRecord = {
       id: plan.attemptId,
       command: plan.report.command.name,
       phase: 'accepted',
-      mutationStarted: existing?.mutationStarted ?? false,
+      mutationStarted: existing?.mutationStarted === true || journal.some((row) => mutationBegan(row.state)),
       scopeIds: plan.scopes.map((scope) => scope.scope.id),
-      journal: existing === undefined ? [entry] : [...existing.journal.filter((row) => row.operationId !== entry.operationId), entry],
+      journal,
       startedAt: existing?.startedAt ?? this.now,
       updatedAt: this.now,
     };
@@ -414,8 +565,28 @@ class Ledger {
     return this.state.attempts.find((attempt) => attempt.id === attemptId)?.journal.find((row) => row.operationId === operationId)?.state;
   }
 
+  activation(scopeId: string, packageId: string, nativeId: string): ActivationRecord | undefined {
+    return this.state.activations.find((row) => row.scopeId === scopeId && row.packageId === packageId && row.nativeId === nativeId);
+  }
+
   markApplying(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
     this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'applying', 'applying', true));
+  }
+
+  markPruning(plan: FrozenPlan, operation: LifecyclePlanOperation): void {
+    this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'applying', 'pruning', true));
+  }
+
+  confirmRetirement(plan: FrozenPlan, operation: LifecyclePlanOperation, recorded: ActivationRecord): void {
+    const current = this.activation(recorded.scopeId, recorded.packageId, recorded.nativeId) ?? recorded;
+    const tombstone = retirementTombstone(current, this.now);
+    if (tombstone === null) throw new Error(`retirement '${operation.operationId}' cannot retain a tombstone`);
+    this.state = {
+      ...this.state,
+      activations: this.state.activations.filter((row) => activationKey(row) !== activationKey(current)),
+      tombstones: this.state.tombstones.some((row) => row.id === tombstone.id) ? this.state.tombstones : [...this.state.tombstones, tombstone],
+    };
+    this.replaceAttempt(plan, (attempt) => this.journaled(attempt, operation.operationId, 'readback-verified', 'pruning', true));
   }
 
   confirmActivation(plan: FrozenPlan, operation: LifecyclePlanOperation, activation: ActivationRecord): void {
@@ -454,19 +625,33 @@ class Ledger {
     const desiredPairs = plan.operations.filter((row) => row.operation.scope.id === operation.scope.id && row.operation.coverage === 'desired-pair');
     const converged = desiredPairs.every((row) =>
       row.operation.operationId === operation.operationId
+      || row.operation.action === 'unchanged'
       || this.journalState(plan.attemptId, row.operation.operationId) === 'completed');
     this.state = {
       ...this.state,
-      scopes: converged
-        ? this.state.scopes.map((scope) => scope.id === operation.scope.id && scope.desired !== undefined
-          ? { ...scope, lastConverged: scope.desired, updatedAt: this.now }
-          : scope)
-        : this.state.scopes,
+      scopes: this.state.scopes.map((scope) => this.completedScope(plan, operation, scope, converged)),
     };
     this.replaceAttempt(plan, (attempt) => ({
       ...this.journaled(attempt, operation.operationId, 'completed', 'completed', true),
       completedAt: this.now,
     }));
+  }
+
+  private completedScope(plan: FrozenPlan, operation: LifecyclePlanOperation, scope: DeploymentScopeRecord, converged: boolean): DeploymentScopeRecord {
+    if (scope.id !== operation.scope.id) return scope;
+    const planned = plan.scopes.find((row) => row.scope.id === scope.id);
+    if (planned?.selectorMode === 'retired') {
+      const { desired: _desired, lastConverged: _converged, ...kept } = scope;
+      return {
+        ...kept,
+        lifecycle: 'retired',
+        selectorMode: 'retired',
+        updatedAt: this.now,
+        retiredAt: this.now,
+      };
+    }
+    if (!converged || scope.desired === undefined) return scope;
+    return { ...scope, lastConverged: scope.desired, updatedAt: this.now };
   }
 
   private replaceAttempt(plan: FrozenPlan, update: (attempt: LifecycleAttemptRecord) => LifecycleAttemptRecord): void {
@@ -592,6 +777,42 @@ function contentAddress(value: string): string {
   const hash = new CryptoHasher('sha256');
   hash.update(value);
   return `sha256:${hash.digest('hex')}`;
+}
+
+function retired(operation: LifecyclePlanOperation, changed: boolean): OperationStep {
+  return {
+    stop: false,
+    reason: null,
+    outcome: {
+      ...operation,
+      result: 'succeeded',
+      resourceState: 'absent',
+      activationState: 'inactive',
+      changed,
+      reason: null,
+    },
+  };
+}
+
+function mutationBegan(state: JournalState): boolean {
+  switch (state) {
+    case 'applying':
+    case 'applied':
+    case 'readback-verified':
+    case 'rollback':
+    case 'rolled-back':
+    case 'cleanup-pending':
+    case 'completed':
+    case 'failed':
+      return true;
+    case 'pending':
+    case 'not-attempted':
+      return false;
+    default: {
+      const unreachable: never = state;
+      throw new Error(`unknown journal state ${String(unreachable)}`);
+    }
+  }
 }
 
 function succeeded(operation: LifecyclePlanOperation, changed: boolean): OperationStep {

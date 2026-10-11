@@ -7,7 +7,8 @@ import { hosts } from './hosts';
 import { cleanupWriters, writers } from './hosts/writers';
 import { resolveSource, type PluginSource } from './source';
 import { readLifecycleState, readState, type LifecycleStateV2 } from './state';
-import { writeState } from './state-write';
+import { retirementTombstone } from './owned-activation';
+import { writeLifecycleState, writeState } from './state-write';
 import type { InstallRecord } from './state';
 import { runPin } from './pin';
 import { runUpdate, type UpdateFinding } from './update';
@@ -261,6 +262,31 @@ function reportScopesForTarget(
     });
   });
   return matches;
+}
+
+function withoutRetiredActivation(
+  state: LifecycleStateV2,
+  scopeId: string,
+  packageId: string,
+  nativeId: string,
+  retiredAt: string,
+): LifecycleStateV2 {
+  const activation = state.activations.find((row) => row.scopeId === scopeId && row.packageId === packageId && row.nativeId === nativeId);
+  if (activation === undefined) throw new Error(`activation '${packageId}' is not recorded for manual removal`);
+  const dropped = state.activations.filter((row) => row.scopeId !== scopeId || row.packageId !== packageId || row.nativeId !== nativeId);
+  const tombstone = retirementTombstone(activation, retiredAt);
+  if (tombstone === null) {
+    if (activation.ownership.kind === 'legacy-claim' && activation.route.kind === 'legacy-unverified' && (activation.ownership.prior === 'plgnz' || activation.ownership.prior === 'unrecorded')) {
+      return { ...state, stateGeneration: state.stateGeneration + 1, activations: dropped };
+    }
+    throw new Error(`activation '${packageId}' cannot retain a tombstone`);
+  }
+  return {
+    ...state,
+    stateGeneration: state.stateGeneration + 1,
+    activations: dropped,
+    tombstones: state.tombstones.some((row) => row.id === tombstone.id) ? state.tombstones : [...state.tombstones, tombstone],
+  };
 }
 
 function reportFor(
@@ -674,9 +700,12 @@ export async function main(argv: string[]): Promise<number> {
     }
     let state: InstallRecord[];
     let lifecycleState: LifecycleStateV2;
+    let lifecycleVersion: 1 | 2 | null;
     try {
       state = readState();
-      lifecycleState = readLifecycleState().state;
+      const loaded = readLifecycleState();
+      lifecycleState = loaded.state;
+      lifecycleVersion = loaded.sourceVersion;
     }
     catch (error) {
       const failure = reason('internal', 'internal.corrupt-state', unknownErrorDiagnostic(error));
@@ -785,7 +814,11 @@ export async function main(argv: string[]): Promise<number> {
         );
         break;
       }
-      if (record.ownership !== 'plgnz' && record.ownership !== undefined) {
+      const claimed = lifecycleState.activations.find((row) =>
+        row.scopeId === selected.scope.id && row.packageId === identity.package && row.nativeId === identity.nativeId);
+      const legacyRemoval = claimed?.ownership.kind === 'legacy-claim'
+        && (claimed.ownership.prior === 'plgnz' || claimed.ownership.prior === 'unrecorded');
+      if (record.ownership !== 'plgnz' && record.ownership !== undefined && !legacyRemoval) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', 'install ownership is not proven; refusing removal');
         break;
       }
@@ -854,13 +887,28 @@ export async function main(argv: string[]): Promise<number> {
       try {
         const current = state.find((candidate) => candidate.host === pair.record.host && candidate.id === pair.record.id);
         if (current === undefined) throw new Error(`install record '${pair.record.id}' disappeared before apply`);
-        const pending = { ...current, id: nativeId, pending: 'remove' as const };
-        const pendingState = state.map((candidate) => candidate === current ? pending : candidate);
-        writeState(pendingState);
+        const removeOptions = { source: pair.record.source, legacyNativeIds: pair.legacyNativeIds };
+        let pending = current;
+        if (lifecycleVersion === 2) {
+          const fresh = readLifecycleState();
+          if (fresh.sourceVersion !== 2 || fresh.state.stateGeneration !== lifecycleState.stateGeneration) {
+            throw new LifecycleCommandError(reason('internal', 'internal.invariant', `state generation moved before removal of '${nativeId}'`));
+          }
+          try {
+            lifecycleState = withoutRetiredActivation(fresh.state, operation.scope.id, operation.package, nativeId, new Date().toISOString());
+          } catch (error) {
+            throw new LifecycleCommandError(reason('internal', 'internal.invariant', unknownErrorDiagnostic(error)));
+          }
+          writeLifecycleState(lifecycleState, { globalPreflight: 'succeeded' });
+          state = readState();
+        } else {
+          pending = { ...current, id: nativeId, pending: 'remove' as const };
+          const pendingState = state.map((candidate) => candidate === current ? pending : candidate);
+          writeState(pendingState);
+          state = pendingState;
+        }
         pairMutationStarted = true;
         mutationStarted = true;
-        state = pendingState;
-        const removeOptions = { source: pair.record.source, legacyNativeIds: pair.legacyNativeIds };
         if (json) await withLogsOnStderr(() => pair.writer.remove(nativeId, removeOptions));
         else await pair.writer.remove(nativeId, removeOptions);
         pairChanged = true;
@@ -874,10 +922,14 @@ export async function main(argv: string[]): Promise<number> {
           if (error instanceof LifecycleCommandError) throw error;
           throw new LifecycleCommandError(reason('readback', 'readback.failed', unknownErrorDiagnostic(error)));
         }
-        const finalized = state.filter((candidate) => candidate !== pending);
         pairTerminalPhase = 'finalize';
-        writeState(finalized);
-        state = finalized;
+        if (lifecycleVersion === 2) {
+          state = readState();
+        } else {
+          const finalized = state.filter((candidate) => candidate !== pending);
+          writeState(finalized);
+          state = finalized;
+        }
         outcomes.push(outcomeFor(operation, { result: 'succeeded', changed: true }));
       } catch (error) {
         commandTerminalPhase = pairTerminalPhase;
