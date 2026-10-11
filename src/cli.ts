@@ -970,6 +970,60 @@ function mergeAddReports(reports: readonly LifecycleReport[]): LifecycleReport {
   });
 }
 
+async function runRecordedLifecycleRemove(
+  flags: VerbFlags,
+  target: string,
+  state: LifecycleStateV2,
+  selected: readonly HostWriter[],
+): Promise<LifecycleReport | null> {
+  const kinds = new Set(selected.map((writer) => writer.id));
+  const scopes = new Map(state.scopes.map((scope) => [scope.id, scope]));
+  const matches = state.activations.flatMap((activation) => {
+    const scope = scopes.get(activation.scopeId);
+    if (scope === undefined || scope.target.instance !== 'default' || !kinds.has(scope.target.kind)) return [];
+    const writer = selected.find((candidate) => candidate.id === scope.target.kind);
+    const alias = writer?.persistedNativeIdMayAlias?.(activation.nativeId, target) === true;
+    if (target !== activation.packageId && target !== activation.nativeId && !alias) return [];
+    return [{ scope }];
+  });
+  if (matches.length === 0 || matches.some((match) => !plannerKinds.has(match.scope.target.kind))) return null;
+  const byScope = new Map<string, LifecycleStateV2['scopes'][number]>();
+  for (const match of matches) byScope.set(match.scope.id, match.scope);
+  for (const scopeId of byScope.keys()) {
+    const inScope = state.activations.filter((activation) => activation.scopeId === scopeId).length;
+    const selectedInScope = matches.filter((match) => match.scope.id === scopeId).length;
+    if (inScope !== selectedInScope) return null;
+  }
+  const perHost = new Map<string, number>();
+  for (const match of matches) {
+    const count = (perHost.get(match.scope.target.kind) ?? 0) + 1;
+    if (count > 1) return null;
+    perHost.set(match.scope.target.kind, count);
+  }
+  let manifest;
+  try {
+    manifest = parseSyncManifest({
+      schemaVersion: 1,
+      entries: [...byScope.values()].map((scope) => ({
+        operation: 'retire-source',
+        scopeId: scope.id,
+        target: { kind: scope.target.kind, instance: scope.target.instance },
+      })),
+    });
+  } catch (error) {
+    if (error instanceof SyncManifestValidationError) return usageReport('remove', flags.dryRun, error.reason.diagnostic, error.reason.code);
+    throw error;
+  }
+  const executed = await runFrozenLifecycle({
+    manifest,
+    dryRun: flags.dryRun,
+    hosts: lifecyclePlannerHosts,
+    now: new Date().toISOString(),
+    command: 'remove',
+  });
+  return executed.report;
+}
+
 function recordedPackageOnDifferentSource(requested: string, state: LifecycleStateV2, kinds: ReadonlySet<string>): string | null {
   let resolved: ReturnType<typeof resolveSource>;
   try {
@@ -1371,6 +1425,13 @@ export async function main(argv: string[]): Promise<number> {
       const report = reportFor('remove', flags.dryRun, [], [], { terminalPhase: 'preflight', mutationStarted: false, reason: failure });
       printReport(report, mutationOutput);
       return exitCodeForLifecycleReport(report);
+    }
+    if (lifecycleVersion === 2) {
+      const recorded = await runRecordedLifecycleRemove(flags, target, lifecycleState, selection.selected);
+      if (recorded !== null) {
+        printReport(recorded, mutationOutput);
+        return exitCodeForLifecycleReport(recorded);
+      }
     }
     const pairs: Array<{
       writer: (typeof cleanupWriters)[number];

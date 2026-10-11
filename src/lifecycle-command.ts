@@ -9,7 +9,7 @@ export interface FrozenLifecycleCommand {
   readonly dryRun: boolean;
   readonly hosts: readonly PlannerHost[];
   readonly now: string;
-  readonly command?: 'add' | 'update';
+  readonly command?: 'add' | 'update' | 'remove';
 }
 
 export async function runFrozenLifecycle(command: FrozenLifecycleCommand): Promise<{

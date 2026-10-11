@@ -471,7 +471,7 @@ describe('state v2 public reader and writer', () => {
       'retire-source': ['retire-orphan'],
       add: desiredAndNoOp,
       update: desiredAndNoOp,
-      remove: ['remove'],
+      remove: ['remove', 'retire-orphan'],
       'legacy-recovery': lifecycleActions,
     };
     let rejectedCount = 0;
@@ -494,7 +494,7 @@ describe('state v2 public reader and writer', () => {
         }
       }
     }
-    expect(rejectedCount).toBe(19);
+    expect(rejectedCount).toBe(18);
   });
 
   test('cross-checks mutationStarted against every journal row', () => {

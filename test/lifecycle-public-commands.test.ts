@@ -1814,6 +1814,76 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('remove retires a recorded install, keeps retained data, and prints the versioned report', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const pluginJson = '{"name":"demo","version":"1.0.0","description":"kept"}\n';
+      const skill = '---\nname: demo\ndescription: kept\n---\n\nDemo.\n';
+      const retainedData = 'retained-data\n';
+      const retainedMetadata = 'retained-metadata\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('remove-retained', {
+        'plugin.json': pluginJson,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      harness.writeHome({
+        '.cursor/plugins/retained/demo/data/keep.txt': retainedData,
+        '.cursor/plugins/retained/demo/metadata/keep.txt': retainedMetadata,
+      });
+
+      const result = harness.run(['remove', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const operationIds = report?.plan.map((operation) => operation.operationId) ?? [];
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: unknown[];
+        tombstones?: Array<{ packageId?: string; nativeId?: string; retentionState?: string }>;
+      };
+      const tombstone = state.tombstones?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        oneReport: parsed !== null && !Array.isArray(parsed) && result.stdout.trim() === JSON.stringify(parsed, null, 2),
+        command: report?.command.name ?? null,
+        operationIdShape: operationIds.length > 0 && operationIds.every((operationId) => /^operation-v1-[0-9a-f]{64}$/u.test(operationId)),
+        rows: report?.outcomes.map((outcome) => ({
+          package: outcome.package,
+          action: outcome.action,
+          result: outcome.result,
+          resourceState: outcome.resourceState,
+          activationState: outcome.activationState,
+        })) ?? [],
+        pluginRemoved: result.stores.cursor.after.files['plugins/local/demo/plugin.json'] === undefined,
+        retainedData: bytesToText(result.stores.cursor.after.files['plugins/retained/demo/data/keep.txt'] ?? []),
+        retainedMetadata: bytesToText(result.stores.cursor.after.files['plugins/retained/demo/metadata/keep.txt'] ?? []),
+        retentionState: tombstone?.retentionState ?? null,
+        liveActivations: state.activations?.length ?? null,
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        oneReport: true,
+        command: 'remove',
+        operationIdShape: true,
+        rows: [{
+          package: 'demo',
+          action: 'retire-orphan',
+          result: 'succeeded',
+          resourceState: 'absent',
+          activationState: 'inactive',
+        }],
+        pluginRemoved: true,
+        retainedData,
+        retainedMetadata,
+        retentionState: 'plugin-state-retained',
+        liveActivations: 0,
+      });
+    });
+  });
 });
 
 function mcpCommand(bytes: number[] | undefined): string {

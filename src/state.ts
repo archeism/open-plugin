@@ -704,7 +704,7 @@ function commandAllowsJournalAction(command: LifecycleAttemptRecord['command'], 
         || action === 'retain-prior'
         || action === 'disable-nonconforming';
     case 'remove':
-      return action === 'remove';
+      return action === 'remove' || action === 'retire-orphan';
     case 'legacy-recovery':
       return true;
   }

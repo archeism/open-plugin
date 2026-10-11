@@ -99,7 +99,7 @@ export interface PlanLifecycleInput {
   readonly dryRun: boolean;
   readonly validatedAt: string;
   readonly hosts: readonly PlannerHost[];
-  readonly command?: 'add' | 'update';
+  readonly command?: 'add' | 'update' | 'remove';
 }
 
 type FrozenOperation = Extract<LifecyclePlan, { kind: 'frozen' }>['operations'][number];
