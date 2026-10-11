@@ -15,8 +15,8 @@
  * also writes a spec `mcp.json`; both are read, identical entries deduped —
  * spec §7.2.1 fixes the spec path as `mcp.json`).
  */
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import type { HostReader, InstalledPlugin, McpServerEntry } from '../host';
 import { claudeCodeRoot, homeRoot } from '../paths';
 import { collectPluginServers, collectUserServers, readJson, type PluginMcpCandidate } from '../mcp';
@@ -45,16 +45,50 @@ export function pluginsDir(): string {
   return join(claudeCodeRoot(), 'plugins');
 }
 
-/** An explicit Claude Code binary permits first install before its config root exists. */
+const CLAUDE_CODE_VERSION = /^(\d+\.\d+\.\d+) \(Claude Code\)\s*$/u;
 
-export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
-  const binary = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
-  if (!binary || !existsSync(binary)) return false;
+export type ClaudeCodeVersionObservation =
+  | { readonly kind: 'detected'; readonly version: string; readonly probeId: string }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'unparseable' };
+
+export function observeClaudeCodeVersion(
+  env: Record<string, string | undefined> = process.env,
+): ClaudeCodeVersionObservation {
+  const binary = claudeBinary(env);
+  if (binary === undefined || !existsSync(binary)) return { kind: 'unknown' };
   try {
     const result = bunShapedSpawnSync([binary, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+    if (result.exitCode !== 0) return { kind: 'unparseable' };
     const stdout = [...result.stdout].map((byte) => String.fromCharCode(byte)).join('');
-    return result.exitCode === 0 && /^\d+\.\d+\.\d+ \(Claude Code\)\s*$/.test(stdout);
-  } catch { return false; }
+    const version = CLAUDE_CODE_VERSION.exec(stdout)?.[1];
+    if (version === undefined) return { kind: 'unparseable' };
+    return { kind: 'detected', version, probeId: `claude-code-cli-${version}` };
+  } catch {
+    return { kind: 'unknown' };
+  }
+}
+
+function claudeBinary(env: Record<string, string | undefined>): string | undefined {
+  const explicit = env['OPEN_PLUGIN_CLAUDE_CODE_BIN'];
+  if (explicit !== undefined) return explicit;
+  const pathEnv = env['PATH'];
+  if (pathEnv === undefined) return undefined;
+  for (const dir of pathEnv.split(delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, 'claude');
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export function hasCurrentClaudeCodeBinary(env: Record<string, string | undefined> = process.env): boolean {
+  return observeClaudeCodeVersion(env).kind === 'detected';
 }
 
 function userConfigFile(): string {
