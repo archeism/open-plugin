@@ -1815,6 +1815,59 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('update drops a recorded pin whose server is absent from the new source', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-dropped', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      writeFileSync(join(source, 'mcp.json'), '{"mcpServers":{}}\n');
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const combined = `${result.stdout}\n${result.stderr}`;
+      const reasonCode = report?.outcomes[0]?.reason?.code ?? report?.summary.reason?.code ?? null;
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        result: report?.outcomes[0]?.result ?? null,
+        invariant: reasonCode === 'internal.invariant' || combined.includes('internal.invariant'),
+        droppedPin: combined.includes("dropped pin 'demo'"),
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        result: 'succeeded',
+        invariant: false,
+        droppedPin: true,
+        installed: revised,
+        pins: [],
+        retired: false,
+      });
+    });
+  });
+
   test('an unchanged sync keeps a recorded pin and the pinned readback fingerprint', async () => {
     await withLifecycleCliHarness((harness) => {
       const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
