@@ -1766,7 +1766,61 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('a recorded pin is reapplied before the projected fingerprint and survives update', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const revised = '{"name":"demo","version":"1.0.0","description":"from A revised"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-update', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(16));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+
+      writeFileSync(join(source, 'plugin.json'), revised);
+      const result = harness.run(['update', 'demo', '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[] }>;
+      };
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: state.activations?.find((row) => row.packageId === 'demo')?.pins ?? [],
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        action: 'update',
+        result: 'succeeded',
+        installed: revised,
+        command: pinnedCommand,
+        pins: ['demo'],
+      });
+    });
+  });
 });
+
+function mcpCommand(bytes: number[] | undefined): string {
+  if (bytes === undefined) return '';
+  const parsed = JSON.parse(bytesToText(bytes)) as { mcpServers?: { demo?: { command?: string } } };
+  return parsed.mcpServers?.demo?.command ?? '';
+}
 
 function recordNativeRoute(statePath: string, packageId: string): void {
   const recorded = JSON.parse(readFileSync(statePath, 'utf8')) as {
