@@ -276,7 +276,7 @@ function withoutRetiredActivation(
   const dropped = state.activations.filter((row) => row.scopeId !== scopeId || row.packageId !== packageId || row.nativeId !== nativeId);
   const tombstone = retirementTombstone(activation, retiredAt);
   if (tombstone === null) {
-    if (activation.ownership.kind === 'legacy-claim' && activation.route.kind === 'legacy-unverified') {
+    if (activation.ownership.kind === 'legacy-claim' && activation.route.kind === 'legacy-unverified' && (activation.ownership.prior === 'plgnz' || activation.ownership.prior === 'unrecorded')) {
       return { ...state, stateGeneration: state.stateGeneration + 1, activations: dropped };
     }
     throw new Error(`activation '${packageId}' cannot retain a tombstone`);
@@ -814,8 +814,11 @@ export async function main(argv: string[]): Promise<number> {
         );
         break;
       }
-      const legacyClaim = lifecycleVersion === 2 && record.ownership === 'legacy-unverified';
-      if (record.ownership !== 'plgnz' && record.ownership !== undefined && !legacyClaim) {
+      const claimed = lifecycleState.activations.find((row) =>
+        row.scopeId === selected.scope.id && row.packageId === identity.package && row.nativeId === identity.nativeId);
+      const legacyRemoval = claimed?.ownership.kind === 'legacy-claim'
+        && (claimed.ownership.prior === 'plgnz' || claimed.ownership.prior === 'unrecorded');
+      if (record.ownership !== 'plgnz' && record.ownership !== undefined && !legacyRemoval) {
         preflightFailure = reason('internal', 'internal.ambiguous-ownership', 'install ownership is not proven; refusing removal');
         break;
       }
