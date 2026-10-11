@@ -1716,6 +1716,56 @@ describe('public lifecycle commands', () => {
       });
     });
   });
+
+  test('update pointed at a different source locator keeps the recorded install', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const fromA = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const fromB = '{"name":"demo","version":"1.0.0","description":"from B"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const sourceA = harness.source('same-name-source-a', {
+        'plugin.json': fromA,
+        'skills/demo/SKILL.md': skill,
+      });
+      const sourceB = harness.source('same-name-source-b', {
+        'plugin.json': fromB,
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(12));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', sourceA, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+
+      const result = harness.run(['update', sourceB, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; nativeId?: string }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const live = state.activations?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+      const tombstone = state.tombstones?.find((row) => row.packageId === 'demo' || row.nativeId === 'demo');
+      const refused = result.exitCode !== 0
+        || report?.summary.result !== 'converged'
+        || (report?.outcomes ?? []).some((outcome) => outcome.result !== 'succeeded');
+
+      expect({
+        refused,
+        stderr: result.stderr,
+        installed: bytesToText(result.stores.cursor.after.files['plugins/local/demo/plugin.json'] ?? []),
+        retired: live === undefined || tombstone !== undefined || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+        sourceA: readFileSync(join(sourceA, 'plugin.json'), 'utf8'),
+        sourceB: readFileSync(join(sourceB, 'plugin.json'), 'utf8'),
+      }).toEqual({
+        refused: true,
+        stderr: '',
+        installed: fromA,
+        retired: false,
+        sourceA: fromA,
+        sourceB: fromB,
+      });
+    });
+  });
 });
 
 function recordNativeRoute(statePath: string, packageId: string): void {
