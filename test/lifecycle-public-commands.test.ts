@@ -1815,6 +1815,66 @@ describe('public lifecycle commands', () => {
     });
   });
 
+  test('an unchanged sync keeps a recorded pin and the pinned readback fingerprint', async () => {
+    await withLifecycleCliHarness((harness) => {
+      const original = '{"name":"demo","version":"1.0.0","description":"from A"}\n';
+      const skill = '---\nname: demo\ndescription: demo\n---\n\nDemo.\n';
+      harness.writeHome({ '.cursor/.keep': '' });
+      const source = harness.source('pin-sync', {
+        'plugin.json': original,
+        'mcp.json': '{"mcpServers":{"demo":{"command":"echo"}}}\n',
+        'skills/demo/SKILL.md': skill,
+      });
+      const cursor = harness.fakeNative('cursor', versionSteps(24));
+      const env = { OPEN_PLUGIN_CURSOR_BIN: cursor.path };
+      const added = harness.run(['add', source, '--target', 'cursor', '--json'], { env });
+      expect(added.exitCode).toBe(0);
+      const pinned = harness.run(['pin', '--target', 'cursor'], { env });
+      expect({ exitCode: pinned.exitCode, stderr: pinned.stderr }).toEqual({ exitCode: 0, stderr: '' });
+      const pinnedCommand = mcpCommand(pinned.stores.cursor.after.files['plugins/local/demo/mcp.json']);
+      expect(pinnedCommand.startsWith('/')).toBe(true);
+      const pinnedState = JSON.parse(bytesToText(pinned.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; fingerprints?: { source?: string; installed?: string } }>;
+      };
+      const pinnedActivation = pinnedState.activations?.find((row) => row.packageId === 'demo');
+      const pinnedFingerprint = pinnedActivation?.fingerprints?.installed ?? '';
+      const sourceFingerprint = pinnedActivation?.fingerprints?.source ?? '';
+
+      const result = harness.run(['sync', source, '--target', 'cursor', '--json'], { env });
+      const parsed = result.stdout.trim().startsWith('{') ? JSON.parse(result.stdout) : null;
+      const report = parsed === null ? null : parseLifecycleReport(parsed);
+      const state = JSON.parse(bytesToText(result.state.after ?? [])) as {
+        activations?: Array<{ packageId?: string; pins?: string[]; fingerprints?: { source?: string; installed?: string } }>;
+        tombstones?: Array<{ packageId?: string; nativeId?: string }>;
+      };
+      const activation = state.activations?.find((row) => row.packageId === 'demo');
+      const installedFingerprint = activation?.fingerprints?.installed ?? '';
+
+      expect({
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        action: report?.outcomes[0]?.action ?? null,
+        result: report?.outcomes[0]?.result ?? null,
+        reason: report?.outcomes[0]?.reason?.diagnostic ?? null,
+        command: mcpCommand(result.stores.cursor.after.files['plugins/local/demo/mcp.json']),
+        pins: activation?.pins ?? [],
+        retired: (state.tombstones ?? []).some((row) => row.packageId === 'demo' || row.nativeId === 'demo')
+          || (report?.outcomes ?? []).some((outcome) => outcome.action === 'retire-orphan'),
+        pinnedReadback: installedFingerprint === pinnedFingerprint && installedFingerprint !== sourceFingerprint && sourceFingerprint !== '',
+      }).toEqual({
+        exitCode: 0,
+        stderr: '',
+        action: 'unchanged',
+        result: 'succeeded',
+        reason: null,
+        command: pinnedCommand,
+        pins: ['demo'],
+        retired: false,
+        pinnedReadback: true,
+      });
+    });
+  });
+
   test('remove retires a recorded install, keeps retained data, and prints the versioned report', async () => {
     await withLifecycleCliHarness((harness) => {
       const pluginJson = '{"name":"demo","version":"1.0.0","description":"kept"}\n';
